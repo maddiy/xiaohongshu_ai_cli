@@ -53,6 +53,43 @@
 - 表格用于向用户展示；AI 与 CLI 之间仍使用 JSON。
 - 不得在表格中显示 Cookie、`xsec_token` 或其他账号凭据。
 
+## 统一工作目录
+
+为了让 Codex、Cursor、Claude Code、Copilot、CodeBuddy 等不同 AI 可以接续同一任务，所有临时工作文件统一保存在：
+
+```text
+.cache/workflows/
+├── <笔记ID>/
+│   ├── scan.json
+│   ├── reply_map.json
+│   └── drafts.json
+└── post/
+    └── note.json
+```
+
+文件用途：
+
+| 文件 | 用途 |
+|---|---|
+| `scan.json` | 最近一次评论扫描结果 |
+| `reply_map.json` | AI 生成并可继续修改的回复映射 |
+| `drafts.json` | 已组装、待预览或待发送的回复草稿 |
+| `post/note.json` | 待预览或待发布的笔记 |
+
+查询某篇笔记的固定路径和文件状态：
+
+```bash
+python3 main.py paths --note-id <笔记ID>
+```
+
+所有 AI 必须遵守：
+
+- 文件存在时先读取并复用，不重复扫描或重复存档。
+- 同一笔记不创建带日期、时间或批次号的副本。
+- 只有用户明确要求保留多个版本时才创建额外文件。
+- `.cache/` 已被 Git 忽略，不会提交账号工作数据。
+- 每条发送结果会立即写回 `drafts.json`；其他 AI 读取 `send_status` 后不会重复发送。
+
 ## 安装
 
 ### 1. 安装 Python
@@ -170,9 +207,10 @@ python3 main.py scan --note-id <笔记ID>
 ```bash
 python3 main.py scan \
   --note-id <笔记ID> \
-  --output scan.json \
   --json
 ```
+
+结果默认保存到 `.cache/workflows/<笔记ID>/scan.json`。
 
 ### 4. 生成回复草稿
 
@@ -187,8 +225,7 @@ python3 main.py drafts --note-id <笔记ID>
 ```bash
 python3 main.py drafts \
   --note-id <笔记ID> \
-  --from-scan scan.json \
-  --output drafts.json
+  --from-scan .cache/workflows/<笔记ID>/scan.json
 ```
 
 让 AI 生成 `reply_map.json` 后批量导入：
@@ -196,9 +233,8 @@ python3 main.py drafts \
 ```bash
 python3 main.py drafts \
   --note-id <笔记ID> \
-  --from-scan scan.json \
-  --batch reply_map.json \
-  --output drafts.json
+  --from-scan .cache/workflows/<笔记ID>/scan.json \
+  --batch .cache/workflows/<笔记ID>/reply_map.json
 ```
 
 ### 5. 预览并发送
@@ -206,19 +242,19 @@ python3 main.py drafts \
 先预览，不会发送：
 
 ```bash
-python3 main.py send --file drafts.json --dry-run
+python3 main.py send --file .cache/workflows/<笔记ID>/drafts.json --dry-run
 ```
 
 确认内容无误后发送：
 
 ```bash
-python3 main.py send --file drafts.json
+python3 main.py send --file .cache/workflows/<笔记ID>/drafts.json
 ```
 
 如果发送中断：
 
 ```bash
-python3 main.py send --file drafts.json --resume
+python3 main.py send --file .cache/workflows/<笔记ID>/drafts.json --resume
 ```
 
 ## AI 标准工作流
@@ -233,25 +269,21 @@ python3 main.py doctor --json
 python3 main.py articles --limit 20 --json
 
 # 3. 扫描评论
-python3 main.py scan \
-  --note-id <note_id> \
-  --output scan.json \
-  --json
+python3 main.py scan --note-id <note_id> --json
 
-# 4. AI 读取 scan.json 并生成 reply_map.json
+# 4. AI 读取固定 scan.json，并更新同目录 reply_map.json
 
 # 5. 生成可审核草稿
 python3 main.py drafts \
   --note-id <note_id> \
-  --from-scan scan.json \
-  --batch reply_map.json \
-  --output drafts.json
+  --from-scan .cache/workflows/<note_id>/scan.json \
+  --batch .cache/workflows/<note_id>/reply_map.json
 
 # 6. 预览
-python3 main.py send --file drafts.json --dry-run
+python3 main.py send --file .cache/workflows/<note_id>/drafts.json --dry-run
 
 # 7. 获得用户确认后发送
-python3 main.py send --file drafts.json
+python3 main.py send --file .cache/workflows/<note_id>/drafts.json
 ```
 
 查看完整的机器调用协议：
@@ -322,7 +354,7 @@ python3 main.py scan \
 
 扫描输出会自动移除 `xsec_token`、原始楼中楼对象等内部字段，只保留生成回复所需的数据。
 
-使用 `--output scan.json --json` 时，完整结果写入 `scan.json`，终端只返回文件路径和数量摘要，避免同一内容消耗两次 AI 上下文。
+使用 `--json` 时，完整结果写入固定的 `scan.json`，终端只返回文件路径和数量摘要，避免同一内容消耗两次 AI 上下文。
 
 ### AI 回复映射
 
@@ -393,7 +425,7 @@ python3 main.py post \
   --topics "读书,成长"
 ```
 
-AI 推荐使用 `note.json`：
+AI 推荐使用 `.cache/workflows/post/note.json`：
 
 ```json
 {
@@ -408,13 +440,13 @@ AI 推荐使用 `note.json`：
 先预览：
 
 ```bash
-python3 main.py post --input note.json --dry-run
+python3 main.py post --input .cache/workflows/post/note.json --dry-run
 ```
 
 用户确认后发布：
 
 ```bash
-python3 main.py post --input note.json
+python3 main.py post --input .cache/workflows/post/note.json
 ```
 
 使用 `private: true` 或命令参数 `--private` 可设为仅自己可见。
@@ -476,11 +508,11 @@ python3 main.py skipped --clear
 
 - 查询命令的 JSON 使用紧凑编码，不输出格式化空白。
 - `articles --json` 不输出 `xsec_token`。
-- `scan --output FILE --json` 只在终端返回摘要，评论正文保存在文件中。
+- `scan --json` 只在终端返回摘要，评论正文保存在固定工作文件中。
 - 扫描文件移除 `inline_subs` 等内部重复结构。
 - `analyze --json` 默认只输出统计、热门评论和活跃用户。
 - 只有确实需要全部分析明细时才使用 `analyze --json --details`。
-- AI 应按需读取 `scan.json`、`drafts.json`，不要在对话中重复粘贴完整 JSON。
+- AI 应复用固定的 `scan.json`、`reply_map.json` 和 `drafts.json`，不要重复扫描、存档或粘贴完整 JSON。
 
 ## 项目结构
 

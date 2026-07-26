@@ -26,6 +26,40 @@ description: >
 11. 表格只用于面向用户展示；AI 与命令行之间仍使用 JSON 文件或 `--json` 输出。
 12. 使用 `--output` 后优先读取生成的文件，不要求命令在终端重复输出完整数据。
 13. 评论分析默认使用摘要；只有用户明确需要全部明细时才使用 `analyze --json --details`。
+14. 所有 AI 必须复用 `.cache/workflows/<笔记ID>/`，不得为同一批任务另建临时存档。
+
+## 固定工作目录
+
+每篇笔记使用唯一目录：
+
+```text
+.cache/workflows/<笔记ID>/
+├── scan.json
+├── reply_map.json
+└── drafts.json
+```
+
+发布笔记统一使用：
+
+```text
+.cache/workflows/post/note.json
+```
+
+开始任务时先查询路径和已有文件：
+
+```bash
+python3 main.py paths --note-id <note_id>
+```
+
+约定：
+
+- `scan.json` 保存最近一次扫描结果。
+- `reply_map.json` 保存 AI 生成并可继续修改的回复映射。
+- `drafts.json` 保存已组装、待预览或待发送的草稿。
+- 文件存在时先读取并复用，不重复扫描或另存为带时间戳、批次号的副本。
+- 只有用户要求保留多个版本时，才创建额外文件。
+- `.cache` 已被 Git 忽略，不提交账号工作数据。
+- 发送状态会逐条写回 `drafts.json`；先读取 `send_status`，不得重复发送已标记为 `sent` 的项目。
 
 ## 表格展示规范
 
@@ -84,28 +118,28 @@ python3 main.py articles --limit 20 --json
 默认从最新评论通知快速扫描：
 
 ```bash
-python3 main.py scan --note-id <note_id> --output scan.json --json
+python3 main.py scan --note-id <note_id> --json
 ```
 
 扫描所有笔记的近期通知：
 
 ```bash
-python3 main.py scan --output scan.json --json
+python3 main.py scan --json
 ```
 
 只有用户明确要求检查全部历史评论时，才执行全量扫描：
 
 ```bash
 python3 main.py scan --note-id <note_id> \
-  --full-scan --with-subs --output scan.json --json
+  --full-scan --with-subs --json
 ```
 
 扫描不会向小红书写入数据。结果中的 `unreplied_level1` 和 `unreplied_subs` 是待回复候选评论。
-命令终端只返回文件路径和数量摘要；按需读取 `scan.json`，避免重复占用上下文。
+命令终端只返回固定文件路径和数量摘要；按需读取该笔记目录中的 `scan.json`。
 
 ## 生成回复草稿
 
-读取 `scan.json`，为适合回复的评论生成简洁、自然、有针对性的中文回复。
+读取 `.cache/workflows/<笔记ID>/scan.json`，为适合回复的评论生成简洁、自然、有针对性的中文回复。
 
 回复要求：
 
@@ -116,7 +150,7 @@ python3 main.py scan --note-id <note_id> \
 - 不虚构文章中不存在的事实、数据或承诺。
 - 无意义、已删除或不适合回复的评论可以跳过或归档。
 
-创建 `reply_map.json`：
+创建或更新 `.cache/workflows/<笔记ID>/reply_map.json`：
 
 ```json
 {
@@ -138,9 +172,8 @@ python3 main.py scan --note-id <note_id> \
 
 ```bash
 python3 main.py drafts --note-id <note_id> \
-  --from-scan scan.json \
-  --batch reply_map.json \
-  --output drafts.json
+  --from-scan .cache/workflows/<note_id>/scan.json \
+  --batch .cache/workflows/<note_id>/reply_map.json
 ```
 
 ## 预览和发送回复
@@ -148,19 +181,19 @@ python3 main.py drafts --note-id <note_id> \
 必须先预览：
 
 ```bash
-python3 main.py send --file drafts.json --dry-run
+python3 main.py send --file .cache/workflows/<note_id>/drafts.json --dry-run
 ```
 
 使用“回复草稿”表格向用户展示原评论和对应回复。获得用户明确确认后再发送：
 
 ```bash
-python3 main.py send --file drafts.json
+python3 main.py send --file .cache/workflows/<note_id>/drafts.json
 ```
 
 发送中断后可以续发：
 
 ```bash
-python3 main.py send --file drafts.json --resume
+python3 main.py send --file .cache/workflows/<note_id>/drafts.json --resume
 ```
 
 完成后先给出成功、失败和跳过数量，再使用“发送结果”表格展示明细，不得把失败描述成成功。
@@ -169,7 +202,7 @@ python3 main.py send --file drafts.json --resume
 
 AI 负责生成标题、正文和话题，本工具负责校验和发布。小红书图文笔记至少需要一张本地图片。
 
-优先创建 `note.json`：
+创建或更新 `.cache/workflows/post/note.json`：
 
 ```json
 {
@@ -184,13 +217,13 @@ AI 负责生成标题、正文和话题，本工具负责校验和发布。小�
 先校验和预览：
 
 ```bash
-python3 main.py post --input note.json --dry-run
+python3 main.py post --input .cache/workflows/post/note.json --dry-run
 ```
 
 向用户展示标题、正文摘要、图片数量、话题和可见范围。获得明确确认后发布：
 
 ```bash
-python3 main.py post --input note.json
+python3 main.py post --input .cache/workflows/post/note.json
 ```
 
 没有明确授权时不得发布，也不得把 `--dry-run` 的结果描述成已经发布。

@@ -24,7 +24,7 @@ import json
 import os
 import shutil
 import sys
-import tempfile
+from config import WORK_DIR
 from lib.xhs_client import XHSClient
 from lib.scanner import CommentScanner
 from lib.replier import Replier
@@ -44,6 +44,21 @@ def write_json(data, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
     return path
+
+
+def workflow_paths(note_id):
+    """返回一篇笔记的固定工作文件路径，供不同 AI 接续使用。"""
+    safe_note_id = "".join(
+        char for char in str(note_id or "all")
+        if char.isalnum() or char in ("-", "_")
+    ) or "all"
+    directory = os.path.abspath(os.path.join(WORK_DIR, safe_note_id))
+    return {
+        "directory": directory,
+        "scan": os.path.join(directory, "scan.json"),
+        "reply_map": os.path.join(directory, "reply_map.json"),
+        "drafts": os.path.join(directory, "drafts.json"),
+    }
 
 
 def call_for_output(func, *args, quiet=False, **kwargs):
@@ -227,7 +242,7 @@ def cmd_scan(args):
             output = compact_scan_result(result)
             path = write_json(
                 output,
-                args.output or os.path.join(tempfile.gettempdir(), f"unreplied_{note_id}.json"),
+                args.output or workflow_paths(note_id)["scan"],
             )
             if args.json:
                 print_json({"ok": True, "output_file": path, "summary": scan_summary(output)})
@@ -235,13 +250,13 @@ def cmd_scan(args):
                 print(f"\n📁 结果保存到 {path}")
         else:
             output = compact_scan_result(result)
-            output_file = write_json(output, args.output) if args.output else None
+            output_file = write_json(
+                output,
+                args.output or workflow_paths("all")["scan"],
+            )
             if args.json:
                 response = {"ok": True, "summary": scan_summary(output)}
-                if output_file:
-                    response["output_file"] = output_file
-                else:
-                    response["data"] = output
+                response["output_file"] = output_file
                 print_json(response)
             elif output_file:
                 print(f"\n📁 结果保存到 {output_file}")
@@ -281,7 +296,7 @@ def cmd_scan(args):
         output = compact_scan_result(result)
         path = write_json(
             output,
-            args.output or os.path.join(tempfile.gettempdir(), f"unreplied_{args.note_id}.json"),
+            args.output or workflow_paths(args.note_id)["scan"],
         )
         if args.json:
             print_json({"ok": True, "output_file": path, "summary": scan_summary(output)})
@@ -309,8 +324,8 @@ def cmd_scan(args):
         compact_results = [compact_scan_result(item) for item in results]
         output_file = write_json(
             {"notes": compact_results, "source": "full_scan"},
-            args.output,
-        ) if args.output else None
+            args.output or workflow_paths("all")["scan"],
+        )
         if args.json:
             response = {
                 "ok": True,
@@ -319,10 +334,7 @@ def cmd_scan(args):
                     "unreplied": total_l1 + total_subs,
                 },
             }
-            if output_file:
-                response["output_file"] = output_file
-            else:
-                response["data"] = {"notes": compact_results}
+            response["output_file"] = output_file
             print_json(response)
         elif output_file:
             print(f"\n📁 结果保存到 {output_file}")
@@ -383,8 +395,7 @@ def cmd_drafts(args):
         )
 
     # 保存草稿文件
-    draft_path = args.output or os.path.join(
-        tempfile.gettempdir(), f"drafts_{args.note_id}.json")
+    draft_path = args.output or workflow_paths(args.note_id)["drafts"]
     draft_path = write_json(drafts, draft_path)
     print(f"\n📁 草稿已保存到 {draft_path}")
     print(f"💡 审核修改后运行: python3 main.py send --file {draft_path}")
@@ -404,12 +415,17 @@ def cmd_send(args):
         drafts = json.load(f)
 
     items = drafts.get("drafts", [])
-    to_send = [d for d in items if d.get("action") == "send"]
+    to_send = [
+        d for d in items
+        if d.get("action") == "send" and d.get("send_status") != "sent"
+    ]
+    sent = [d for d in items if d.get("send_status") == "sent"]
     to_skip = [d for d in items if d.get("action") == "skip"]
     to_archive = [d for d in items if d.get("action") == "archive"]
 
     print(f"\n📋 草稿概览")
     print(f"  ✅ 待发送: {len(to_send)}")
+    print(f"  ☑️ 已发送: {len(sent)}")
     print(f"  ⏭️ 本次跳过: {len(to_skip)}")
     print(f"  📁 永久跳过: {len(to_archive)}")
 
@@ -436,7 +452,9 @@ def cmd_send(args):
             return
 
     replier = Replier()
-    replier.send_drafts(drafts, resume=args.resume)
+    replier.send_drafts(drafts, resume=args.resume, state_file=args.file)
+    saved_path = write_json(drafts, args.file)
+    print(f"💾 发送状态已保存到 {saved_path}")
 
 
 def cmd_reply(args):
@@ -615,20 +633,38 @@ def cmd_ai_help(args):
         },
         "workflows": {
             "reply": [
-                "python3 main.py scan --note-id <id> --output scan.json --json",
-                "生成 reply_map.json，格式为 {comment_id: reply}",
-                "python3 main.py drafts --note-id <id> --from-scan scan.json --batch reply_map.json --output drafts.json",
-                "python3 main.py send --file drafts.json --dry-run",
-                "python3 main.py send --file drafts.json --confirm",
+                "python3 main.py paths --note-id <id>",
+                "python3 main.py scan --note-id <id> --json",
+                "读取固定 scan.json，生成同目录 reply_map.json",
+                "python3 main.py drafts --note-id <id> --from-scan .cache/workflows/<id>/scan.json --batch .cache/workflows/<id>/reply_map.json",
+                "python3 main.py send --file .cache/workflows/<id>/drafts.json --dry-run",
+                "python3 main.py send --file .cache/workflows/<id>/drafts.json",
             ],
             "post": [
-                "创建 note.json，字段为 title/body/images/topics/private",
-                "python3 main.py post --input note.json --dry-run",
-                "python3 main.py post --input note.json",
+                "创建 .cache/workflows/post/note.json",
+                "python3 main.py post --input .cache/workflows/post/note.json --dry-run",
+                "python3 main.py post --input .cache/workflows/post/note.json",
             ],
         },
     }
     print_json(spec)
+
+
+def cmd_paths(args):
+    """显示固定工作目录及文件状态，方便不同 AI 接续任务。"""
+    paths = workflow_paths(args.note_id)
+    files = {
+        key: {"path": value, "exists": os.path.exists(value)}
+        for key, value in paths.items()
+        if key != "directory"
+    }
+    print_json({
+        "ok": True,
+        "note_id": args.note_id,
+        "directory": paths["directory"],
+        "files": files,
+        "post_note": os.path.abspath(os.path.join(WORK_DIR, "post", "note.json")),
+    })
 
 
 def add_common_args(parser):
@@ -761,6 +797,8 @@ def main():
     p_doctor = subparsers.add_parser("doctor", help="检查本地环境与配置（不联网）")
     p_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     subparsers.add_parser("ai-help", help="输出 AI 调用协议（JSON）")
+    p_paths = subparsers.add_parser("paths", help="显示指定笔记的固定工作文件路径")
+    p_paths.add_argument("--note-id", default="all", help="笔记ID（默认 all）")
 
     args = parser.parse_args()
 
@@ -780,6 +818,7 @@ def main():
         "analyze": cmd_analyze,
         "doctor": cmd_doctor,
         "ai-help": cmd_ai_help,
+        "paths": cmd_paths,
     }
     commands[args.command](args)
 

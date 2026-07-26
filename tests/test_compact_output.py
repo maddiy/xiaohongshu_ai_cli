@@ -5,9 +5,10 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import main
+from lib.replier import Replier
 
 
 class CompactOutputTests(unittest.TestCase):
@@ -106,6 +107,41 @@ class CompactOutputTests(unittest.TestCase):
             self.assertNotIn("不应在终端重复的评论正文", stdout.getvalue())
             self.assertEqual(response["summary"]["unreplied_level1"], 1)
             self.assertNotIn("inline_subs", saved["unreplied_level1"][0])
+
+    def test_workflow_paths_are_stable(self):
+        first = main.workflow_paths("note-1")
+        second = main.workflow_paths("note-1")
+        self.assertEqual(first, second)
+        self.assertTrue(first["scan"].endswith(
+            ".cache/workflows/note-1/scan.json"
+        ))
+
+    @patch("lib.replier.time.sleep")
+    def test_send_state_is_persisted_and_not_resent(self, _sleep):
+        client = MagicMock()
+        client.reply.return_value = (True, "", "")
+        client.is_skipped.return_value = False
+        replier = Replier(client)
+        drafts = {
+            "note_id": "n1",
+            "drafts": [{
+                "comment_id": "c1",
+                "nickname": "用户",
+                "content": "评论",
+                "reply": "回复",
+                "action": "send",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "drafts.json")
+            replier.send_drafts(drafts, state_file=state_file)
+            with open(state_file, encoding="utf-8") as saved_file:
+                saved = json.load(saved_file)
+            self.assertEqual(saved["drafts"][0]["send_status"], "sent")
+
+            second = Replier(client)
+            second.send_drafts(saved, state_file=state_file)
+            self.assertEqual(client.reply.call_count, 1)
 
 
 if __name__ == "__main__":

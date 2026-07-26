@@ -26,7 +26,9 @@ python3 main.py scan --note-id <note_id> --full-scan --xsec-token <t>
 
 ```bash
 python3 main.py drafts --note-id <note_id>
-python3 main.py drafts --note-id <note_id> --from-scan scan.json --batch reply_map.json --output drafts.json
+python3 main.py drafts --note-id <note_id> \
+  --from-scan .cache/workflows/<note_id>/scan.json \
+  --batch .cache/workflows/<note_id>/reply_map.json
 ```
 
 Without `--batch`, opens an interactive prompt for reviewing and entering drafts.
@@ -34,8 +36,8 @@ Without `--batch`, opens an interactive prompt for reviewing and entering drafts
 ## `send` — Send replies
 
 ```bash
-python3 main.py send --file drafts.json --dry-run
-python3 main.py send --file drafts.json --confirm
+python3 main.py send --file .cache/workflows/<note_id>/drafts.json --dry-run
+python3 main.py send --file .cache/workflows/<note_id>/drafts.json
 ```
 
 - `--dry-run` — preview without sending
@@ -70,8 +72,8 @@ python3 main.py post \
 AI-friendly JSON input:
 
 ```bash
-python3 main.py post --input note.json --dry-run
-python3 main.py post --input note.json
+python3 main.py post --input .cache/workflows/post/note.json --dry-run
+python3 main.py post --input .cache/workflows/post/note.json
 ```
 
 ---

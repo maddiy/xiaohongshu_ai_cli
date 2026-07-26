@@ -3,6 +3,8 @@
 支持三种模式: smart(逐条确认) / generic(通用话术) / draft(先生成草稿再发送)
 支持跳过列表：回复失败的评论自动存档，下次扫描自动跳过
 """
+import json
+import os
 import time
 import random
 from config import REQUEST_DELAY, GENERIC_REPLIES
@@ -184,7 +186,20 @@ class Replier:
             print(f"  ⚠️ {unmatched} 条评论在映射中未找到，已自动跳过")
         return drafts
 
-    def send_drafts(self, drafts: dict, resume: bool = False) -> dict:
+    @staticmethod
+    def _save_state(drafts: dict, state_file: str = None):
+        """原子替换草稿状态文件，避免中断后丢失已发送进度。"""
+        if not state_file:
+            return
+        state_file = os.path.abspath(state_file)
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        temp_file = f"{state_file}.tmp"
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(drafts, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(temp_file, state_file)
+
+    def send_drafts(self, drafts: dict, resume: bool = False,
+                    state_file: str = None) -> dict:
         """
         根据草稿文件批量发送回复
 
@@ -197,7 +212,11 @@ class Replier:
         note_id = drafts.get("note_id", "")
         items = drafts.get("drafts", [])
 
-        to_send = [d for d in items if d.get("action") == "send"]
+        # 已成功发送的草稿永远不重复发送，确保不同 AI 可安全接续。
+        to_send = [
+            d for d in items
+            if d.get("action") == "send" and d.get("send_status") != "sent"
+        ]
         to_archive = [d for d in items if d.get("action") == "archive"]
 
         # 先处理永久跳过（加入跳过列表）
@@ -210,22 +229,25 @@ class Replier:
                     reason="manual", note_id=note_id
                 )
                 archived_count += 1
+            d["send_status"] = "archived"
             self.stats["skip"] += 1
         if archived_count:
             print(f"📁 {archived_count} 条新评论已加入跳过列表")
+        self._save_state(drafts, state_file)
 
-        # 断点续发：跳过已完成的
-        if resume:
-            remaining = []
-            resumed_skip = 0
-            for d in to_send:
-                if self.client.is_skipped(d["comment_id"]):
-                    resumed_skip += 1
-                else:
-                    remaining.append(d)
-            if resumed_skip:
-                print(f"🔄 断点续发: {resumed_skip} 条已完成/失败，跳过")
-            to_send = remaining
+        # 无论由哪个 AI 接续，都跳过已发送或已归档的评论。
+        remaining = []
+        completed_skip = 0
+        for d in to_send:
+            if (d.get("send_status") == "sent"
+                    or self.client.is_skipped(d["comment_id"])):
+                completed_skip += 1
+            else:
+                remaining.append(d)
+        if completed_skip:
+            label = "断点续发" if resume else "状态检查"
+            print(f"🔄 {label}: {completed_skip} 条已完成/归档，跳过")
+        to_send = remaining
 
         # 发送回复
         total = len(to_send)
@@ -251,11 +273,19 @@ class Replier:
             if ok:
                 print(f"  ✅ 成功")
                 self.stats["success"] += 1
+                d["send_status"] = "sent"
+                d["sent_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                d.pop("last_error", None)
+                d.pop("error_type", None)
             else:
                 print(f"  ❌ 失败 ({err_type}): {err[:120]}")
                 self.stats["fail"] += 1
+                d["send_status"] = "failed"
+                d["error_type"] = err_type
+                d["last_error"] = err[:200]
                 self._archive_on_failure(cid, nick, content, err, note_id, err_type)
 
+            self._save_state(drafts, state_file)
             time.sleep(REQUEST_DELAY)
 
         self._print_summary()
