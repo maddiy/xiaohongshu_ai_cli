@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-小红书评论自动回复工具
+小红书AI智能运营
 
 功能:
   1. login    - 登录（默认读取 Firefox 浏览器 Cookie）
