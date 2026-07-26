@@ -11,6 +11,7 @@
   6. reply    - 扫描+回复（传统交互模式）
   7. analyze  - 对评论进行统计分析
   8. skipped  - 管理跳过列表（查看/移除）
+  9. post     - 发布小红书笔记（内容由 AI 生成）
 
 依赖: xiaohongshu-cli (pip install xiaohongshu-cli)
 配置: 修改 config.py 中的 AUTHOR_USER_ID
@@ -24,6 +25,7 @@ from lib.xhs_client import XHSClient
 from lib.scanner import CommentScanner
 from lib.replier import Replier
 from lib.analyzer import CommentAnalyzer
+from lib import poster as poster_lib
 
 
 def cmd_login(args):
@@ -349,6 +351,29 @@ def cmd_skipped(args):
     print(f"💡 清空: python3 main.py skipped --clear")
 
 
+def cmd_post(args):
+    """发布小红书笔记（内容由 AI 生成，本命令只负责发布）"""
+    title = args.title or ""
+    body = args.body or ""
+    if not title or not body:
+        print("❌ 必须指定 --title 和 --body")
+        return
+
+    images = args.images or []
+    if not images:
+        print("❌ 至少需要一张图片: --images 图片1.jpg [图片2.jpg ...]")
+        return
+
+    topics = [t.strip() for t in (args.topics or "").split(",") if t.strip()] if args.topics else None
+
+    try:
+        ok = poster_lib.publish(title, body, images, topics, private=args.private)
+        if not ok:
+            print("⚠️ 发布可能未成功，请检查小红书客户端状态")
+    except Exception as e:
+        print(f"❌ 发布失败: {e}")
+
+
 def cmd_analyze(args):
     """分析评论"""
     if not args.note_id:
@@ -411,6 +436,8 @@ def main():
   python3 main.py skipped --clear                          # 清空跳过列表
 
   python3 main.py analyze --note-id <note_id>              # 分析评论（优先缓存）
+  python3 main.py post --title "标题" --body "正文" --images 图1.jpg 图2.jpg
+  python3 main.py post --title "标题" --body "正文" --images 图1.jpg --topics "读书,成长"
 """
     )
     subparsers = parser.add_subparsers(dest="command", help="子命令")
@@ -466,6 +493,14 @@ def main():
     add_common_args(p_analyze)
     p_analyze.add_argument("--note-title", default="", help="笔记标题（可选）")
 
+    # post — 发布小红书笔记（内容由 AI 生成）
+    p_post = subparsers.add_parser("post", help="发布小红书笔记")
+    p_post.add_argument("--title", required=True, help="笔记标题")
+    p_post.add_argument("--body", required=True, help="笔记正文")
+    p_post.add_argument("--images", nargs="+", required=True, help="图片路径（至少1张）")
+    p_post.add_argument("--topics", help="话题标签，逗号分隔（如: 读书,成长）")
+    p_post.add_argument("--private", action="store_true", help="私密发布")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -479,6 +514,7 @@ def main():
         "drafts": cmd_drafts,
         "send": cmd_send,
         "reply": cmd_reply,
+        "post": cmd_post,
         "skipped": cmd_skipped,
         "analyze": cmd_analyze,
     }

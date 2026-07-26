@@ -15,6 +15,7 @@
 | `reply` | 传统模式：扫描后逐条交互式回复（支持 's' 永久跳过） |
 | `skipped` | 管理跳过列表（查看、移除、清空） |
 | `analyze` | 评论数据统计分析 |
+| `post` | 发布小红书笔记（内容由 AI 生成，本工具只负责发布） |
 
 ## 安装
 
@@ -233,18 +234,35 @@ action 取值：
 - `"skip"` — 本次跳过（下次扫描仍会出现）
 - `"archive"` — 永久跳过，加入跳过列表（下次扫描不再出现）
 
+### 6. 发布小红书笔记
+
+发布笔记到小红书。**内容由 AI（CodeBuddy）生成**，本工具只负责推送到小红书。
+
+```bash
+# 基本发布
+python3 main.py post --title "标题" --body "正文" --images 封面.jpg 图2.jpg
+
+# 带话题标签
+python3 main.py post --title "标题" --body "正文" --images 封面.jpg --topics "读书,成长"
+
+# 私密发布
+python3 main.py post --title "标题" --body "正文" --images 封面.jpg --private
+```
+
+**AI 辅助生成内容：** 当你需要发帖时，直接告诉 CodeBuddy 你想发什么话题，AI 会帮你生成标题和正文，然后调用此命令发布。无需配置任何外部 API。
+
 ## 项目结构
 
 ```
-├── main.py              # 统一入口，8个子命令
+├── main.py              # 统一入口，9个子命令
 ├── config.py            # 配置文件
 ├── lib/
 │   ├── xhs_client.py    # 小红书 CLI 封装（API + 缓存 + 跳过列表 + 通知）
 │   ├── scanner.py       # 评论扫描器（过滤跳过列表）
 │   ├── replier.py       # 回复器（draft/send/reply三模式）
-│   └── analyzer.py      # 评论分析器
+│   ├── analyzer.py      # 评论分析器
+│   └── poster.py        # 发帖器（内容发布）
 ├── .cache/              # 缓存 + 跳过列表（自动生成）
-└── legacy/              # 早期脚本（参考）
 ```
 
 ## 性能优化

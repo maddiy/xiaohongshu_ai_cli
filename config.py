@@ -28,3 +28,4 @@ CACHE_TTL_MINUTES = 30         # 缓存有效期（分钟），超时后自动�
 
 # 跳过列表（不想回复 / 无法回复的评论存档）
 SKIPPED_FILE = os.path.join(CACHE_DIR, "skipped.json")  # 跳过列表存储路径
+
