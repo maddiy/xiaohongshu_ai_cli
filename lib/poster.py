@@ -1,6 +1,6 @@
 """发帖模块 — 小红书写笔记发布
 
-本模块不包含 AI 生成能力。AI 内容生成由 CodeBuddy 直接完成，
+本模块不包含 AI 生成能力。AI 内容生成由 AI 编程助手（CodeBuddy、Cursor、Copilot 等）直接完成，
 本模块仅负责将生成好的标题、正文通过 xhs CLI 发布出去。
 """
 

@@ -17,6 +17,41 @@
 | `analyze` | 评论数据统计分析 |
 | `post` | 发布小红书笔记（内容由 AI 生成，本工具只负责发布） |
 
+## AI 功能（零配置，开箱即用）
+
+以下所有 AI 能力均由 AI 编程助手提供，只需用自然语言描述需求，**无需配置任何外部 API Key 或模型**。兼容主流工具：
+
+| 工具 | 说明 |
+|------|------|
+| **Cursor** | AI-first IDE |
+| **GitHub Copilot** | GitHub 官方 |
+| **Claude Code** | Anthropic 出品 |
+| **OpenAI Codex** | OpenAI 出品 |
+| **CodeBuddy** | 腾讯云 AI 编程助手 |
+| **Windsurf** | Codeium 出品 |
+| **Aider** | 开源终端 AI 编程 |
+| **Amazon Q Developer** | AWS 出品 |
+| **Sourcegraph Cody** | 企业级 AI 编程 |
+| **JetBrains AI Assistant** | JetBrains 官方 |
+| **Tabnine** | 老牌 AI 代码补全 |
+| **Continue** | 开源 VS Code / JetBrains 插件 |
+| **Cline** | VS Code 插件 |
+| **Trae** | 字节跳动 AI IDE |
+| **通义灵码** | 阿里云 AI 编程助手 |
+| **文心快码** | 百度 AI 编程助手 |
+
+在任意上述工具中打开本项目，对话即可：
+
+| 功能 | 你只需说 | 效果 |
+|------|----------|------|
+| **批量回复评论** | "帮我处理最新评论" | AI 读取每条评论内容，逐条生成针对性回复，保存为草稿 |
+| **评论情感分析** | "分析这篇笔记的评论" | 自动统计情感倾向、高频关键词、用户活跃度 |
+| **生成笔记内容** | "帮我写一篇关于 XX 的小红书笔记" | AI 生成标题、正文、话题标签 |
+| **发布笔记** | "把这篇内容发到小红书" | AI 调用 `post` 命令一键发布 |
+| **回复策略建议** | "这些评论该怎么回" | AI 按评论类型给出差异化回复建议 |
+
+> **核心思路**：你描述 → AI 生成 → CLI 执行。工具本身只是命令行壳，所有智能能力来自你使用的 AI 编程助手。
+
 ## 安装
 
 ```bash
@@ -191,7 +226,7 @@ python3 main.py send --file /tmp/drafts_note.json --confirm
 # 1. 通知快速扫描
 python3 main.py scan --note-id <note_id> --from-notifications
 
-# 2. 让AI生成所有回复（在CodeBuddy中），保存为 reply_map.json
+# 2. 让AI生成所有回复（在任意 AI 编程助手中），保存为 reply_map.json
 
 # 3. 批量导入生成草稿
 python3 main.py drafts --note-id <note_id> \
@@ -236,7 +271,7 @@ action 取值：
 
 ### 6. 发布小红书笔记
 
-发布笔记到小红书。**内容由 AI（CodeBuddy）生成**，本工具只负责推送到小红书。
+发布笔记到小红书。**内容由 AI 编程助手生成**，本工具只负责推送到小红书。
 
 ```bash
 # 基本发布
@@ -249,7 +284,7 @@ python3 main.py post --title "标题" --body "正文" --images 封面.jpg --topi
 python3 main.py post --title "标题" --body "正文" --images 封面.jpg --private
 ```
 
-**AI 辅助生成内容：** 当你需要发帖时，直接告诉 CodeBuddy 你想发什么话题，AI 会帮你生成标题和正文，然后调用此命令发布。无需配置任何外部 API。
+**AI 辅助生成内容：** 当你需要发帖时，在任意 AI 编程助手中描述话题，AI 会帮你生成标题和正文，然后调用此命令发布。无需配置任何外部 API。
 
 ## 项目结构
 
