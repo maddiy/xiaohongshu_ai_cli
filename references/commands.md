@@ -47,9 +47,14 @@ python3 main.py send --file drafts.json --confirm
 python3 main.py analyze --note-id <note_id>
 python3 main.py analyze --note-id <note_id> --xsec-token <token>
 python3 main.py analyze --note-id <note_id> --refresh   # force refresh
+python3 main.py analyze --note-id <note_id> --json      # compact AI summary
+python3 main.py analyze --note-id <note_id> --json --details  # full details
 ```
 
 Outputs sentiment classification, top comments by likes, active users, etc.
+
+JSON output is compact by default. Use `--details` only when every classified
+comment is required.
 
 ## `post` — Publish a new note
 
