@@ -747,9 +747,9 @@ def main():
     # drafts — 生成回复草稿
     p_drafts = subparsers.add_parser("drafts", help="生成回复草稿（逐条确认后保存）")
     add_common_args(p_drafts)
-    p_drafts.add_argument("--output", help="草稿文件保存路径（默认系统临时目录）")
+    p_drafts.add_argument("--output", help="草稿文件保存路径（默认固定工作目录）")
     p_drafts.add_argument("--from-scan", metavar="FILE",
-                          help="从已有扫描结果文件加载（跳过重扫，如 /tmp/unreplied_xxx.json）")
+                          help="从已有扫描结果文件加载（跳过重新扫描）")
     p_drafts.add_argument("--batch", metavar="FILE",
                           help="批量导入AI预写的回复映射JSON（非交互），格式: {\"comment_id\": \"回复文案\"}")
 
