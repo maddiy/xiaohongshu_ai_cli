@@ -114,8 +114,10 @@ python3 main.py drafts \
 | `--output` | 覆盖默认草稿路径 |
 | `--with-subs` | 实时扫描时包含完整楼中楼 |
 | `--refresh` | 实时扫描时忽略缓存 |
+| `--allow-unverified` | 允许使用未核验回复状态的扫描文件，有重复回复风险 |
 
 未指定 `--output` 时，草稿自动保存到固定的 `drafts.json`。
+默认要求扫描文件中的 `reply_status_verified` 为 `true`。
 
 ## `send`：预览和发送回复
 

@@ -32,6 +32,15 @@ class CompactOutputTests(unittest.TestCase):
             },
         )
 
+    def test_compact_scan_keeps_verification_state(self):
+        compact = main.compact_scan_result({
+            "note_id": "n1",
+            "reply_status_verified": True,
+            "unreplied_level1": [],
+            "unreplied_subs": [],
+        })
+        self.assertTrue(compact["reply_status_verified"])
+
     def test_scan_summary_does_not_repeat_comments(self):
         result = {
             "note_id": "n1",
@@ -115,6 +124,51 @@ class CompactOutputTests(unittest.TestCase):
         self.assertTrue(first["scan"].endswith(
             ".cache/workflows/note-1/scan.json"
         ))
+
+    def test_drafts_reject_unverified_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scan_file = os.path.join(temp_dir, "scan.json")
+            with open(scan_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": False,
+                    "unreplied_level1": [{"comment_id": "c1"}],
+                    "unreplied_subs": [],
+                }, f)
+            args = argparse.Namespace(
+                note_id="n1",
+                from_scan=scan_file,
+                allow_unverified=False,
+                xsec_token="",
+                with_subs=False,
+                refresh=False,
+                batch=None,
+                output=None,
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main.cmd_drafts(args)
+            self.assertIn("未确认评论回复状态", stdout.getvalue())
+
+    def test_merge_drafts_preserves_sent_history(self):
+        existing = {
+            "drafts": [{
+                "comment_id": "c1",
+                "reply": "已发送回复",
+                "action": "send",
+                "send_status": "sent",
+            }],
+        }
+        new = {
+            "note_id": "n1",
+            "drafts": [
+                {"comment_id": "c1", "reply": "不应覆盖", "action": "send"},
+                {"comment_id": "c2", "reply": "新回复", "action": "send"},
+            ],
+        }
+        merged = main.merge_draft_history(existing, new)
+        self.assertEqual(merged["drafts"][0]["reply"], "已发送回复")
+        self.assertEqual(merged["drafts"][1]["comment_id"], "c2")
 
     @patch("lib.replier.time.sleep")
     def test_send_state_is_persisted_and_not_resent(self, _sleep):

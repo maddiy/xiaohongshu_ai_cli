@@ -91,7 +91,10 @@ def compact_scan_result(result):
             compact_comment(item) for item in result.get("unreplied_subs", [])
         ],
     }
-    for key in ("total", "total_new_notifications", "pending_subs", "filtered_skipped"):
+    for key in (
+        "total", "total_new_notifications", "pending_subs",
+        "filtered_skipped", "reply_status_verified",
+    ):
         if key in result:
             compact[key] = result[key]
     if result.get("per_note"):
@@ -145,6 +148,29 @@ def compact_analysis(result):
             )[:10]
         ),
     }
+
+
+def merge_draft_history(existing, new):
+    """合并固定草稿文件，保留历史发送状态并追加新评论。"""
+    merged = dict(new)
+    old_items = existing.get("drafts", []) if isinstance(existing, dict) else []
+    new_items = new.get("drafts", [])
+    by_id = {
+        item.get("comment_id"): item
+        for item in old_items
+        if item.get("comment_id")
+    }
+    order = [item.get("comment_id") for item in old_items if item.get("comment_id")]
+    for item in new_items:
+        comment_id = item.get("comment_id")
+        old = by_id.get(comment_id)
+        if old and old.get("send_status") in ("sent", "failed", "archived"):
+            continue
+        by_id[comment_id] = item
+        if comment_id not in order:
+            order.append(comment_id)
+    merged["drafts"] = [by_id[comment_id] for comment_id in order]
+    return merged
 
 
 def cmd_login(args):
@@ -355,6 +381,10 @@ def cmd_drafts(args):
             return
         with open(args.from_scan) as f:
             data = json.load(f)
+        if not data.get("reply_status_verified", False) and not args.allow_unverified:
+            print("❌ 扫描文件未确认评论回复状态，已停止生成草稿")
+            print("💡 请重新运行 scan；仅在明确接受重复回复风险时使用 --allow-unverified")
+            return
         all_unreplied = data.get("unreplied_level1", []) + data.get("unreplied_subs", [])
         result = {"note_title": ""}  # from-scan 没有标题
         print(f"📂 从扫描结果读取: {len(all_unreplied)} 条未回复")
@@ -396,6 +426,14 @@ def cmd_drafts(args):
 
     # 保存草稿文件
     draft_path = args.output or workflow_paths(args.note_id)["drafts"]
+    if os.path.exists(draft_path):
+        try:
+            with open(draft_path, encoding="utf-8") as f:
+                existing_drafts = json.load(f)
+            drafts = merge_draft_history(existing_drafts, drafts)
+            print(f"🔄 已合并固定草稿中的历史发送状态")
+        except (OSError, json.JSONDecodeError):
+            pass
     draft_path = write_json(drafts, draft_path)
     print(f"\n📁 草稿已保存到 {draft_path}")
     print(f"💡 审核修改后运行: python3 main.py send --file {draft_path}")
@@ -417,7 +455,8 @@ def cmd_send(args):
     items = drafts.get("drafts", [])
     to_send = [
         d for d in items
-        if d.get("action") == "send" and d.get("send_status") != "sent"
+        if d.get("action") == "send"
+        and d.get("send_status") not in ("sent", "failed", "archived")
     ]
     sent = [d for d in items if d.get("send_status") == "sent"]
     to_skip = [d for d in items if d.get("action") == "skip"]
@@ -752,6 +791,11 @@ def main():
                           help="从已有扫描结果文件加载（跳过重新扫描）")
     p_drafts.add_argument("--batch", metavar="FILE",
                           help="批量导入AI预写的回复映射JSON（非交互），格式: {\"comment_id\": \"回复文案\"}")
+    p_drafts.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="允许使用未核验回复状态的扫描文件（有重复回复风险）",
+    )
 
     # send — 发送草稿
     p_send = subparsers.add_parser("send", help="发送已审核的回复草稿")

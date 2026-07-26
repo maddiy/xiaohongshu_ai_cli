@@ -27,6 +27,8 @@ description: >
 12. 使用 `--output` 后优先读取生成的文件，不要求命令在终端重复输出完整数据。
 13. 评论分析默认使用摘要；只有用户明确需要全部明细时才使用 `analyze --json --details`。
 14. 所有 AI 必须复用 `.cache/workflows/<笔记ID>/`，不得为同一批任务另建临时存档。
+15. 生成任何回复内容前，必须先检查该评论是否已经被作者回复。
+16. 只有扫描结果中 `reply_status_verified` 为 `true` 时，才生成回复草稿。
 
 ## 固定工作目录
 
@@ -139,6 +141,13 @@ python3 main.py scan --note-id <note_id> \
 
 扫描不会向小红书写入数据。结果中的 `unreplied_level1` 和 `unreplied_subs` 是待回复候选评论。
 命令终端只返回固定文件路径和数量摘要；按需读取该笔记目录中的 `scan.json`。
+
+生成回复前检查：
+
+- 确认 `scan.json` 的 `reply_status_verified` 为 `true`。
+- 已回复、已发送、已归档、已跳过或已删除的评论不得进入回复映射。
+- 核验失败时停止生成回复，并向用户说明原因。
+- `--allow-unverified` 仅用于用户明确接受重复回复风险的特殊情况，不得默认使用。
 
 ## 生成回复草稿
 

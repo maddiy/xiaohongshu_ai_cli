@@ -215,7 +215,8 @@ class Replier:
         # 已成功发送的草稿永远不重复发送，确保不同 AI 可安全接续。
         to_send = [
             d for d in items
-            if d.get("action") == "send" and d.get("send_status") != "sent"
+            if d.get("action") == "send"
+            and d.get("send_status") not in ("sent", "failed", "archived")
         ]
         to_archive = [d for d in items if d.get("action") == "archive"]
 

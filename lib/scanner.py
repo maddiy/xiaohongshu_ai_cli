@@ -119,6 +119,7 @@ class CommentScanner:
             # 验证"是否已回复"：拉取该笔记的一级评论，获取内联楼中楼数据
             # 这样只拉一次全部评论，而不是每条评论单独调API
             replied_ids = set()
+            reply_status_verified = verify_replied
             if verify_replied:
                 try:
                     comments, _ = self.client.get_comments_cached(
@@ -149,6 +150,7 @@ class CommentScanner:
                             except Exception:
                                 pass  # 拉取失败就保守处理，不算已回复
                 except Exception:
+                    reply_status_verified = False
                     if verbose:
                         print(f"  ⚠️ 无法拉取评论验证回复状态，假定全部未回复")
 
@@ -179,6 +181,7 @@ class CommentScanner:
                 "total_new_notifications": len(new_comments),
                 "source": "notifications",
                 "note_xsec_token": entry.get("note_xsec_token", ""),
+                "reply_status_verified": reply_status_verified,
             }
             results.append(result)
 
@@ -196,6 +199,7 @@ class CommentScanner:
                 "unreplied_subs": [],
                 "total_new_notifications": 0,
                 "source": "notifications",
+                "reply_status_verified": verify_replied,
             }
 
         if note_id and results:
@@ -216,6 +220,9 @@ class CommentScanner:
             "total_new_notifications": sum(r.get("total_new_notifications", 0) for r in results),
             "source": "notifications",
             "per_note": results,  # 每个笔记的详细结果
+            "reply_status_verified": all(
+                item.get("reply_status_verified", False) for item in results
+            ),
         }
 
     def scan_note(self, note_id: str, xsec_token: str = "",
@@ -360,6 +367,7 @@ class CommentScanner:
             "pending_subs": len(pending_sub_comment_ids),
             "skipped": skipped_sub,
             "filtered_skipped": filtered_skipped,
+            "reply_status_verified": True,
         }
 
         if verbose:
