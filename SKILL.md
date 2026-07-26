@@ -24,6 +24,8 @@ description: >
 9. 不向用户展示 Cookie、`xsec_token` 或其他登录凭据。
 10. 向用户展示笔记列表、评论列表、回复草稿或发送结果明细时，统一使用 Markdown 表格。
 11. 表格只用于面向用户展示；AI 与命令行之间仍使用 JSON 文件或 `--json` 输出。
+12. 使用 `--output` 后优先读取生成的文件，不要求命令在终端重复输出完整数据。
+13. 评论分析默认使用摘要；只有用户明确需要全部明细时才使用 `analyze --json --details`。
 
 ## 表格展示规范
 
@@ -99,6 +101,7 @@ python3 main.py scan --note-id <note_id> \
 ```
 
 扫描不会向小红书写入数据。结果中的 `unreplied_level1` 和 `unreplied_subs` 是待回复候选评论。
+命令终端只返回文件路径和数量摘要；按需读取 `scan.json`，避免重复占用上下文。
 
 ## 生成回复草稿
 

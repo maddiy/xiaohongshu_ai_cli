@@ -307,7 +307,7 @@ python3 main.py scan \
 ```json
 {
   "note_id": "<note_id>",
-  "xsec_token": "",
+  "note_title": "笔记标题",
   "source": "notifications",
   "unreplied_level1": [
     {
@@ -320,7 +320,9 @@ python3 main.py scan \
 }
 ```
 
-`xsec_token` 可能用于后续请求，属于内部数据，不应展示或公开。
+扫描输出会自动移除 `xsec_token`、原始楼中楼对象等内部字段，只保留生成回复所需的数据。
+
+使用 `--output scan.json --json` 时，完整结果写入 `scan.json`，终端只返回文件路径和数量摘要，避免同一内容消耗两次 AI 上下文。
 
 ### AI 回复映射
 
@@ -469,6 +471,16 @@ python3 main.py skipped --clear
 - 对争议或攻击性评论保持克制，优先讨论事实和逻辑。
 - 不要使用过短的请求间隔规避平台限制。
 - 大批量操作应拆分执行，并检查每批结果。
+
+## 减少 AI Token 使用
+
+- 查询命令的 JSON 使用紧凑编码，不输出格式化空白。
+- `articles --json` 不输出 `xsec_token`。
+- `scan --output FILE --json` 只在终端返回摘要，评论正文保存在文件中。
+- 扫描文件移除 `inline_subs` 等内部重复结构。
+- `analyze --json` 默认只输出统计、热门评论和活跃用户。
+- 只有确实需要全部分析明细时才使用 `analyze --json --details`。
+- AI 应按需读取 `scan.json`、`drafts.json`，不要在对话中重复粘贴完整 JSON。
 
 ## 项目结构
 

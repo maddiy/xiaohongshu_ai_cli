@@ -33,8 +33,8 @@ from lib import poster as poster_lib
 
 
 def print_json(data):
-    """统一输出 UTF-8 JSON，便于任意 AI/脚本稳定解析。"""
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    """输出紧凑 UTF-8 JSON，减少 AI 上下文 token。"""
+    print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
 
 
 def write_json(data, path):
@@ -42,7 +42,7 @@ def write_json(data, path):
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
     return path
 
 
@@ -52,6 +52,84 @@ def call_for_output(func, *args, quiet=False, **kwargs):
         return func(*args, **kwargs)
     with contextlib.redirect_stdout(io.StringIO()):
         return func(*args, **kwargs)
+
+
+def compact_comment(comment):
+    """只保留生成回复所需字段，丢弃内部楼中楼原始数据。"""
+    keys = (
+        "comment_id", "nickname", "content", "likes", "sub_count",
+        "parent_comment_id", "parent_nickname",
+    )
+    return {key: comment[key] for key in keys if key in comment}
+
+
+def compact_scan_result(result):
+    """将扫描结果转换为适合 AI 消费的最小稳定结构。"""
+    compact = {
+        "note_id": result.get("note_id", ""),
+        "note_title": result.get("note_title", ""),
+        "source": result.get("source", "full_scan"),
+        "unreplied_level1": [
+            compact_comment(item) for item in result.get("unreplied_level1", [])
+        ],
+        "unreplied_subs": [
+            compact_comment(item) for item in result.get("unreplied_subs", [])
+        ],
+    }
+    for key in ("total", "total_new_notifications", "pending_subs", "filtered_skipped"):
+        if key in result:
+            compact[key] = result[key]
+    if result.get("per_note"):
+        compact["per_note"] = [
+            compact_scan_result(item) for item in result["per_note"]
+        ]
+    return compact
+
+
+def scan_summary(result):
+    """返回不重复评论正文的扫描摘要。"""
+    if result.get("per_note"):
+        notes = result["per_note"]
+        return {
+            "notes": len(notes),
+            "unreplied": sum(
+                len(item.get("unreplied_level1", []))
+                + len(item.get("unreplied_subs", []))
+                for item in notes
+            ),
+        }
+    return {
+        "note_id": result.get("note_id", ""),
+        "unreplied_level1": len(result.get("unreplied_level1", [])),
+        "unreplied_subs": len(result.get("unreplied_subs", [])),
+        "pending_subs": result.get("pending_subs", 0),
+    }
+
+
+def compact_analysis(result):
+    """移除重复评论数组，只保留统计、热门评论和活跃用户。"""
+    if not result:
+        return None
+    return {
+        "note_id": result.get("note_id", ""),
+        "note_title": result.get("note_title", ""),
+        "total_comments": result.get("total_comments", 0),
+        "unique_users": result.get("unique_users", 0),
+        "total_likes": result.get("total_likes", 0),
+        "total_subs": result.get("total_subs", 0),
+        "self_comments": result.get("self_comments", 0),
+        "replied": result.get("replied", 0),
+        "unreplied": result.get("unreplied", 0),
+        "counts": result.get("counts", {}),
+        "top_comments": result.get("sorted_by_likes", [])[:10],
+        "active_users": dict(
+            sorted(
+                result.get("active_users", {}).items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:10]
+        ),
+    }
 
 
 def cmd_login(args):
@@ -74,7 +152,16 @@ def cmd_articles(args):
             return
 
         if args.json:
-            print_json({"ok": True, "data": {"articles": articles, "count": len(articles)}})
+            safe_articles = [
+                {
+                    "id": item["id"],
+                    "title": item.get("title", ""),
+                    "comments_count": item.get("comments_count", 0),
+                    "time": item.get("time", ""),
+                }
+                for item in articles
+            ]
+            print_json({"ok": True, "articles": safe_articles, "count": len(safe_articles)})
             return
 
         print(f"\n{'='*80}")
@@ -135,30 +222,26 @@ def cmd_scan(args):
         l1 = result.get("unreplied_level1", [])
         subs = result.get("unreplied_subs", [])
         note_id = result.get("note_id", args.note_id or "")
-        note_xsec = result.get("note_xsec_token", args.xsec_token or "")
 
         if note_id and note_id != "all":
-            output = {
-                "note_id": note_id,
-                "xsec_token": note_xsec,
-                "unreplied_level1": l1,
-                "unreplied_subs": subs,
-                "source": "notifications",
-            }
+            output = compact_scan_result(result)
             path = write_json(
                 output,
                 args.output or os.path.join(tempfile.gettempdir(), f"unreplied_{note_id}.json"),
             )
             if args.json:
-                print_json({"ok": True, "data": output, "output_file": path})
+                print_json({"ok": True, "output_file": path, "summary": scan_summary(output)})
             else:
                 print(f"\n📁 结果保存到 {path}")
         else:
-            output_file = write_json(result, args.output) if args.output else None
+            output = compact_scan_result(result)
+            output_file = write_json(output, args.output) if args.output else None
             if args.json:
-                response = {"ok": True, "data": result}
+                response = {"ok": True, "summary": scan_summary(output)}
                 if output_file:
                     response["output_file"] = output_file
+                else:
+                    response["data"] = output
                 print_json(response)
             elif output_file:
                 print(f"\n📁 结果保存到 {output_file}")
@@ -195,19 +278,13 @@ def cmd_scan(args):
             print(f"💡 还有 {pending} 个楼层的内联楼中楼数据不完整" +
                   "，使用 --with-subs 拉取完整楼中楼")
 
-        output = {
-            "note_id": result["note_id"],
-            "xsec_token": result.get("xsec_token", ""),
-            "unreplied_level1": l1,
-            "unreplied_subs": subs,
-            "pending_subs": pending,
-        }
+        output = compact_scan_result(result)
         path = write_json(
             output,
             args.output or os.path.join(tempfile.gettempdir(), f"unreplied_{args.note_id}.json"),
         )
         if args.json:
-            print_json({"ok": True, "data": output, "output_file": path})
+            print_json({"ok": True, "output_file": path, "summary": scan_summary(output)})
         else:
             print(f"📁 结果保存到 {path}")
 
@@ -229,14 +306,23 @@ def cmd_scan(args):
             print(f"📊 全部汇总: {len(results)}篇笔记 | 一级未回 {total_l1} | 楼中楼未回 {total_subs} | 已跳过 {total_filtered} | 共 {total_l1+total_subs} 条")
         if total_pending > 0 and not args.json:
             print(f"💡 {total_pending} 个楼层楼中楼不完整，用 --with-subs 拉取")
+        compact_results = [compact_scan_result(item) for item in results]
         output_file = write_json(
-            {"notes": results, "source": "full_scan"},
+            {"notes": compact_results, "source": "full_scan"},
             args.output,
         ) if args.output else None
         if args.json:
-            response = {"ok": True, "data": {"notes": results}}
+            response = {
+                "ok": True,
+                "summary": {
+                    "notes": len(compact_results),
+                    "unreplied": total_l1 + total_subs,
+                },
+            }
             if output_file:
                 response["output_file"] = output_file
+            else:
+                response["data"] = {"notes": compact_results}
             print_json(response)
         elif output_file:
             print(f"\n📁 结果保存到 {output_file}")
@@ -299,8 +385,7 @@ def cmd_drafts(args):
     # 保存草稿文件
     draft_path = args.output or os.path.join(
         tempfile.gettempdir(), f"drafts_{args.note_id}.json")
-    with open(draft_path, "w") as f:
-        json.dump(drafts, f, ensure_ascii=False, indent=2)
+    draft_path = write_json(drafts, draft_path)
     print(f"\n📁 草稿已保存到 {draft_path}")
     print(f"💡 审核修改后运行: python3 main.py send --file {draft_path}")
 
@@ -487,7 +572,8 @@ def cmd_analyze(args):
         quiet=args.json,
     )
     if args.json:
-        print_json({"ok": result is not None, "data": result})
+        data = result if args.details else compact_analysis(result)
+        print_json({"ok": result is not None, "data": data})
     else:
         CommentAnalyzer.print_report(result)
 
@@ -657,6 +743,8 @@ def main():
     p_analyze.add_argument("--note-title", default="", help="笔记标题（可选）")
     p_analyze.add_argument("--json", action="store_true",
                            help="输出机器可读 JSON（适合 AI/脚本）")
+    p_analyze.add_argument("--details", action="store_true",
+                           help="JSON 中包含全部评论明细（默认仅输出摘要以节省 token）")
 
     # post — 发布小红书笔记（内容由 AI 生成）
     p_post = subparsers.add_parser("post", help="发布小红书笔记")
