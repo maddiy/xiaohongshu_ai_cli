@@ -5,7 +5,10 @@
 import os
 
 # 作者信息
-AUTHOR_USER_ID = "你的小红书用户ID"  # 运行 xhs whoami 查看
+AUTHOR_USER_ID = "6321167e0000000023038acd"  # 运行 xhs whoami 查看
+
+# 登录时默认读取的浏览器 Cookie
+LOGIN_COOKIE_SOURCE = "firefox"
 
 # 请求间隔（秒），避免频率限制
 REQUEST_DELAY = 3
@@ -28,4 +31,3 @@ CACHE_TTL_MINUTES = 30         # 缓存有效期（分钟），超时后自动�
 
 # 跳过列表（不想回复 / 无法回复的评论存档）
 SKIPPED_FILE = os.path.join(CACHE_DIR, "skipped.json")  # 跳过列表存储路径
-

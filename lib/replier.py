@@ -33,13 +33,25 @@ class Replier:
 
     # ---------- 内部工具 ----------
     def _archive_on_failure(self, cid: str, nick: str, content: str,
-                             err: str, note_id: str):
-        """回复失败时自动加入跳过列表，避免反复尝试"""
+                             err: str, note_id: str, err_type: str = "unknown_error"):
+        """
+        回复失败处理
+          - content_rejected: 内容被审核拦截 → 加入跳过列表
+          - comment_deleted: 评论已被删除 → 不加入跳过列表，仅警告
+          - unknown_error: 未知错误 → 保守加入跳过列表
+        """
+        if err_type == "comment_deleted":
+            print(f"  ⚠️ 评论已被作者删除，不归档到跳过列表")
+            return
+        reason = f"api_error[{err_type}]: {err[:50]}"
         self.client.add_skipped(
             cid, nick, content,
-            reason=f"api_error: {err[:50]}", note_id=note_id
+            reason=reason, note_id=note_id
         )
-        print(f"  📁 已自动加入跳过列表")
+        if err_type == "content_rejected":
+            print(f"  📁 内容被拦截，已加入跳过列表（可调整措辞后手动移除重试）")
+        else:
+            print(f"  📁 已自动加入跳过列表")
 
     # ---------- 草稿模式 ----------
     def generate_drafts(self, unreplied: list,
@@ -228,20 +240,21 @@ class Replier:
         for i, d in enumerate(to_send):
             cid = d["comment_id"]
             nick = d["nickname"]
-            content = d["content"][:40]
+            content = d["content"]
             reply = d["reply"]
 
-            print(f"\n[{i+1}/{total}] @{nick}: {content}")
-            print(f"  💬 {reply[:50]}")
+            print(f"\n[{i+1}/{total}] @{nick}")
+            print(f"  💬 评论：{content}")
+            print(f"  ✏️ 回复：{reply}")
 
-            ok, err = self.client.reply(note_id, cid, reply)
+            ok, err, err_type = self.client.reply(note_id, cid, reply)
             if ok:
                 print(f"  ✅ 成功")
                 self.stats["success"] += 1
             else:
-                print(f"  ❌ 失败: {err[:100]}")
+                print(f"  ❌ 失败 ({err_type}): {err[:120]}")
                 self.stats["fail"] += 1
-                self._archive_on_failure(cid, nick, content, err, note_id)
+                self._archive_on_failure(cid, nick, content, err, note_id, err_type)
 
             time.sleep(REQUEST_DELAY)
 
@@ -300,14 +313,14 @@ class Replier:
                 reply_text = self.generate_reply(c, strategy)
                 print(f"  🤖 自动回复: {reply_text[:50]}")
 
-            ok, err = self.client.reply(note_id, cid, reply_text)
+            ok, err, err_type = self.client.reply(note_id, cid, reply_text)
             if ok:
                 print(f"  ✅ 成功")
                 self.stats["success"] += 1
             else:
-                print(f"  ❌ 失败: {err[:100]}")
+                print(f"  ❌ 失败 ({err_type}): {err[:120]}")
                 self.stats["fail"] += 1
-                self._archive_on_failure(cid, nick, content, err, note_id)
+                self._archive_on_failure(cid, nick, content, err, note_id, err_type)
 
             time.sleep(REQUEST_DELAY)
 

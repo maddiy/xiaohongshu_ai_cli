@@ -3,7 +3,7 @@
 小红书评论自动回复工具
 
 功能:
-  1. login    - 登录（自动尝试 Firefox/Chrome/Edge/Safari 等浏览器 Cookie）
+  1. login    - 登录（默认读取 Firefox 浏览器 Cookie）
   2. articles - 查看最新文章列表
   3. scan     - 扫描文章评论，列出未回复的（自动过滤跳过列表）
   4. drafts   - 生成回复草稿，逐条确认后保存
@@ -18,14 +18,40 @@
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
+import shutil
+import sys
 import tempfile
 from lib.xhs_client import XHSClient
 from lib.scanner import CommentScanner
 from lib.replier import Replier
 from lib.analyzer import CommentAnalyzer
 from lib import poster as poster_lib
+
+
+def print_json(data):
+    """统一输出 UTF-8 JSON，便于任意 AI/脚本稳定解析。"""
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def write_json(data, path):
+    """将结果写入指定 JSON 文件，并返回绝对路径。"""
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def call_for_output(func, *args, quiet=False, **kwargs):
+    """机器模式下收起过程日志，保证 stdout 是单一 JSON 文档。"""
+    if not quiet:
+        return func(*args, **kwargs)
+    with contextlib.redirect_stdout(io.StringIO()):
+        return func(*args, **kwargs)
 
 
 def cmd_login(args):
@@ -42,9 +68,13 @@ def cmd_articles(args):
     """查看最新文章列表"""
     client = XHSClient()
     try:
-        articles = client.list_articles(limit=args.limit)
+        articles = call_for_output(client.list_articles, limit=args.limit, quiet=args.json)
         if not articles:
             print("暂无文章")
+            return
+
+        if args.json:
+            print_json({"ok": True, "data": {"articles": articles, "count": len(articles)}})
             return
 
         print(f"\n{'='*80}")
@@ -67,31 +97,37 @@ def cmd_articles(args):
 
 
 def cmd_scan(args):
-    """扫描未回复评论"""
+    """扫描未回复评论（默认从通知快速读取，--full-scan 走全量拉取）"""
     scanner = CommentScanner()
 
-    # 通知快速模式：只从最新通知中提取新评论，不拉取全部评论
-    if args.from_notifications:
+    # 默认：通知快速模式 — 只从最新通知中提取新评论，不拉取全部评论
+    if not args.full_scan:
         if args.note_id:
-            print(f"{'='*60}")
-            print(f"📬 通知快速扫描 — 笔记: {args.note_id}")
-            print(f"{'='*60}")
-            result = scanner.scan_via_notifications(
+            if not args.json:
+                print(f"{'='*60}")
+                print(f"📬 通知快速扫描 — 笔记: {args.note_id}")
+                print(f"{'='*60}")
+            result = call_for_output(
+                scanner.scan_via_notifications,
                 note_id=args.note_id,
-                verbose=True,
+                verbose=not args.json,
                 num_notifications=args.num_notifications,
+                quiet=args.json,
             )
         else:
-            print(f"{'='*60}")
-            print(f"📬 通知快速扫描 — 所有笔记")
-            print(f"{'='*60}")
-            result = scanner.scan_via_notifications(
+            if not args.json:
+                print(f"{'='*60}")
+                print(f"📬 通知快速扫描 — 所有笔记")
+                print(f"{'='*60}")
+            result = call_for_output(
+                scanner.scan_via_notifications,
                 note_id=None,
-                verbose=True,
+                verbose=not args.json,
                 num_notifications=args.num_notifications,
+                quiet=args.json,
             )
             per_note = result.get("per_note", [])
-            if per_note:
+            if per_note and not args.json:
                 total_new = sum(r.get("total_new_notifications", 0) for r in per_note)
                 total_unreplied = sum(len(r.get("unreplied_level1", [])) for r in per_note)
                 print(f"\n📊 汇总: {len(per_note)}篇笔记 | 通知中 {total_new} 条新评论 | {total_unreplied} 条未回复")
@@ -109,63 +145,101 @@ def cmd_scan(args):
                 "unreplied_subs": subs,
                 "source": "notifications",
             }
-            path = os.path.join(tempfile.gettempdir(), f"unreplied_{note_id}.json")
-            with open(path, "w") as f:
-                json.dump(output, f, ensure_ascii=False, indent=2)
-            print(f"\n📁 结果保存到 {path}")
+            path = write_json(
+                output,
+                args.output or os.path.join(tempfile.gettempdir(), f"unreplied_{note_id}.json"),
+            )
+            if args.json:
+                print_json({"ok": True, "data": output, "output_file": path})
+            else:
+                print(f"\n📁 结果保存到 {path}")
+        else:
+            output_file = write_json(result, args.output) if args.output else None
+            if args.json:
+                response = {"ok": True, "data": result}
+                if output_file:
+                    response["output_file"] = output_file
+                print_json(response)
+            elif output_file:
+                print(f"\n📁 结果保存到 {output_file}")
         return
 
-    # 全量扫描模式（原有逻辑）
+    # 全量扫描模式（--full-scan，原来行为）
     if args.note_id:
-        print(f"{'='*60}")
-        print(f"🔍 扫描笔记: {args.note_id}")
-        if args.with_subs:
-            print(f"  模式: 一级评论 + 完整楼中楼")
-        else:
-            print(f"  模式: 仅一级评论（楼中楼按需拉取）")
-        print(f"{'='*60}")
+        if not args.json:
+            print(f"{'='*60}")
+            print(f"🔍 扫描笔记: {args.note_id}")
+            if args.with_subs:
+                print(f"  模式: 一级评论 + 完整楼中楼")
+            else:
+                print(f"  模式: 仅一级评论（楼中楼按需拉取）")
+            print(f"{'='*60}")
 
-        result = scanner.scan_note(
+        result = call_for_output(
+            scanner.scan_note,
             args.note_id,
             args.xsec_token or "",
             include_sub_comments=args.with_subs,
             force_refresh=args.refresh,
+            verbose=not args.json,
+            quiet=args.json,
         )
 
         l1 = result.get("unreplied_level1", [])
         subs = result.get("unreplied_subs", [])
         pending = result.get("pending_subs", 0)
         filtered = result.get("filtered_skipped", 0)
-        print(f"\n📊 汇总: 一级未回 {len(l1)} | 楼中楼未回 {len(subs)} | 已跳过 {filtered} | 共需处理 {len(l1)+len(subs)} 条")
-        if pending > 0:
+        if not args.json:
+            print(f"\n📊 汇总: 一级未回 {len(l1)} | 楼中楼未回 {len(subs)} | 已跳过 {filtered} | 共需处理 {len(l1)+len(subs)} 条")
+        if pending > 0 and not args.json:
             print(f"💡 还有 {pending} 个楼层的内联楼中楼数据不完整" +
                   "，使用 --with-subs 拉取完整楼中楼")
 
         output = {
             "note_id": result["note_id"],
+            "xsec_token": result.get("xsec_token", ""),
             "unreplied_level1": l1,
             "unreplied_subs": subs,
             "pending_subs": pending,
         }
-        path = os.path.join(tempfile.gettempdir(), f"unreplied_{args.note_id}.json")
-        with open(path, "w") as f:
-            json.dump(output, f, ensure_ascii=False, indent=2)
-        print(f"📁 结果保存到 {path}")
+        path = write_json(
+            output,
+            args.output or os.path.join(tempfile.gettempdir(), f"unreplied_{args.note_id}.json"),
+        )
+        if args.json:
+            print_json({"ok": True, "data": output, "output_file": path})
+        else:
+            print(f"📁 结果保存到 {path}")
 
     else:
-        results = scanner.scan_all_notes(
+        results = call_for_output(
+            scanner.scan_all_notes,
             include_sub_comments=args.with_subs,
             force_refresh=args.refresh,
             max_pages=args.max_pages,
+            verbose=not args.json,
+            quiet=args.json,
         )
         total_l1 = sum(len(r.get("unreplied_level1", [])) for r in results)
         total_subs = sum(len(r.get("unreplied_subs", [])) for r in results)
         total_pending = sum(r.get("pending_subs", 0) for r in results)
         total_filtered = sum(r.get("filtered_skipped", 0) for r in results)
-        print(f"\n{'='*60}")
-        print(f"📊 全部汇总: {len(results)}篇笔记 | 一级未回 {total_l1} | 楼中楼未回 {total_subs} | 已跳过 {total_filtered} | 共 {total_l1+total_subs} 条")
-        if total_pending > 0:
+        if not args.json:
+            print(f"\n{'='*60}")
+            print(f"📊 全部汇总: {len(results)}篇笔记 | 一级未回 {total_l1} | 楼中楼未回 {total_subs} | 已跳过 {total_filtered} | 共 {total_l1+total_subs} 条")
+        if total_pending > 0 and not args.json:
             print(f"💡 {total_pending} 个楼层楼中楼不完整，用 --with-subs 拉取")
+        output_file = write_json(
+            {"notes": results, "source": "full_scan"},
+            args.output,
+        ) if args.output else None
+        if args.json:
+            response = {"ok": True, "data": {"notes": results}}
+            if output_file:
+                response["output_file"] = output_file
+            print_json(response)
+        elif output_file:
+            print(f"\n📁 结果保存到 {output_file}")
 
 
 def cmd_drafts(args):
@@ -257,12 +331,20 @@ def cmd_send(args):
     if args.dry_run:
         print("\n🔍 预览模式（--dry-run），不实际发送：")
         for i, d in enumerate(to_send):
-            print(f"  [{i+1}] @{d['nickname']}: {d['content'][:40]}")
-            print(f"      → {d['reply'][:60]}")
+            print(f"\n  [{i+1}/{len(to_send)}] @{d['nickname']}")
+            print(f"      💬 评论：{d['content']}")
+            print(f"      ✏️ 回复：{d['reply']}")
         return
 
     if args.confirm and to_send:
-        print(f"\n⚠️ 即将发送 {len(to_send)} 条回复")
+        print(f"\n{'─'*40}")
+        print(f"📋 待发送 {len(to_send)} 条回复：")
+        for i, d in enumerate(to_send):
+            print(f"\n  [{i+1}/{len(to_send)}] @{d['nickname']}")
+            print(f"      💬 评论：{d['content']}")
+            print(f"      ✏️ 回复：{d['reply']}")
+        print(f"\n{'─'*40}")
+        print(f"⚠️ 即将发送 {len(to_send)} 条回复")
         answer = input("确认发送? (y/n): ").strip().lower()
         if answer != "y":
             print("❌ 已取消")
@@ -353,21 +435,36 @@ def cmd_skipped(args):
 
 def cmd_post(args):
     """发布小红书笔记（内容由 AI 生成，本命令只负责发布）"""
-    title = args.title or ""
-    body = args.body or ""
+    payload = {}
+    if args.input:
+        try:
+            with open(args.input, encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"❌ 无法读取笔记 JSON: {e}")
+            return
+
+    title = args.title or payload.get("title", "")
+    body = args.body or payload.get("body", "")
     if not title or not body:
         print("❌ 必须指定 --title 和 --body")
         return
 
-    images = args.images or []
+    images = args.images or payload.get("images", [])
     if not images:
         print("❌ 至少需要一张图片: --images 图片1.jpg [图片2.jpg ...]")
         return
 
-    topics = [t.strip() for t in (args.topics or "").split(",") if t.strip()] if args.topics else None
+    topics = ([t.strip() for t in args.topics.split(",") if t.strip()]
+              if args.topics else payload.get("topics"))
+    private = args.private or bool(payload.get("private", False))
 
     try:
-        ok = poster_lib.publish(title, body, images, topics, private=args.private)
+        ok = poster_lib.publish(
+            title, body, images, topics,
+            private=private,
+            dry_run=args.dry_run,
+        )
         if not ok:
             print("⚠️ 发布可能未成功，请检查小红书客户端状态")
     except Exception as e:
@@ -381,13 +478,71 @@ def cmd_analyze(args):
         return
 
     analyzer = CommentAnalyzer()
-    result = analyzer.analyze(
+    result = call_for_output(
+        analyzer.analyze,
         args.note_id,
         args.xsec_token or "",
         args.note_title or "",
         force_refresh=args.refresh,
+        quiet=args.json,
     )
-    CommentAnalyzer.print_report(result)
+    if args.json:
+        print_json({"ok": result is not None, "data": result})
+    else:
+        CommentAnalyzer.print_report(result)
+
+
+def cmd_doctor(args):
+    """检查运行环境，默认不联网、不修改任何数据。"""
+    from config import AUTHOR_USER_ID, LOGIN_COOKIE_SOURCE
+
+    checks = {
+        "python": {"ok": True, "value": sys.version.split()[0]},
+        "xhs": {"ok": bool(shutil.which("xhs")), "value": shutil.which("xhs") or ""},
+        "author_user_id": {
+            "ok": bool(AUTHOR_USER_ID and "你的小红书" not in AUTHOR_USER_ID),
+            "value": AUTHOR_USER_ID,
+        },
+        "cookie_source": {"ok": bool(LOGIN_COOKIE_SOURCE), "value": LOGIN_COOKIE_SOURCE},
+        "cache_writable": {"ok": os.access(".", os.W_OK), "value": os.path.abspath(".cache")},
+    }
+    ok = all(item["ok"] for item in checks.values())
+    if args.json:
+        print_json({"ok": ok, "checks": checks})
+        return
+    print("🩺 环境检查")
+    for name, item in checks.items():
+        print(f"  {'✅' if item['ok'] else '❌'} {name}: {item['value']}")
+    print("✅ 可以运行" if ok else "❌ 请先修复失败项")
+
+
+def cmd_ai_help(args):
+    """输出稳定的机器可读调用协议。"""
+    spec = {
+        "schema_version": "1",
+        "language": "zh-CN",
+        "safety": {
+            "scan_is_read_only": True,
+            "draft_is_local_only": True,
+            "send_requires_user_review_recommended": True,
+            "post_dry_run_recommended": True,
+        },
+        "workflows": {
+            "reply": [
+                "python3 main.py scan --note-id <id> --output scan.json --json",
+                "生成 reply_map.json，格式为 {comment_id: reply}",
+                "python3 main.py drafts --note-id <id> --from-scan scan.json --batch reply_map.json --output drafts.json",
+                "python3 main.py send --file drafts.json --dry-run",
+                "python3 main.py send --file drafts.json --confirm",
+            ],
+            "post": [
+                "创建 note.json，字段为 title/body/images/topics/private",
+                "python3 main.py post --input note.json --dry-run",
+                "python3 main.py post --input note.json",
+            ],
+        },
+    }
+    print_json(spec)
 
 
 def add_common_args(parser):
@@ -408,17 +563,17 @@ def add_limit_args(parser):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="小红书评论自动回复工具",
+        description="面向中文用户与 AI 助手的小红书发布、评论管理命令行工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  python3 main.py login                                    # 登录（自动尝试多浏览器 Cookie）
+  python3 main.py login                                    # 登录（默认读取 Firefox Cookie）
   python3 main.py articles                                 # 查看最新文章列表
   python3 main.py articles --limit 50                      # 查看最近50篇文章
-  python3 main.py scan                                     # 扫描所有有评论的笔记（仅一级评论，过滤跳过列表）
-  python3 main.py scan --note-id <note_id>                  # 扫描指定笔记
-  python3 main.py scan --note-id <note_id> --with-subs     # 同时拉取完整楼中楼
-  python3 main.py scan --note-id <note_id> --from-notifications  # 快速模式：从通知中提取新评论（不拉全部）
+  python3 main.py scan                                     # 默认通知模式：从通知中提取最新评论
+  python3 main.py scan --note-id <note_id>                  # 指定笔记的通知快速扫描
+  python3 main.py scan --note-id <note_id> --full-scan     # 全量扫描：拉取全部评论逐一比对
+  python3 main.py scan --note-id <note_id> --full-scan --with-subs  # 全量扫描+拉取完整楼中楼
 
   python3 main.py drafts --note-id <note_id>               # 生成回复草稿（逐条确认）
   python3 main.py drafts --note-id <note_id> --from-scan /tmp/unreplied_xxx.json  # 从扫描结果加载
@@ -436,28 +591,36 @@ def main():
   python3 main.py skipped --clear                          # 清空跳过列表
 
   python3 main.py analyze --note-id <note_id>              # 分析评论（优先缓存）
+  python3 main.py doctor                                   # 检查本地环境
+  python3 main.py ai-help                                  # 输出 AI 调用协议
   python3 main.py post --title "标题" --body "正文" --images 图1.jpg 图2.jpg
   python3 main.py post --title "标题" --body "正文" --images 图1.jpg --topics "读书,成长"
+  python3 main.py post --input note.json --dry-run         # 从 JSON 预览笔记
 """
     )
     subparsers = parser.add_subparsers(dest="command", help="子命令")
 
     # login
-    subparsers.add_parser("login", help="登录小红书（自动尝试多个浏览器 Cookie）")
+    subparsers.add_parser("login", help="登录小红书（默认读取 Firefox Cookie）")
 
     # articles
     p_articles = subparsers.add_parser("articles", help="查看最新文章列表")
     p_articles.add_argument("--limit", type=int, default=20,
                             help="显示文章数量（默认20）")
+    p_articles.add_argument("--json", action="store_true",
+                            help="输出机器可读 JSON（适合 AI/脚本）")
 
     # scan
-    p_scan = subparsers.add_parser("scan", help="扫描未回复评论")
+    p_scan = subparsers.add_parser("scan", help="扫描未回复评论（默认从通知快速读取）")
     add_common_args(p_scan)
     add_limit_args(p_scan)
-    p_scan.add_argument("--from-notifications", action="store_true",
-                        help="快速模式：只从最新评论通知中提取新评论（不拉取全部评论）")
-    p_scan.add_argument("--num-notifications", type=int, default=50,
-                        help="通知模式下拉取的通知数量（默认50）")
+    p_scan.add_argument("--full-scan", action="store_true",
+                        help="全量扫描模式：拉取笔记全部评论逐一比对（默认只从通知中提取）")
+    p_scan.add_argument("--num-notifications", type=int, default=20,
+                        help="通知模式下拉取的通知数量（默认20）")
+    p_scan.add_argument("--output", help="扫描结果 JSON 保存路径")
+    p_scan.add_argument("--json", action="store_true",
+                        help="仅输出机器可读 JSON（适合 AI/脚本）")
 
     # drafts — 生成回复草稿
     p_drafts = subparsers.add_parser("drafts", help="生成回复草稿（逐条确认后保存）")
@@ -492,14 +655,24 @@ def main():
     p_analyze = subparsers.add_parser("analyze", help="分析评论")
     add_common_args(p_analyze)
     p_analyze.add_argument("--note-title", default="", help="笔记标题（可选）")
+    p_analyze.add_argument("--json", action="store_true",
+                           help="输出机器可读 JSON（适合 AI/脚本）")
 
     # post — 发布小红书笔记（内容由 AI 生成）
     p_post = subparsers.add_parser("post", help="发布小红书笔记")
-    p_post.add_argument("--title", required=True, help="笔记标题")
-    p_post.add_argument("--body", required=True, help="笔记正文")
-    p_post.add_argument("--images", nargs="+", required=True, help="图片路径（至少1张）")
+    p_post.add_argument("--input", metavar="FILE",
+                        help="从 JSON 文件读取 title/body/images/topics/private")
+    p_post.add_argument("--title", help="笔记标题（可覆盖 JSON 中的值）")
+    p_post.add_argument("--body", help="笔记正文（可覆盖 JSON 中的值）")
+    p_post.add_argument("--images", nargs="+", help="图片路径（可覆盖 JSON 中的值）")
     p_post.add_argument("--topics", help="话题标签，逗号分隔（如: 读书,成长）")
     p_post.add_argument("--private", action="store_true", help="私密发布")
+    p_post.add_argument("--dry-run", action="store_true", help="只校验和预览，不实际发布")
+
+    # 面向人和 AI 的辅助命令
+    p_doctor = subparsers.add_parser("doctor", help="检查本地环境与配置（不联网）")
+    p_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    subparsers.add_parser("ai-help", help="输出 AI 调用协议（JSON）")
 
     args = parser.parse_args()
 
@@ -517,6 +690,8 @@ def main():
         "post": cmd_post,
         "skipped": cmd_skipped,
         "analyze": cmd_analyze,
+        "doctor": cmd_doctor,
+        "ai-help": cmd_ai_help,
     }
     commands[args.command](args)
 

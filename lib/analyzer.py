@@ -18,7 +18,9 @@ class CommentAnalyzer:
         from .xhs_client import XHSClient
 
         print(f"📊 拉取笔记 {note_id} 的评论...")
-        comments = XHSClient.get_note_comments(note_id, xsec_token)
+        comments, from_cache = XHSClient.get_comments_cached(
+            note_id, xsec_token=xsec_token, force_refresh=force_refresh
+        )
         if not comments:
             print("❌ 未获取到评论数据")
             return None

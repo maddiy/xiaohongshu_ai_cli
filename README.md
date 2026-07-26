@@ -1,68 +1,80 @@
-# 小红书评论自动回复工具
+# 小红书命令行助手
 
-帮你自动扫描小红书笔记下的所有评论和楼中楼，找出未回复的，生成回复草稿后批量发送。
-内置缓存机制和跳过列表，避免重复拉取和无效操作。
+一个面向中文用户和 AI 助手的小红书命令行工具。
 
-## 功能一览
+它负责连接小红书、读取笔记与评论、保存回复草稿以及执行发布；内容创作和回复文案可以由任意 AI 编程助手完成，不依赖特定模型或厂商。
 
-| 功能 | 说明 |
-|------|------|
-| `login` | 通过浏览器 Cookie 登录（Firefox 优先，自动尝试 Chrome/Edge/Safari 等） |
-| `articles` | 查看最新文章列表 |
-| `scan` | 扫描未回复评论（支持全量扫描和通知快速扫描） |
-| `drafts` | 生成回复草稿，支持交互式和批量导入两种模式 |
-| `send` | 发送已审核的草稿（支持预览、二次确认、断点续发） |
-| `reply` | 传统模式：扫描后逐条交互式回复（支持 's' 永久跳过） |
-| `skipped` | 管理跳过列表（查看、移除、清空） |
-| `analyze` | 评论数据统计分析 |
-| `post` | 发布小红书笔记（内容由 AI 生成，本工具只负责发布） |
+## 可以做什么
 
-## AI 功能（零配置，开箱即用）
+| 功能 | 命令 | 说明 |
+|---|---|---|
+| 环境检查 | `doctor` | 检查 Python、`xhs`、账号和浏览器配置 |
+| 登录 | `login` | 从指定浏览器读取小红书 Cookie |
+| 查看笔记 | `articles` | 查看账号最近发布的笔记 |
+| 扫描评论 | `scan` | 查找尚未回复的评论 |
+| 生成草稿 | `drafts` | 交互输入或批量导入 AI 回复 |
+| 发送回复 | `send` | 预览并发送审核后的草稿 |
+| 直接回复 | `reply` | 传统的逐条交互回复模式 |
+| 评论分析 | `analyze` | 统计评论、互动和粗略情感倾向 |
+| 跳过列表 | `skipped` | 管理不再处理的评论 |
+| 发布笔记 | `post` | 发布 AI 或人工准备好的图文笔记 |
+| AI 协议 | `ai-help` | 输出机器可读的标准调用流程 |
 
-以下所有 AI 能力均由 AI 编程助手提供，只需用自然语言描述需求，**无需配置任何外部 API Key 或模型**。兼容主流工具：
+## 设计目标
 
-| 工具 | 说明 |
-|------|------|
-| **Cursor** | AI-first IDE |
-| **GitHub Copilot** | GitHub 官方 |
-| **Claude Code** | Anthropic 出品 |
-| **OpenAI Codex** | OpenAI 出品 |
-| **CodeBuddy** | 腾讯云 AI 编程助手 |
-| **Windsurf** | Codeium 出品 |
-| **Aider** | 开源终端 AI 编程 |
-| **Amazon Q Developer** | AWS 出品 |
-| **Sourcegraph Cody** | 企业级 AI 编程 |
-| **JetBrains AI Assistant** | JetBrains 官方 |
-| **Tabnine** | 老牌 AI 代码补全 |
-| **Continue** | 开源 VS Code / JetBrains 插件 |
-| **Cline** | VS Code 插件 |
-| **Trae** | 字节跳动 AI IDE |
-| **通义灵码** | 阿里云 AI 编程助手 |
-| **文心快码** | 百度 AI 编程助手 |
-
-在任意上述工具中打开本项目，对话即可：
-
-| 功能 | 你只需说 | 效果 |
-|------|----------|------|
-| **批量回复评论** | "帮我处理最新评论" | AI 读取每条评论内容，逐条生成针对性回复，保存为草稿 |
-| **评论情感分析** | "分析这篇笔记的评论" | 自动统计情感倾向、高频关键词、用户活跃度 |
-| **生成笔记内容** | "帮我写一篇关于 XX 的小红书笔记" | AI 生成标题、正文、话题标签 |
-| **发布笔记** | "把这篇内容发到小红书" | AI 调用 `post` 命令一键发布 |
-| **回复策略建议** | "这些评论该怎么回" | AI 按评论类型给出差异化回复建议 |
-
-> **核心思路**：你描述 → AI 生成 → CLI 执行。工具本身只是命令行壳，所有智能能力来自你使用的 AI 编程助手。
+- **中文优先**：命令帮助、提示、错误信息和文档以中文为主。
+- **AI 无关**：Cursor、Codex、Claude Code、Copilot、CodeBuddy 等都能通过文件和命令调用。
+- **人机分工**：AI 负责理解、创作和生成回复，CLI 负责读取、校验、缓存和执行。
+- **先审后发**：回复和笔记都支持预览，默认工作流要求用户确认后再执行。
+- **机器可读**：关键查询支持 UTF-8 JSON，AI 不需要解析终端表格。
+- **可恢复**：使用缓存、跳过列表和断点续发，减少重复请求和重复回复。
 
 ## 安装
 
+### 1. 安装 Python
+
+需要 Python 3.10 或更高版本：
+
 ```bash
-# 1. 安装小红书 CLI
-pip install xiaohongshu-cli
+python3 --version
+```
 
-# 2. 下载本项目
-cd xhs-auto-reply
+### 2. 安装小红书 CLI
 
-# 3. 修改配置
-vim config.py   # 填入你的 AUTHOR_USER_ID
+推荐使用 `uv` 隔离安装：
+
+```bash
+uv tool install xiaohongshu-cli
+```
+
+也可以使用 `pip`：
+
+```bash
+python3 -m pip install xiaohongshu-cli
+```
+
+确认安装成功：
+
+```bash
+xhs --version
+```
+
+### 3. 进入项目目录
+
+```bash
+cd /path/to/xhs-auto-reply
+```
+
+### 4. 检查环境
+
+```bash
+python3 main.py doctor
+```
+
+AI 或脚本可使用：
+
+```bash
+python3 main.py doctor --json
 ```
 
 ## 配置
@@ -70,254 +82,396 @@ vim config.py   # 填入你的 AUTHOR_USER_ID
 编辑 `config.py`：
 
 ```python
-AUTHOR_USER_ID = "你的小红书用户ID"   # 运行 xhs whoami 查看
-REPLY_STRATEGY = "smart"              # smart(逐条确认) / generic(随机话术)
-REQUEST_DELAY = 3                     # 请求间隔（秒）
-CACHE_TTL_MINUTES = 30                # 缓存有效期（分钟）
-SKIPPED_FILE = ".cache/skipped.json"  # 跳过列表存储路径
+AUTHOR_USER_ID = "你的小红书用户ID"
+LOGIN_COOKIE_SOURCE = "firefox"
+REQUEST_DELAY = 3
+CACHE_TTL_MINUTES = 30
 ```
 
-## 使用方法
+主要配置：
 
-### 1. 登录（自动尝试多浏览器 Cookie）
+| 配置项 | 作用 |
+|---|---|
+| `AUTHOR_USER_ID` | 用于判断评论是否由笔记作者回复 |
+| `LOGIN_COOKIE_SOURCE` | 登录时读取 Cookie 的浏览器 |
+| `REQUEST_DELAY` | 连续请求或回复之间的间隔秒数 |
+| `CACHE_TTL_MINUTES` | 评论缓存有效时间 |
+| `GENERIC_REPLIES` | 通用回复模式使用的话术 |
+| `SKIPPED_FILE` | 永久跳过列表的保存位置 |
+
+当前登录支持的浏览器来源由 `xiaohongshu-cli` 决定，例如 `firefox`、`chrome`、`edge` 和 `safari`。
+
+## 快速开始
+
+### 1. 登录
+
+先在配置的浏览器中登录小红书网页版，然后运行：
 
 ```bash
 python3 main.py login
 ```
 
-### 2. 查看文章列表
+查看当前账号：
+
+```bash
+xhs whoami
+```
+
+将返回的用户 ID 写入 `config.py` 的 `AUTHOR_USER_ID`。
+
+### 2. 查看最近笔记
 
 ```bash
 python3 main.py articles
-python3 main.py articles --limit 50
+python3 main.py articles --limit 20
 ```
 
-### 3. 扫描评论
+机器可读输出：
 
 ```bash
-# 通知快速扫描（推荐）：从最新评论通知中提取新评论，秒级完成
-python3 main.py scan --note-id <note_id> --from-notifications
+python3 main.py articles --limit 20 --json
+```
 
-# 全量扫描：拉取全部评论后逐个比对（精确但较慢）
-python3 main.py scan --note-id <note_id>
+### 3. 扫描最新评论
 
-# 同时拉取完整楼中楼
-python3 main.py scan --note-id <note_id> --with-subs
+默认模式从评论通知开始，适合日常处理：
 
-# 扫描所有有评论的笔记
+```bash
 python3 main.py scan
-python3 main.py scan --max-pages 5
-python3 main.py scan --from-notifications   # 通知快速扫描所有笔记
+python3 main.py scan --note-id <笔记ID>
 ```
 
-### 4. 生成回复草稿（推荐）
-
-**方式一：交互式逐条输入**
+推荐 AI 工作流使用固定输出文件：
 
 ```bash
-python3 main.py drafts --note-id <note_id>
+python3 main.py scan \
+  --note-id <笔记ID> \
+  --output scan.json \
+  --json
 ```
 
-```
-[1/28] @用户示例A: 示例评论内容，用户表达了一些观点...
-  💬 回复内容 (回车=跳过, 's'=永久跳过): 这是示例回复内容...
-  ✅ 草稿
+### 4. 生成回复草稿
 
-[2/28] @用户示例B: 😂
-  💬 回复内容 (回车=跳过, 's'=永久跳过): s
-  📁 永久跳过（加入跳过列表）
-```
-
-**方式二：从已有扫描结果加载（跳过重扫）**
+人工逐条输入：
 
 ```bash
-python3 main.py scan --note-id <note_id>   # 先扫描
-python3 main.py drafts --note-id <note_id> \
-  --from-scan /tmp/unreplied_<note_id>.json
+python3 main.py drafts --note-id <笔记ID>
 ```
 
-**方式三：批量导入AI预写的回复（非交互，最快）**
-
-准备映射文件 `reply_map.json`：
-```json
-{
-  "<comment_id_1>": "这是一条示例回复",
-  "<comment_id_2>": {"reply": "", "action": "archive"},
-  "6a65...": "另一条示例文本"
-}
-```
+使用已有扫描结果，避免重新扫描：
 
 ```bash
-python3 main.py drafts --note-id <note_id> \
-  --from-scan /tmp/unreplied_note.json \
-  --batch reply_map.json
+python3 main.py drafts \
+  --note-id <笔记ID> \
+  --from-scan scan.json \
+  --output drafts.json
 ```
 
-> **说明**：`--from-scan` 加载 scan 结果跳过重复拉取；`--batch` 非交互导入预写回复。
-> 两者可单独或组合使用。映射中未找到的评论自动跳过。
-
-生成完毕后保存到 `/tmp/drafts_<note_id>.json`，可手动编辑调整回复内容。
-
-### 5. 发送草稿
+让 AI 生成 `reply_map.json` 后批量导入：
 
 ```bash
-# 预览模式（不实际发送）
-python3 main.py send --file /tmp/drafts_note.json --dry-run
-
-# 确认后发送
-python3 main.py send --file /tmp/drafts_note.json --confirm
-
-# 直接发送
-python3 main.py send --file /tmp/drafts_note.json
-
-# 断点续发（跳过已在跳过列表中的，适用于中断后恢复）
-python3 main.py send --file /tmp/drafts_note.json --resume
+python3 main.py drafts \
+  --note-id <笔记ID> \
+  --from-scan scan.json \
+  --batch reply_map.json \
+  --output drafts.json
 ```
 
-> 在草稿中 action 为 `"archive"` 的评论会自动加入永久跳过列表；
-> 发送失败的评论也会自动加入跳过列表，避免下次重复尝试。
+### 5. 预览并发送
 
-### 6. 传统回复模式
+先预览，不会发送：
 
 ```bash
-python3 main.py reply --note-id <note_id>
-
-# 交互中:
-#   输入回复内容 → 发送
-#   回车 → 本次跳过
-#   s → 永久跳过（加入跳过列表）
-
-python3 main.py reply --note-id <note_id> --strategy generic
-python3 main.py reply --note-id <note_id> --from-file /tmp/unreplied_xxx.json
+python3 main.py send --file drafts.json --dry-run
 ```
 
-### 7. 管理跳过列表
+确认内容无误后发送：
 
 ```bash
-python3 main.py skipped                     # 查看所有跳过记录
-python3 main.py skipped --remove <comment_id>  # 移除某条记录
-python3 main.py skipped --clear              # 清空全部
+python3 main.py send --file drafts.json
 ```
 
-跳过列表存储在 `.cache/skipped.json`，被跳过的评论在后续扫描时自动过滤。
-
-### 8. 分析评论
+如果发送中断：
 
 ```bash
-python3 main.py analyze --note-id <note_id>
+python3 main.py send --file drafts.json --resume
 ```
 
-## 典型工作流
+## AI 标准工作流
 
-### 全手动工作流
+任意 AI 助手都可以遵循以下流程：
 
 ```bash
-python3 main.py login
-python3 main.py articles
-python3 main.py scan --note-id <note_id>
-python3 main.py drafts --note-id <note_id>
-python3 main.py send --file /tmp/drafts_note.json --dry-run
-python3 main.py send --file /tmp/drafts_note.json --confirm
+# 1. 检查环境
+python3 main.py doctor --json
+
+# 2. 查看笔记并取得 note_id
+python3 main.py articles --limit 20 --json
+
+# 3. 扫描评论
+python3 main.py scan \
+  --note-id <note_id> \
+  --output scan.json \
+  --json
+
+# 4. AI 读取 scan.json 并生成 reply_map.json
+
+# 5. 生成可审核草稿
+python3 main.py drafts \
+  --note-id <note_id> \
+  --from-scan scan.json \
+  --batch reply_map.json \
+  --output drafts.json
+
+# 6. 预览
+python3 main.py send --file drafts.json --dry-run
+
+# 7. 获得用户确认后发送
+python3 main.py send --file drafts.json
 ```
 
-### AI辅助批量工作流（推荐）
+查看完整的机器调用协议：
 
 ```bash
-# 1. 通知快速扫描
-python3 main.py scan --note-id <note_id> --from-notifications
-
-# 2. 让AI生成所有回复（在任意 AI 编程助手中），保存为 reply_map.json
-
-# 3. 批量导入生成草稿
-python3 main.py drafts --note-id <note_id> \
-  --from-scan /tmp/unreplied_note.json \
-  --batch reply_map.json
-
-# 4. 预览确认后发送
-python3 main.py send --file /tmp/drafts_note.json --dry-run
-python3 main.py send --file /tmp/drafts_note.json --confirm
+python3 main.py ai-help
 ```
 
-## 草稿文件格式
+## 扫描模式
+
+### 通知快速扫描
+
+`scan` 默认读取最新评论通知，然后核对回复状态。适合日常处理，扫描范围受通知数量限制：
+
+```bash
+python3 main.py scan --num-notifications 50
+```
+
+### 全量扫描
+
+只有需要检查一篇笔记的全部历史评论时才使用：
+
+```bash
+python3 main.py scan \
+  --note-id <笔记ID> \
+  --full-scan
+```
+
+同时检查完整楼中楼：
+
+```bash
+python3 main.py scan \
+  --note-id <笔记ID> \
+  --full-scan \
+  --with-subs
+```
+
+忽略缓存重新获取：
+
+```bash
+python3 main.py scan \
+  --note-id <笔记ID> \
+  --full-scan \
+  --refresh
+```
+
+全量扫描评论较多的笔记可能需要较长时间，也更容易触发平台验证。
+
+## 数据格式
+
+### 扫描结果
 
 ```json
 {
   "note_id": "<note_id>",
-  "note_title": "你的笔记标题",
+  "xsec_token": "",
+  "source": "notifications",
+  "unreplied_level1": [
+    {
+      "comment_id": "<comment_id>",
+      "nickname": "评论用户",
+      "content": "评论内容"
+    }
+  ],
+  "unreplied_subs": []
+}
+```
+
+`xsec_token` 可能用于后续请求，属于内部数据，不应展示或公开。
+
+### AI 回复映射
+
+最简单的格式：
+
+```json
+{
+  "<comment_id_1>": "第一条回复",
+  "<comment_id_2>": "第二条回复"
+}
+```
+
+需要控制操作时：
+
+```json
+{
+  "<comment_id_1>": {
+    "reply": "准备发送的回复",
+    "action": "send"
+  },
+  "<comment_id_2>": {
+    "reply": "",
+    "action": "skip"
+  },
+  "<comment_id_3>": {
+    "reply": "",
+    "action": "archive"
+  }
+}
+```
+
+`action` 的含义：
+
+- `send`：发送回复
+- `skip`：本次跳过，下次扫描仍可能出现
+- `archive`：永久跳过，写入 `.cache/skipped.json`
+
+### 回复草稿
+
+```json
+{
+  "note_id": "<note_id>",
+  "note_title": "笔记标题",
   "generated_at": "2026-07-26 22:30:00",
   "drafts": [
     {
-      "comment_id": "<comment_id_a>",
-      "nickname": "用户示例A",
-      "content": "示例评论内容...",
-      "reply": "这是示例回复内容...",
+      "comment_id": "<comment_id>",
+      "nickname": "评论用户",
+      "content": "原评论",
+      "reply": "准备发送的回复",
       "action": "send"
-    },
-    {
-      "comment_id": "<comment_id_b>",
-      "nickname": "用户示例B",
-      "content": "😂",
-      "reply": "",
-      "action": "archive"
     }
   ]
 }
 ```
 
-action 取值：
-- `"send"` — 发送该回复
-- `"skip"` — 本次跳过（下次扫描仍会出现）
-- `"archive"` — 永久跳过，加入跳过列表（下次扫描不再出现）
+## 发布笔记
 
-### 6. 发布小红书笔记
+小红书图文笔记至少需要一张本地图片。
 
-发布笔记到小红书。**内容由 AI 编程助手生成**，本工具只负责推送到小红书。
+直接使用命令参数：
 
 ```bash
-# 基本发布
-python3 main.py post --title "标题" --body "正文" --images 封面.jpg 图2.jpg
-
-# 带话题标签
-python3 main.py post --title "标题" --body "正文" --images 封面.jpg --topics "读书,成长"
-
-# 私密发布
-python3 main.py post --title "标题" --body "正文" --images 封面.jpg --private
+python3 main.py post \
+  --title "笔记标题" \
+  --body "笔记正文" \
+  --images /绝对路径/封面.jpg \
+  --topics "读书,成长"
 ```
 
-**AI 辅助生成内容：** 当你需要发帖时，在任意 AI 编程助手中描述话题，AI 会帮你生成标题和正文，然后调用此命令发布。无需配置任何外部 API。
+AI 推荐使用 `note.json`：
+
+```json
+{
+  "title": "简洁标题",
+  "body": "笔记正文",
+  "images": ["/绝对路径/封面.jpg"],
+  "topics": ["读书", "成长"],
+  "private": false
+}
+```
+
+先预览：
+
+```bash
+python3 main.py post --input note.json --dry-run
+```
+
+用户确认后发布：
+
+```bash
+python3 main.py post --input note.json
+```
+
+使用 `private: true` 或命令参数 `--private` 可设为仅自己可见。
+
+## 评论分析
+
+```bash
+python3 main.py analyze --note-id <笔记ID>
+python3 main.py analyze --note-id <笔记ID> --json
+```
+
+分析内容包括评论数量、回复情况、点赞、活跃用户和基于关键词的粗略情感分类。
+
+情感分类只适合辅助浏览，不应作为对用户人格、立场或心理状态的可靠判断。
+
+## 管理跳过列表
+
+查看：
+
+```bash
+python3 main.py skipped
+```
+
+恢复某条评论：
+
+```bash
+python3 main.py skipped --remove <comment_id>
+```
+
+清空：
+
+```bash
+python3 main.py skipped --clear
+```
+
+清空操作会要求确认。
+
+## 错误处理
+
+| 错误类型 | 建议处理 |
+|---|---|
+| `comment_deleted` | 评论已删除，不再重试 |
+| `rate_limited` | 停止或延迟发送，避免连续请求 |
+| `content_rejected` | 修改措辞，重新预览后再发送 |
+| `unknown_error` | 保存错误信息，检查登录和平台状态 |
+
+如果出现验证码或平台验证，应停止自动操作，由用户亲自完成验证。
+
+## 安全建议
+
+- 不要提交或公开 Cookie、`xsec_token` 和账号凭据。
+- 不要在未经审核的情况下批量发送 AI 生成内容。
+- 发布和回复前始终使用 `--dry-run`。
+- 对争议或攻击性评论保持克制，优先讨论事实和逻辑。
+- 不要使用过短的请求间隔规避平台限制。
+- 大批量操作应拆分执行，并检查每批结果。
 
 ## 项目结构
 
-```
-├── main.py              # 统一入口，9个子命令
-├── config.py            # 配置文件
+```text
+.
+├── main.py                 # 中文命令行入口
+├── config.py               # 账号与请求配置
+├── SKILL.md                # AI 助手执行规则
 ├── lib/
-│   ├── xhs_client.py    # 小红书 CLI 封装（API + 缓存 + 跳过列表 + 通知）
-│   ├── scanner.py       # 评论扫描器（过滤跳过列表）
-│   ├── replier.py       # 回复器（draft/send/reply三模式）
-│   ├── analyzer.py      # 评论分析器
-│   └── poster.py        # 发帖器（内容发布）
-├── .cache/              # 缓存 + 跳过列表（自动生成）
+│   ├── xhs_client.py       # xhs 命令封装、缓存和跳过列表
+│   ├── scanner.py          # 评论扫描与回复状态判断
+│   ├── replier.py          # 草稿生成和回复发送
+│   ├── analyzer.py         # 评论统计与情感分类
+│   └── poster.py           # 图文笔记校验与发布
+├── references/
+│   └── commands.md         # 详细命令和 Python API
+└── .cache/                 # 自动生成的缓存与工作文件
 ```
 
-## 性能优化
+## 命令帮助
 
-| 优化项 | 说明 |
-|--------|------|
-| 通知快速扫描 | `--from-notifications` 只从最新评论通知中提取新评论，无需拉取全部评论对比，**秒级完成** |
-| skipped 内存缓存 | `is_skipped` 从每次读文件 (~1ms) 降到 O(1) 内存查找 (~0.01ms)，批量操作提升 100x |
-| scanner 延迟优化 | 仅网络请求后 sleep，纯内存遍历不再延迟，扫描 200+ 评论从 ~40s 降到 ~5s |
-| xsec_token 索引缓存 | 首次翻页后缓存全量映射到 `.cache/xsec_index.json`，后续 O(1) 命中无需翻页 |
-| inline 楼中楼提取 | 内联数据完整时直接从内存提取非作者楼中楼，节省逐条 API 调用 |
-| 预编译正则 | 情感/主题分类从多次 `any(kw in content)` 改为单次正则扫描，分析速度提升 3-5x |
+```bash
+python3 main.py --help
+python3 main.py scan --help
+python3 main.py drafts --help
+python3 main.py send --help
+python3 main.py post --help
+```
 
-## 注意事项
-
-- 登录默认读取 Firefox 浏览器 Cookie，失败后自动尝试 Chrome/Edge/Safari/Brave/Chromium。请确保至少有一个浏览器已登录小红书
-- 回复间隔默认 3 秒，可在 `config.py` 中调整
-- 频繁调用可能触发验证码，建议分批处理
-- 回复失败的评论自动加入跳过列表，避免反复尝试
-- **楼中楼限制**：`xhs sub-comments` 不支持 `--xsec-token`，一级评论内联的楼中楼数据已足够判断作者是否已回复
-- 跳过列表存储在 `.cache/skipped.json`，可手动编辑
-- `send --resume` 可在发送中断后恢复，无需重新开始
-- xsec_token 索引自动维护在 `.cache/xsec_index.json`，无需手动管理
+更详细的命令参考见 [`references/commands.md`](references/commands.md)。

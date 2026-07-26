@@ -9,7 +9,7 @@ import sys
 import time
 from typing import Optional
 
-from config import CACHE_DIR, CACHE_TTL_MINUTES
+from config import CACHE_DIR, CACHE_TTL_MINUTES, LOGIN_COOKIE_SOURCE
 
 
 class XHSClient:
@@ -32,31 +32,21 @@ class XHSClient:
         return data
 
     # ---------- 账户 ----------
-    # 浏览器尝试顺序：Firefox 优先，然后依次尝试其他主流浏览器
-    _BROWSER_SOURCES = [
-        "firefox",
-        "chrome",
-        "edge",
-        "safari",
-        "brave",
-        "chromium",
-    ]
-
     @staticmethod
     def login():
-        """依次尝试从已安装的浏览器 cookies 登录，Firefox 优先"""
-        for browser in XHSClient._BROWSER_SOURCES:
-            print(f"🔑 尝试 {browser} 浏览器 cookies 登录...")
-            result = subprocess.run(
-                ["xhs", "login", "--cookie-source", browser],
-                capture_output=True, text=True, timeout=30
-            )
-            output = result.stdout + result.stderr
-            if "登录成功" in output or "ok" in result.stdout.lower():
-                print(f"  ✅ {browser} 登录成功")
-                return True
-            print(f"  ❌ {browser} 失败: {result.stderr.strip() or result.stdout.strip()[:80]}")
-        print("  💡 所有浏览器均登录失败，请确保已安装并用小红书登录过至少一个浏览器")
+        """从配置指定的浏览器 Cookie 登录。"""
+        browser = LOGIN_COOKIE_SOURCE
+        print(f"🔑 使用 {browser} 浏览器 cookies 登录...")
+        result = subprocess.run(
+            ["xhs", "login", "--cookie-source", browser],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout + result.stderr
+        if "登录成功" in output or "ok" in result.stdout.lower():
+            print(f"  ✅ {browser} 登录成功")
+            return True
+        print(f"  ❌ {browser} 失败: {result.stderr.strip() or result.stdout.strip()[:200]}")
+        print(f"  💡 请确保 {browser} 已登录小红书账号")
         return False
 
     @staticmethod
@@ -347,22 +337,119 @@ class XHSClient:
         return all_subs
 
     @staticmethod
+    def comment_exists(note_id, comment_id):
+        """
+        检查评论是否仍然存在（是否已被删除）
+
+        返回: (exists: bool, err_msg: str)
+        """
+        result = subprocess.run(
+            ["xhs", "sub-comments", note_id, comment_id],
+            capture_output=True, text=True, timeout=15
+        )
+        output = result.stdout + result.stderr
+        # 正常返回子评论列表或空列表 → 评论存在
+        if "ok: true" in output or '"ok": true' in output:
+            return True, ""
+        # 尝试检测评论不存在
+        for keyword in ["not found", "不存在", "已删除", "deleted", "-1"]:
+            if keyword in output.lower():
+                return False, output[:200]
+        # 返回空但没报错也可能是存在（只是无子回复），保守认为存在
+        if result.returncode == 0 and output.strip() == "":
+            return True, ""
+        return True, ""  # 无法判定时保守认为存在
+
+    @staticmethod
+    def _extract_error_from_output(output: str) -> tuple:
+        """
+        从 xhs CLI 输出中提取错误信息（支持 JSON 和 YAML 两种格式）
+
+        返回: (err_msg: str, error_str: str)
+        """
+        err_msg = ""
+        error_str = ""
+
+        # 尝试1: JSON 格式解析
+        try:
+            err_data = json.loads(output.strip())
+            if isinstance(err_data, dict):
+                err_msg = err_data.get("error", {}).get("message", "")
+                error_str = json.dumps(err_data, ensure_ascii=False)[:200]
+                if err_msg:
+                    return err_msg, error_str
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+        # 尝试2: YAML 格式解析（手动提取 message 字段）
+        try:
+            # 查找 message 行: "  message: '...'" 或 "  message: ..."
+            for line in output.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("message:") or stripped.startswith("message: "):
+                    # 提取 message 值（支持单引号和双引号）
+                    val = stripped.split(":", 1)[1].strip()
+                    if val.startswith("'") and val.endswith("'"):
+                        err_msg = val[1:-1]
+                    elif val.startswith('"') and val.endswith('"'):
+                        err_msg = val[1:-1]
+                    else:
+                        err_msg = val
+                    # 如果 msg 中包含 'API error: {...}', 提取真正的 msg
+                    if "API error:" in err_msg:
+                        api_part = err_msg.split("API error:", 1)[1].strip()
+                        try:
+                            api_data = json.loads(api_part)
+                            err_msg = api_data.get("msg", err_msg)
+                        except json.JSONDecodeError:
+                            pass
+                    error_str = output[:200]
+                    break
+        except Exception:
+            pass
+
+        if not error_str:
+            error_str = output[:200]
+        return err_msg, error_str
+
+    @staticmethod
     def reply(note_id, comment_id, content):
-        """回复评论"""
+        """
+        回复评论
+
+        返回: (ok: bool, err_msg: str, err_type: str)
+          err_type: "" | "comment_deleted" | "content_rejected" | "unknown_error"
+        """
         result = subprocess.run(
             ["xhs", "reply", note_id, "--comment-id", comment_id, "-c", content],
             capture_output=True, text=True, timeout=20
         )
         output = result.stdout + result.stderr
         if "ok: true" in output or '"ok": true' in output:
-            return True, ""
-        # 解析错误码
-        try:
-            err_data = json.loads(result.stdout)
-            err_msg = err_data.get("error", {}).get("message", "unknown")
-            return False, f"[{err_data.get('error',{}).get('code','?')}] {err_msg}"
-        except Exception:
-            return False, output[:200]
+            return True, "", ""
+
+        # 提取错误信息（优先从 stdout，fallback 到合并输出）
+        raw_output = result.stdout or output
+        err_msg, error_str = XHSClient._extract_error_from_output(raw_output)
+
+        # 分级错误类型
+        err_type = "unknown_error"
+        combined = output.lower()
+
+        # 1) 评论已删除（最高优先级：同时检查解析出的 msg 和原始输出）
+        if "评论已删除" in err_msg or "评论已删除" in combined:
+            err_type = "comment_deleted"
+        # 2) 频率限制：-9043 或 "太快" / "过快" / "频率"
+        elif "-9043" in combined or "太快" in combined or "过快" in combined or "频率" in combined or "请稍后" in combined:
+            err_type = "rate_limited"
+        # 3) 内容审核拦截：-9126, -9128
+        elif "-9126" in combined or "-9128" in combined:
+            err_type = "content_rejected"
+        # 4) 其他回复失败
+        elif "回复失败" in combined:
+            err_type = "unknown_error"
+
+        return False, error_str, err_type
 
     # ---------- 缓存 ----------
     @staticmethod
@@ -425,6 +512,9 @@ class XHSClient:
         """
         获取评论（优先使用缓存）
 
+        默认不带 xsec_token 请求；如果平台拒绝（如部分笔记需要 token），
+        自动降级：查找 xsec_token 后重试。
+
         返回: (comments_list, from_cache: bool)
         """
         if not force_refresh:
@@ -432,8 +522,35 @@ class XHSClient:
             if cached is not None:
                 return cached, True
 
-        comments = XHSClient.get_all_comments(note_id, xsec_token)
-        XHSClient.save_cache(note_id, comments)
+        comments = None
+        # 第一次：不带 xsec_token（优先）
+        try:
+            comments = XHSClient.get_all_comments(note_id, "")
+            XHSClient.save_cache(note_id, comments)
+            return comments, False
+        except RuntimeError:
+            pass
+
+        # 降级：查找 xsec_token 后重试
+        if xsec_token:
+            resolved_token = xsec_token
+        else:
+            try:
+                resolved_token = XHSClient.find_note_xsec(note_id)
+            except RuntimeError:
+                resolved_token = ""
+
+        if resolved_token:
+            try:
+                comments = XHSClient.get_all_comments(note_id, resolved_token)
+                XHSClient.save_cache(note_id, comments)
+                return comments, False
+            except RuntimeError:
+                pass
+
+        # 两次都失败了
+        if comments is None:
+            raise RuntimeError(f"获取评论失败: 尝试了不带/带 xsec_token 两种方式均失败")
         return comments, False
 
     @staticmethod
