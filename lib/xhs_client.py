@@ -322,8 +322,12 @@ class XHSClient:
 
     @staticmethod
     def get_comments_until_ids(note_id, target_ids, xsec_token="",
-                               max_pages=5):
-        """逐页读取，找到全部目标评论后立即停止，减少在线核验耗时。"""
+                               max_pages=50):
+        """逐页读取，找到全部目标评论后立即停止，减少在线核验耗时。
+
+        max_pages 为安全上限：每页约 10 条，50 页可覆盖约 500 条评论，
+        足以覆盖绝大多数笔记；找到全部目标 ID 或无更多页时立即返回。
+        """
         from config import REQUEST_DELAY
 
         target_ids = set(target_ids)

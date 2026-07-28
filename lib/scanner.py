@@ -94,9 +94,12 @@ class CommentScanner:
                 continue
             full_subs = self.client.get_sub_comments(note_id, comment.get("id", ""))
             if len(full_subs) < expected:
-                raise RuntimeError(
-                    f"评论 {comment.get('id', '')} 的楼中楼在线数据不完整"
-                )
+                # 楼中楼在线拉取不全（验证码/限流等），回退到内联数据，
+                # 不再整批中止。内联数据已包含作者较常见的回复，扫描时
+                # 已据此判断未回复状态；一级评论核验不受影响。
+                print(f"  ⚠️ 楼中楼在线数据不全（验证码/限流），回退到内联数据: "
+                      f"{comment.get('id', '')}")
+                continue
             comment["sub_comments"] = full_subs
 
         existing_ids, replied_ids = self._online_reply_index(comments)
