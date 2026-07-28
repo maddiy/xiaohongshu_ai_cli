@@ -56,8 +56,9 @@
 - 表格用于向用户展示；AI 与 CLI 之间仍使用 JSON。
 - 不得在表格中显示 Cookie、`xsec_token` 或其他账号凭据。
 - 多篇笔记的评论必须按笔记分组，每篇笔记分别显示一张表。
-- 分组标题使用 `笔记标题（笔记 ID）`；无标题时使用 `无标题（笔记 ID）`。
+- 分组标题必须带文章序号，使用 `序号. 笔记标题（笔记 ID）`；无标题时使用 `序号. 无标题（笔记 ID）`。
 - 笔记标题和笔记 ID 只显示在分组标题中，不在评论表内重复展示。
+- `scan --json` 的 `per_note[].note_index` 是文章分组序号，AI 必须优先使用该字段，不得自行重新排序。
 
 ## 统一工作目录
 
@@ -95,6 +96,48 @@ python3 main.py paths --note-id <笔记ID>
 - 只有用户明确要求保留多个版本时才创建额外文件。
 - `.cache/` 已被 Git 忽略，不会提交账号工作数据。
 - 每条发送结果会立即写回 `drafts.json`；其他 AI 读取 `send_status` 后不会重复发送。
+
+## 回复评论的唯一判定逻辑
+
+`scan.json` 中的 `unreplied_level1` 和 `unreplied_subs` **只是平台扫描候选，不是最终待回复清单**。通知可能延迟，已经发送成功的评论仍可能再次出现在扫描结果中。所有 AI 必须同时读取同一笔记目录中的 `scan.json`、`drafts.json`、`reply_map.json` 以及全局 `.cache/skipped.json`，再按以下顺序判定。
+
+状态优先级从高到低：
+
+1. `drafts.json` 中 `send_status: "sent"`：已经发送成功，禁止再次生成、预览或发送。
+2. `drafts.json` 中 `send_status: "archived"`，或评论 ID 已在 `.cache/skipped.json`：已经归档，禁止回复。
+3. `drafts.json` 中 `send_status: "failed"`：本轮已经尝试失败，程序会自动加入 `.cache/skipped.json`，禁止自动重试。
+4. 平台扫描确认已回复或评论已删除：禁止生成回复。
+5. 只有不属于以上状态、出现在本次扫描候选中，并且 `reply_status_verified: true` 的评论，才是“可回复评论”。
+
+可回复条件必须全部成立：
+
+```text
+comment_id 出现在 scan.json 的 unreplied_level1 或 unreplied_subs
+AND scan.json.reply_status_verified == true
+AND drafts.json 中不存在 send_status 为 sent、failed 或 archived 的同一 comment_id
+AND comment_id 不在 .cache/skipped.json
+AND 评论未删除
+```
+
+标准执行顺序：
+
+1. 运行 `paths`，读取已有 `drafts.json` 和跳过列表。
+2. 重新运行 `scan`，得到本次平台候选。
+3. 生成草稿前必须再次在线读取平台评论树，以 `target_comment.id` 核验一级评论和楼中楼是否已被作者直接回复。
+4. 以 `comment_id` 为唯一键，再用本地终态过滤扫描候选。
+5. 如果过滤后为零，直接报告“没有可回复评论”，不得复用旧 `reply_map.json` 重新生成草稿。
+6. 只为过滤后剩余的评论更新 `reply_map.json`。
+7. 运行 `drafts` 后再次确认没有覆盖历史 `sent`、`failed`、`archived` 状态。
+8. 执行 `send --dry-run` 并用表格展示草稿。
+9. 获得用户明确确认后才执行实际发送。
+
+禁止行为：
+
+- 不得因为评论再次出现在 `scan.json` 中，就把它视为新的未回复评论。
+- 不得覆盖或删除历史 `send_status` 来绕过去重。
+- 本地数据库没有发送记录，不代表平台上没有回复；`drafts` 会强制在线核验，在线核验失败时停止生成草稿。
+- 所有 `failed` 评论都会自动加入排除列表。需要重试时必须先说明失败原因、取得用户明确授权，并从跳过列表移除。
+- 不得在没有新候选时复用旧 `reply_map.json` 批量重建草稿。
 
 ## 安装
 
@@ -277,18 +320,21 @@ python3 main.py articles --limit 20 --json
 # 3. 扫描评论
 python3 main.py scan --note-id <note_id> --json
 
-# 4. AI 读取固定 scan.json，并更新同目录 reply_map.json
+# 4. AI 同时读取 scan.json、drafts.json 和 .cache/skipped.json，
+#    按 comment_id 排除 sent、failed、archived、已跳过和已删除评论
 
-# 5. 生成可审核草稿
+# 5. 仅为过滤后仍可回复的评论更新同目录 reply_map.json
+
+# 6. 生成可审核草稿
 python3 main.py drafts \
   --note-id <note_id> \
   --from-scan .cache/workflows/<note_id>/scan.json \
   --batch .cache/workflows/<note_id>/reply_map.json
 
-# 6. 预览
+# 7. 预览
 python3 main.py send --file .cache/workflows/<note_id>/drafts.json --dry-run
 
-# 7. 获得用户确认后发送
+# 8. 获得用户确认后发送
 python3 main.py send --file .cache/workflows/<note_id>/drafts.json
 ```
 
@@ -502,10 +548,12 @@ python3 main.py skipped --clear
 
 | 错误类型 | 建议处理 |
 |---|---|
-| `comment_deleted` | 评论已删除，不再重试 |
+| `comment_deleted` | 评论已删除，自动加入排除列表，不再重试 |
 | `rate_limited` | 停止或延迟发送，避免连续请求 |
 | `content_rejected` | 修改措辞，重新预览后再发送 |
 | `unknown_error` | 保存错误信息，检查登录和平台状态 |
+
+无论错误类型是什么，回复失败后都会写入 `.cache/skipped.json`。如需重试，必须先获得用户明确授权，再使用 `skipped --remove <comment_id>` 移出排除列表。
 
 如果出现验证码或平台验证，应停止自动操作，由用户亲自完成验证。
 

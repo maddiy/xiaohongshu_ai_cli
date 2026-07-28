@@ -9,9 +9,89 @@ from unittest.mock import MagicMock, patch
 
 import main
 from lib.replier import Replier
+from lib.scanner import CommentScanner
 
 
 class CompactOutputTests(unittest.TestCase):
+    def test_online_reply_index_tracks_direct_nested_reply(self):
+        comments = [{
+            "id": "root",
+            "sub_comments": [
+                {
+                    "id": "candidate",
+                    "user_info": {"user_id": "other"},
+                },
+                {
+                    "id": "author-reply",
+                    "user_info": {"user_id": "6321167e0000000023038acd"},
+                    "target_comment": {"id": "candidate"},
+                },
+            ],
+        }]
+        existing, replied = CommentScanner._online_reply_index(comments)
+        self.assertEqual(existing, {"root", "candidate", "author-reply"})
+        self.assertEqual(replied, {"candidate"})
+
+    def test_online_verification_excludes_replied_and_missing(self):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = [{
+            "id": "keep",
+            "sub_comments": [{
+                "id": "author-reply",
+                "user_info": {"user_id": "6321167e0000000023038acd"},
+                "target_comment": {"id": "replied"},
+            }, {
+                "id": "replied",
+                "user_info": {"user_id": "other"},
+            }],
+        }]
+        eligible, excluded = CommentScanner(client).verify_candidates_online(
+            "note",
+            [
+                {"comment_id": "keep"},
+                {"comment_id": "replied"},
+                {"comment_id": "missing"},
+            ],
+        )
+        self.assertEqual(eligible, [{"comment_id": "keep"}])
+        self.assertEqual(
+            excluded,
+            [
+                {"comment_id": "replied", "reason": "online_replied"},
+                {"comment_id": "missing", "reason": "online_missing"},
+            ],
+        )
+
+    def test_online_verification_fetches_incomplete_candidate_thread(self):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = [{
+            "id": "root",
+            "sub_comment_count": "2",
+            "sub_comments": [{
+                "id": "candidate",
+                "user_info": {"user_id": "other"},
+            }],
+        }]
+        client.get_sub_comments.return_value = [
+            {
+                "id": "candidate",
+                "user_info": {"user_id": "other"},
+            },
+            {
+                "id": "author-reply",
+                "user_info": {"user_id": "6321167e0000000023038acd"},
+                "target_comment": {"id": "candidate"},
+            },
+        ]
+        eligible, excluded = CommentScanner(client).verify_candidates_online(
+            "note", [{"comment_id": "candidate"}]
+        )
+        self.assertEqual(eligible, [])
+        self.assertEqual(
+            excluded,
+            [{"comment_id": "candidate", "reason": "online_replied"}],
+        )
+
     def test_compact_comment_removes_internal_fields(self):
         source = {
             "comment_id": "c1",
@@ -40,6 +120,29 @@ class CompactOutputTests(unittest.TestCase):
             "unreplied_subs": [],
         })
         self.assertTrue(compact["reply_status_verified"])
+
+    def test_compact_scan_numbers_comment_note_groups(self):
+        compact = main.compact_scan_result({
+            "note_id": "all",
+            "unreplied_level1": [],
+            "unreplied_subs": [],
+            "per_note": [
+                {
+                    "note_id": "n1",
+                    "unreplied_level1": [],
+                    "unreplied_subs": [],
+                },
+                {
+                    "note_id": "n2",
+                    "unreplied_level1": [],
+                    "unreplied_subs": [],
+                },
+            ],
+        })
+        self.assertEqual(
+            [item["note_index"] for item in compact["per_note"]],
+            [1, 2],
+        )
 
     def test_scan_summary_does_not_repeat_comments(self):
         result = {
@@ -196,6 +299,32 @@ class CompactOutputTests(unittest.TestCase):
             second = Replier(client)
             second.send_drafts(saved, state_file=state_file)
             self.assertEqual(client.reply.call_count, 1)
+
+    @patch("lib.replier.time.sleep")
+    def test_all_failed_replies_are_added_to_skipped_list(self, _sleep):
+        for error_type in (
+            "comment_deleted", "content_rejected",
+            "rate_limited", "unknown_error",
+        ):
+            with self.subTest(error_type=error_type):
+                client = MagicMock()
+                client.reply.return_value = (False, "发送失败", error_type)
+                client.is_skipped.return_value = False
+                drafts = {
+                    "note_id": "n1",
+                    "drafts": [{
+                        "comment_id": f"c-{error_type}",
+                        "nickname": "用户",
+                        "content": "评论",
+                        "reply": "回复",
+                        "action": "send",
+                    }],
+                }
+                Replier(client).send_drafts(drafts)
+                client.add_skipped.assert_called_once()
+                self.assertEqual(
+                    drafts["drafts"][0]["send_status"], "failed"
+                )
 
 
 if __name__ == "__main__":

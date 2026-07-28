@@ -87,6 +87,32 @@ python3 main.py scan --note-id <笔记ID> --full-scan --xsec-token <令牌>
 | `--json` | 终端只输出紧凑 JSON 摘要 |
 
 未指定 `--output` 时，扫描结果自动保存到固定的 `scan.json`。
+扫描多篇笔记时，`per_note` 中每篇文章都包含从 1 开始的
+`note_index`。面向用户展示评论时，文章分组标题使用
+`序号. 标题（笔记 ID）`。
+
+### 扫描候选与最终可回复清单
+
+`scan.json` 的 `unreplied_level1` 和 `unreplied_subs` 只是平台扫描候选。通知数据可能延迟，因此已经成功发送的评论仍可能再次出现。AI 在生成回复前必须以 `comment_id` 为键，同时读取：
+
+- `.cache/workflows/<笔记ID>/scan.json`
+- `.cache/workflows/<笔记ID>/drafts.json`
+- `.cache/workflows/<笔记ID>/reply_map.json`
+- `.cache/skipped.json`
+
+只有同时满足以下条件的评论才允许进入 `reply_map.json`：
+
+```text
+reply_status_verified == true
+且 comment_id 位于本次扫描候选中
+且 drafts.json 不存在相同 comment_id 的 sent、failed、archived 状态
+且 comment_id 不在跳过列表
+且评论没有被删除
+```
+
+状态优先级为：`sent` > `archived/跳过` > `failed` > 平台扫描候选。候选列表不得覆盖本地终态。
+
+如果过滤后没有评论，直接结束并报告“没有可回复评论”。不得复用旧 `reply_map.json` 重建草稿。
 
 ## `drafts`：生成回复草稿
 
@@ -118,6 +144,9 @@ python3 main.py drafts \
 
 未指定 `--output` 时，草稿自动保存到固定的 `drafts.json`。
 默认要求扫描文件中的 `reply_status_verified` 为 `true`。
+此外，`drafts` 在生成草稿前会强制在线读取最新评论树，按作者回复的
+`target_comment.id` 再次核验一级评论和楼中楼。即使本地没有发送记录，
+平台已经回复的评论也会被排除；在线核验失败时不会生成草稿。
 
 ## `send`：预览和发送回复
 
@@ -148,6 +177,8 @@ python3 main.py send \
 - `send_status: "sent"`：发送成功，不会重复发送
 - `send_status: "failed"`：发送失败，保留错误类型
 - `send_status: "archived"`：已经归档
+
+当前实现把 `sent`、`failed` 和 `archived` 都视为自动发送终态。所有 `failed` 评论会自动加入 `.cache/skipped.json`，不会自动重试；需要重试时，必须先向用户展示 `error_type` 和 `last_error`，取得明确授权，并用 `skipped --remove <comment_id>` 移出排除列表。
 
 ## `reply`：传统交互回复
 

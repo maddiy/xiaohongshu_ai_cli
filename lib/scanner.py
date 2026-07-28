@@ -36,6 +36,83 @@ class CommentScanner:
         )
 
     @staticmethod
+    def _online_reply_index(comments: list) -> tuple:
+        """
+        从平台实时评论树建立“存在的评论”和“作者已直接回复的评论”索引。
+
+        作者回复楼中楼时，以 target_comment.id 为准，不能只把所属的
+        一级评论标记为已回复，否则会漏掉人工回复过的楼中楼评论。
+        """
+        existing_ids = set()
+        replied_ids = set()
+        for comment in comments:
+            comment_id = comment.get("id", "")
+            if comment_id:
+                existing_ids.add(comment_id)
+            for sub in comment.get("sub_comments", []):
+                sub_id = sub.get("id", "")
+                if sub_id:
+                    existing_ids.add(sub_id)
+                if sub.get("user_info", {}).get("user_id", "") != AUTHOR_USER_ID:
+                    continue
+                target_id = sub.get("target_comment", {}).get("id", "")
+                if target_id:
+                    replied_ids.add(target_id)
+                elif comment_id:
+                    replied_ids.add(comment_id)
+        return existing_ids, replied_ids
+
+    def verify_candidates_online(self, note_id: str, candidates: list,
+                                 xsec_token: str = "") -> tuple:
+        """
+        草稿生成前强制从平台重新核验候选评论。
+
+        返回 (可回复评论, 已排除明细)。在线请求失败时抛出异常，调用方
+        必须停止生成草稿，不能用本地数据库状态代替平台状态。
+        """
+        candidate_ids = {
+            item.get("comment_id", "") for item in candidates
+            if item.get("comment_id")
+        }
+        comments = self.client.get_comments_until_ids(
+            note_id, candidate_ids, xsec_token
+        )
+
+        # 候选位于数据未完整展开的楼层时，必须拉取完整楼中楼；否则作者
+        # 较晚发出的回复可能不在内联数组中，仍会被误判为未回复。
+        for comment in comments:
+            inline_subs = comment.get("sub_comments", [])
+            visible_ids = {
+                item.get("id", "") for item in inline_subs if item.get("id")
+            }
+            thread_contains_candidate = (
+                comment.get("id", "") in candidate_ids
+                or bool(candidate_ids & visible_ids)
+            )
+            expected = int(comment.get("sub_comment_count", 0) or 0)
+            if not thread_contains_candidate or expected <= len(inline_subs):
+                continue
+            full_subs = self.client.get_sub_comments(note_id, comment.get("id", ""))
+            if len(full_subs) < expected:
+                raise RuntimeError(
+                    f"评论 {comment.get('id', '')} 的楼中楼在线数据不完整"
+                )
+            comment["sub_comments"] = full_subs
+
+        existing_ids, replied_ids = self._online_reply_index(comments)
+        eligible = []
+        excluded = []
+        for candidate in candidates:
+            comment_id = candidate.get("comment_id", "")
+            if comment_id in replied_ids:
+                excluded.append({"comment_id": comment_id, "reason": "online_replied"})
+            elif comment_id not in existing_ids:
+                excluded.append({"comment_id": comment_id, "reason": "online_missing"})
+            else:
+                eligible.append(candidate)
+        return eligible, excluded
+
+    @staticmethod
     def _extract_non_author_subs(sub_comments: list, parent_id: str,
                                   parent_nick: str, skipped_ids: set = None) -> list:
         """从内联楼中楼数据中提取非作者的楼中楼评论（无需额外API调用）"""
@@ -186,7 +263,10 @@ class CommentScanner:
             results.append(result)
 
             if verbose:
-                print(f"\n📌 {entry.get('note_title', eid)}")
+                print(
+                    f"\n📌 {len(results)}. "
+                    f"{entry.get('note_title', '') or '无标题'}（{eid}）"
+                )
                 print(f"   通知中 {len(new_comments)} 条新评论，实际未回复 {len(unreplied)} 条")
                 for u in unreplied:
                     print(f"   ⚠️ [一级] @{u['nickname']}: {u['content'][:60]}")

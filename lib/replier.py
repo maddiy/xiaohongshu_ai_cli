@@ -37,23 +37,19 @@ class Replier:
     def _archive_on_failure(self, cid: str, nick: str, content: str,
                              err: str, note_id: str, err_type: str = "unknown_error"):
         """
-        回复失败处理
-          - content_rejected: 内容被审核拦截 → 加入跳过列表
-          - comment_deleted: 评论已被删除 → 不加入跳过列表，仅警告
-          - unknown_error: 未知错误 → 保守加入跳过列表
+        回复失败处理：所有失败评论统一加入跳过列表，避免后续扫描或其他 AI 重试。
         """
-        if err_type == "comment_deleted":
-            print(f"  ⚠️ 评论已被作者删除，不归档到跳过列表")
-            return
         reason = f"api_error[{err_type}]: {err[:50]}"
         self.client.add_skipped(
             cid, nick, content,
             reason=reason, note_id=note_id
         )
-        if err_type == "content_rejected":
+        if err_type == "comment_deleted":
+            print(f"  📁 评论已删除，已加入跳过列表")
+        elif err_type == "content_rejected":
             print(f"  📁 内容被拦截，已加入跳过列表（可调整措辞后手动移除重试）")
         else:
-            print(f"  📁 已自动加入跳过列表")
+            print(f"  📁 回复失败，已自动加入跳过列表")
 
     # ---------- 草稿模式 ----------
     def generate_drafts(self, unreplied: list,

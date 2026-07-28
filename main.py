@@ -98,9 +98,11 @@ def compact_scan_result(result):
         if key in result:
             compact[key] = result[key]
     if result.get("per_note"):
-        compact["per_note"] = [
-            compact_scan_result(item) for item in result["per_note"]
-        ]
+        compact["per_note"] = []
+        for index, item in enumerate(result["per_note"], start=1):
+            compact_item = compact_scan_result(item)
+            compact_item["note_index"] = index
+            compact["per_note"].append(compact_item)
     return compact
 
 
@@ -401,6 +403,35 @@ def cmd_drafts(args):
         print("✨ 全部已回复，无需操作")
         return
 
+    # 本地状态只能防止本程序重复发送；人工或其他客户端的回复必须在线确认。
+    # 在线核验失败时宁可停止，也不能继续生成可能重复的草稿。
+    try:
+        all_unreplied, online_excluded = scanner.verify_candidates_online(
+            args.note_id,
+            all_unreplied,
+            args.xsec_token or "",
+        )
+    except Exception as error:
+        print(f"❌ 在线核验评论回复状态失败，已停止生成草稿: {error}")
+        print("💡 请完成验证码或恢复网络后重试；不会使用本地记录代替在线核验")
+        return
+
+    if online_excluded:
+        replied_count = sum(
+            item["reason"] == "online_replied" for item in online_excluded
+        )
+        missing_count = sum(
+            item["reason"] == "online_missing" for item in online_excluded
+        )
+        print(
+            f"🌐 在线核验已排除: 已回复 {replied_count} | "
+            f"已删除或不可见 {missing_count}"
+        )
+
+    if not all_unreplied:
+        print("✨ 在线核验后没有可回复评论，不生成草稿")
+        return
+
     replier = Replier()
 
     if args.batch:
@@ -662,7 +693,7 @@ def cmd_doctor(args):
 def cmd_ai_help(args):
     """输出稳定的机器可读调用协议。"""
     spec = {
-        "schema_version": "1",
+        "schema_version": "2",
         "language": "zh-CN",
         "safety": {
             "scan_is_read_only": True,
@@ -670,13 +701,45 @@ def cmd_ai_help(args):
             "send_requires_user_review_recommended": True,
             "post_dry_run_recommended": True,
         },
+        "reply_decision": {
+            "warning": "scan.json 的 unreplied_* 只是平台候选，不是最终待回复清单",
+            "required_files": [
+                ".cache/workflows/<id>/scan.json",
+                ".cache/workflows/<id>/drafts.json",
+                ".cache/workflows/<id>/reply_map.json",
+                ".cache/skipped.json",
+            ],
+            "key": "comment_id",
+            "terminal_statuses": ["sent", "failed", "archived"],
+            "status_precedence": [
+                "drafts.send_status=sent",
+                "drafts.send_status=archived 或 skipped.json",
+                "drafts.send_status=failed",
+                "平台已回复或评论已删除",
+                "scan.json 候选",
+            ],
+            "eligible_when_all": [
+                "scan.reply_status_verified=true",
+                "comment_id 在本次 unreplied_level1 或 unreplied_subs",
+                "drafts 中同 comment_id 不为 sent、failed、archived",
+                "comment_id 不在 skipped.json",
+                "评论未删除",
+            ],
+            "empty_result": "报告没有可回复评论；禁止复用旧 reply_map.json",
+            "failed_handling": "所有失败评论自动加入 skipped.json；默认不重试",
+            "failed_retry": "展示失败原因，取得用户明确授权，并从 skipped.json 移除后再处理",
+        },
         "workflows": {
             "reply": [
                 "python3 main.py paths --note-id <id>",
+                "读取已有 drafts.json 和 .cache/skipped.json",
                 "python3 main.py scan --note-id <id> --json",
-                "读取固定 scan.json，生成同目录 reply_map.json",
+                "按 comment_id 和 reply_decision 过滤平台候选",
+                "仅为过滤后可回复评论生成同目录 reply_map.json",
+                "若过滤后为空，报告没有可回复评论并停止",
                 "python3 main.py drafts --note-id <id> --from-scan .cache/workflows/<id>/scan.json --batch .cache/workflows/<id>/reply_map.json",
                 "python3 main.py send --file .cache/workflows/<id>/drafts.json --dry-run",
+                "获得用户明确确认",
                 "python3 main.py send --file .cache/workflows/<id>/drafts.json",
             ],
             "post": [
@@ -843,7 +906,6 @@ def main():
     subparsers.add_parser("ai-help", help="输出 AI 调用协议（JSON）")
     p_paths = subparsers.add_parser("paths", help="显示指定笔记的固定工作文件路径")
     p_paths.add_argument("--note-id", default="all", help="笔记ID（默认 all）")
-
     args = parser.parse_args()
 
     if not args.command:

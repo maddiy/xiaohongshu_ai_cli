@@ -29,6 +29,10 @@ description: >
 14. 所有 AI 必须复用 `.cache/workflows/<笔记ID>/`，不得为同一批任务另建临时存档。
 15. 生成任何回复内容前，必须先检查该评论是否已经被作者回复。
 16. 只有扫描结果中 `reply_status_verified` 为 `true` 时，才生成回复草稿。
+17. `scan.json` 中的未回复数组只是候选；`drafts.json` 的历史发送状态优先级更高。
+18. 同一 `comment_id` 已标记为 `sent`、`failed` 或 `archived` 时，不得重新生成或发送。
+19. 本地没有发送记录不等于平台没有回复；运行 `drafts` 时必须再次在线读取评论树，并按作者回复的 `target_comment.id` 核验一级评论和楼中楼。
+20. 在线核验失败、需要验证码或候选评论在平台不可见时，停止生成该评论的草稿，不得用本地状态推断为未回复。
 
 ## 固定工作目录
 
@@ -63,6 +67,33 @@ python3 main.py paths --note-id <note_id>
 - `.cache` 已被 Git 忽略，不提交账号工作数据。
 - 发送状态会逐条写回 `drafts.json`；先读取 `send_status`，不得重复发送已标记为 `sent` 的项目。
 
+## 回复评论判定算法
+
+所有 AI 必须逐条按 `comment_id` 执行以下算法，不得仅凭 `scan.json` 生成回复：
+
+```text
+1. 读取 scan.json、drafts.json、reply_map.json 和 .cache/skipped.json。
+2. 如果 scan.json.reply_status_verified != true：停止，不生成回复。
+3. 对 scan.json 的每个候选评论：
+   a. drafts.json 中 send_status == sent：排除，状态为“已回复”。
+   b. drafts.json 中 send_status == archived：排除，状态为“已归档”。
+   c. drafts.json 中 send_status == failed：排除，状态为“发送失败”；程序应已将其加入排除列表。
+   d. comment_id 在 .cache/skipped.json：排除，状态为“已跳过”。
+   e. 平台确认评论已删除或作者已回复：排除。
+   f. 以上均不成立：加入本次可回复清单。
+4. 可回复清单为空：报告“没有可回复评论”，不得使用旧 reply_map.json。
+5. 只为可回复清单创建或更新 reply_map.json。
+6. 生成 drafts.json 后，历史 sent、failed、archived 状态必须保留。
+7. 先 dry-run 展示，用户确认后再发送。
+```
+
+关键解释：
+
+- 通知扫描存在延迟，已经发送成功的评论可能再次出现在 `unreplied_level1` 中。
+- `unreplied_level1` 和 `unreplied_subs` 的含义是“本次平台候选”，不是“最终允许发送”。
+- 本地 `send_status` 是防止不同 AI 重复发送的最终依据。
+- `failed` 在当前程序中属于终态，所有失败评论都会自动加入 `.cache/skipped.json`；如需重试，必须先展示失败原因、获得明确授权并移出排除列表。
+
 ## 表格展示规范
 
 所有使用本技能的 AI 必须遵守以下展示格式：
@@ -83,8 +114,9 @@ python3 main.py paths --note-id <note_id>
 - 笔记列表必须保持上述列名和顺序；除非用户明确要求，否则不得增删、改名或调整顺序。
 - “状态”列统一使用“正常、回复了你的评论、已回复、已删除、已跳过、发送成功、发送失败”等明确中文状态。
 - 同时展示多篇笔记的评论时，必须先按笔记分组，每篇笔记分别使用一张评论表。
-- 每组标题使用 `笔记标题（笔记 ID）`；无标题时使用 `无标题（笔记 ID）`。
+- 每组标题使用 `序号. 笔记标题（笔记 ID）`；无标题时使用 `序号. 无标题（笔记 ID）`。
 - 笔记标题和笔记 ID 只显示在分组标题中，不在表格行内重复展示。
+- 多篇笔记扫描结果以 `per_note[].note_index` 作为文章序号，所有 AI 必须保持该序号和顺序。
 
 ## 环境检查与登录
 
@@ -145,6 +177,8 @@ python3 main.py scan --note-id <note_id> \
 生成回复前检查：
 
 - 确认 `scan.json` 的 `reply_status_verified` 为 `true`。
+- 同时读取 `drafts.json`，按 `comment_id` 排除 `sent`、`failed` 和 `archived`。
+- 同时读取 `.cache/skipped.json`，排除已跳过评论。
 - 已回复、已发送、已归档、已跳过或已删除的评论不得进入回复映射。
 - 核验失败时停止生成回复，并向用户说明原因。
 - `--allow-unverified` 仅用于用户明确接受重复回复风险的特殊情况，不得默认使用。
@@ -261,7 +295,7 @@ python3 main.py skipped --clear
 
 ## 错误处理
 
-- `comment_deleted`：不重试，不把评论删除描述成发送失败。
+- `comment_deleted`：加入排除列表且不重试，不把评论删除描述成发送成功。
 - `rate_limited`：停止发送或延迟重试，不连续快速提交。
 - `content_rejected`：修改措辞并重新预览，不原样反复提交。
 - `unknown_error`：保留错误信息并向用户准确汇报。

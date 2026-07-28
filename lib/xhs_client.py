@@ -286,18 +286,87 @@ class XHSClient:
     # ---------- 评论 ----------
     @staticmethod
     def get_all_comments(note_id, xsec_token=""):
-        """获取笔记的全部一级评论（自动翻页）"""
-        cmd = ["xhs", "comments", note_id, "--all", "--json"]
-        if xsec_token:
-            cmd += ["--xsec-token", xsec_token]
-        try:
-            data = XHSClient._run_xhs(cmd, timeout=120)
-        except RuntimeError as e:
-            raise RuntimeError(f"获取评论失败: {e}")
-        if not data.get("ok"):
-            err = data.get("error", {}).get("message", str(data))
-            raise RuntimeError(f"获取评论失败: {err}")
-        return data["data"]["comments"]
+        """逐页获取全部一级评论，避免底层 ``--all`` 长时间无输出。"""
+        from config import REQUEST_DELAY
+
+        comments = []
+        cursor = ""
+        seen_cursors = set()
+        while True:
+            cmd = ["xhs", "comments", note_id, "--json"]
+            if xsec_token:
+                cmd += ["--xsec-token", xsec_token]
+            if cursor:
+                cmd += ["--cursor", cursor]
+            try:
+                data = XHSClient._run_xhs(cmd, timeout=30)
+            except RuntimeError as error:
+                raise RuntimeError(f"获取评论失败: {error}")
+            if not data.get("ok"):
+                err = data.get("error", {}).get("message", str(data))
+                raise RuntimeError(f"获取评论失败: {err}")
+
+            page = data.get("data", {})
+            page_comments = page.get("comments", [])
+            comments.extend(page_comments)
+            next_cursor = str(page.get("cursor", "") or "")
+            has_more = bool(page.get("has_more", False))
+            if not has_more or not page_comments or not next_cursor:
+                break
+            if next_cursor in seen_cursors:
+                raise RuntimeError("获取评论失败: 平台返回了重复游标")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+            time.sleep(REQUEST_DELAY * 0.3)
+        return comments
+
+    @staticmethod
+    def get_comments_until_ids(note_id, target_ids, xsec_token="",
+                               max_pages=5):
+        """逐页读取，找到全部目标评论后立即停止，减少在线核验耗时。"""
+        from config import REQUEST_DELAY
+
+        target_ids = set(target_ids)
+        comments = []
+        found_ids = set()
+        cursor = ""
+        seen_cursors = set()
+        for _ in range(max_pages):
+            cmd = ["xhs", "comments", note_id, "--json"]
+            if xsec_token:
+                cmd += ["--xsec-token", xsec_token]
+            if cursor:
+                cmd += ["--cursor", cursor]
+            data = XHSClient._run_xhs(cmd, timeout=30)
+            if not data.get("ok"):
+                err = data.get("error", {}).get("message", str(data))
+                raise RuntimeError(f"获取评论失败: {err}")
+            page = data.get("data", {})
+            page_comments = page.get("comments", [])
+            comments.extend(page_comments)
+            for comment in page_comments:
+                comment_id = comment.get("id", "")
+                if comment_id in target_ids:
+                    found_ids.add(comment_id)
+                for sub in comment.get("sub_comments", []):
+                    sub_id = sub.get("id", "")
+                    if sub_id in target_ids:
+                        found_ids.add(sub_id)
+            if found_ids == target_ids:
+                return comments
+            next_cursor = str(page.get("cursor", "") or "")
+            if (
+                not page.get("has_more", False)
+                or not page_comments
+                or not next_cursor
+            ):
+                return comments
+            if next_cursor in seen_cursors:
+                raise RuntimeError("获取评论失败: 平台返回了重复游标")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+            time.sleep(REQUEST_DELAY * 0.3)
+        return comments
 
     @staticmethod
     def get_sub_comments(note_id, comment_id):
