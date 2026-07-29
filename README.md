@@ -13,14 +13,25 @@
 | 环境检查 | `doctor` | 检查 Python、`xhs`、账号和浏览器配置 |
 | 登录 | `login` | 从指定浏览器读取小红书 Cookie |
 | 查看笔记 | `articles` | 查看账号最近发布的笔记 |
-| 扫描评论 | `scan` | 查找尚未回复的评论 |
+| 查看评论 | `comments` | 查看最新评论及状态，不生成回复候选 |
+| 扫描待回复 | `scan` | 在线核验并查找尚未回复的评论 |
 | 生成草稿 | `drafts` | 交互输入或批量导入 AI 回复 |
 | 发送回复 | `send` | 预览并发送审核后的草稿 |
-| 直接回复 | `reply` | 传统的逐条交互回复模式 |
+| 兼容回复 | `reply` | 旧入口；发送前仍强制执行本地过滤和平台在线核验 |
 | 评论分析 | `analyze` | 统计评论、互动和粗略情感倾向 |
 | 跳过列表 | `skipped` | 管理不再处理的评论 |
 | 发布笔记 | `post` | 发布 AI 或人工准备好的图文笔记 |
 | AI 协议 | `ai-help` | 输出机器可读的标准调用流程 |
+
+### 代码结构
+
+| 文件 | 职责 |
+|---|---|
+| `main.py` | 回复工作流编排与命令分发 |
+| `lib/cli_parser.py` | 命令行参数定义 |
+| `lib/cli_view.py` | 登录、文章和评论查看 |
+| `lib/cli_admin.py` | 发布、分析、环境检查和 AI 协议 |
+| `lib/cli_support.py` | 原子存储、状态合并和精简输出 |
 
 ## 设计目标
 
@@ -50,6 +61,7 @@
 - 无标题统一显示“无标题”。
 - 已删除、已跳过、已回复和发送失败必须明确标注。
 - 评论列表默认固定使用 `序号、时间、用户、评论、状态`，并保持这一顺序。
+- 评论 ID 仅供程序内部核验和回复定位使用，不在面向用户的评论表格中显示。
 - 除非用户明确要求，否则所有 AI 不得增删、改名或调整评论列表的列。
 - 笔记列表默认固定使用 `序号、发布时间、评论数、标题、笔记 ID`，并保持这一顺序。
 - 除非用户明确要求，否则所有 AI 不得增删、改名或调整笔记列表的列。
@@ -233,18 +245,30 @@ xhs whoami
 
 ```bash
 python3 main.py articles
-python3 main.py articles --limit 20
+python3 main.py articles --limit 10
 ```
 
 机器可读输出：
 
 ```bash
-python3 main.py articles --limit 20 --json
+python3 main.py articles --limit 10 --json
 ```
 
-### 3. 扫描最新评论
+### 3. 查看最新评论
 
-默认模式从评论通知开始，适合日常处理：
+查看操作只读取通知，不创建或覆盖回复草稿：
+
+```bash
+python3 main.py comments
+python3 main.py comments --note-id <笔记ID>
+python3 main.py comments --limit 50 --json
+```
+
+结果按文章分组，并结合平台删除状态、本地发送终态和排除列表显示状态。
+
+### 4. 扫描可回复评论
+
+`scan` 专门用于回复准备，会过滤已删除、已跳过和本地终态，并在线核验平台回复：
 
 ```bash
 python3 main.py scan
@@ -261,7 +285,7 @@ python3 main.py scan \
 
 结果默认保存到 `.cache/workflows/<笔记ID>/scan.json`。
 
-### 4. 生成回复草稿
+### 5. 生成回复草稿
 
 人工逐条输入：
 
@@ -286,7 +310,7 @@ python3 main.py drafts \
   --batch .cache/workflows/<笔记ID>/reply_map.json
 ```
 
-### 5. 预览并发送
+### 6. 预览并发送
 
 先预览，不会发送：
 
@@ -315,7 +339,7 @@ python3 main.py send --file .cache/workflows/<笔记ID>/drafts.json --resume
 python3 main.py doctor --json
 
 # 2. 查看笔记并取得 note_id
-python3 main.py articles --limit 20 --json
+python3 main.py articles --limit 10 --json
 
 # 3. 扫描评论
 python3 main.py scan --note-id <note_id> --json

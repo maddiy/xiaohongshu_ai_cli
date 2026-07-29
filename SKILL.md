@@ -18,21 +18,22 @@ description: >
 3. 发送回复或发布笔记前必须先预览。
 4. 除非用户明确要求自动发送，否则先展示草稿并等待确认。
 5. AI 和脚本应优先使用 `--json` 与 `--output`，不要解析表格或 emoji。
-6. 默认使用通知快速扫描；只有用户明确要求完整检查时才使用 `--full-scan`。
-7. 不回复已删除或已加入跳过列表的评论。
-8. 批量回复时保留配置的请求间隔，避免触发平台限流。
-9. 不向用户展示 Cookie、`xsec_token` 或其他登录凭据。
-10. 向用户展示笔记列表、评论列表、回复草稿或发送结果明细时，统一使用 Markdown 表格。
-11. 表格只用于面向用户展示；AI 与命令行之间仍使用 JSON 文件或 `--json` 输出。
-12. 使用 `--output` 后优先读取生成的文件，不要求命令在终端重复输出完整数据。
-13. 评论分析默认使用摘要；只有用户明确需要全部明细时才使用 `analyze --json --details`。
-14. 所有 AI 必须复用 `.cache/workflows/<笔记ID>/`，不得为同一批任务另建临时存档。
-15. 生成任何回复内容前，必须先检查该评论是否已经被作者回复。
-16. 只有扫描结果中 `reply_status_verified` 为 `true` 时，才生成回复草稿。
-17. `scan.json` 中的未回复数组只是候选；`drafts.json` 的历史发送状态优先级更高。
-18. 同一 `comment_id` 已标记为 `sent`、`failed` 或 `archived` 时，不得重新生成或发送。
-19. 本地没有发送记录不等于平台没有回复；运行 `drafts` 时必须再次在线读取评论树，并按作者回复的 `target_comment.id` 核验一级评论和楼中楼。
-20. 在线核验失败、需要验证码或候选评论在平台不可见时，停止生成该评论的草稿，不得用本地状态推断为未回复。
+6. 用户只要求查看评论时使用 `comments`；只有要求回复时才使用 `scan`。
+7. 回复任务默认使用通知快速扫描；只有用户明确要求完整检查时才使用 `--full-scan`。
+8. 不回复已删除或已加入跳过列表的评论。
+9. 批量回复时保留配置的请求间隔，避免触发平台限流。
+10. 不向用户展示 Cookie、`xsec_token` 或其他登录凭据。
+11. 向用户展示笔记列表、评论列表、回复草稿或发送结果明细时，统一使用 Markdown 表格。
+12. 表格只用于面向用户展示；AI 与命令行之间仍使用 JSON 文件或 `--json` 输出。
+13. 使用 `--output` 后优先读取生成的文件，不要求命令在终端重复输出完整数据。
+14. 评论分析默认使用摘要；只有用户明确需要全部明细时才使用 `analyze --json --details`。
+15. 所有 AI 必须复用 `.cache/workflows/<笔记ID>/`，不得为同一批任务另建临时存档。
+16. 生成任何回复内容前，必须先检查该评论是否已经被作者回复。
+17. 只有扫描结果中 `reply_status_verified` 为 `true` 时，才生成回复草稿。
+18. `scan.json` 中的未回复数组只是候选；`drafts.json` 的历史发送状态优先级更高。
+19. 同一 `comment_id` 已标记为 `sent`、`failed` 或 `archived` 时，不得重新生成或发送。
+20. 本地没有发送记录不等于平台没有回复；运行 `drafts` 时必须再次在线读取评论树，并按作者回复的 `target_comment.id` 核验一级评论和楼中楼。
+21. 在线核验失败、需要验证码或候选评论在平台不可见时，停止生成该评论的草稿，不得用本地状态推断为未回复。
 
 ## 固定工作目录
 
@@ -100,6 +101,7 @@ python3 main.py paths --note-id <note_id>
 
 - 笔记列表默认且固定使用：`序号｜发布时间｜评论数｜标题｜笔记 ID`
 - 评论列表默认且固定使用：`序号｜时间｜用户｜评论｜状态`
+- `comment_id` 仅供内部处理，不得显示在面向用户的评论表格中。
 - 回复草稿使用：`序号｜用户｜原评论｜拟回复｜操作`
 - 发送结果使用：`序号｜用户｜回复摘要｜结果｜失败原因`
 
@@ -139,20 +141,31 @@ python3 main.py ai-help
 
 ```bash
 python3 main.py articles
-python3 main.py articles --limit 20
+python3 main.py articles --limit 10
 ```
 
 AI 或脚本使用：
 
 ```bash
-python3 main.py articles --limit 20 --json
+python3 main.py articles --limit 10 --json
 ```
 
 使用返回的 `id` 作为后续命令的 `<note_id>`。不得向用户展示结果中的 `xsec_token`。
 
-## 扫描评论
+## 查看评论
 
-默认从最新评论通知快速扫描：
+查看最新评论使用独立的只读命令，不得用 `scan` 代替：
+
+```bash
+python3 main.py comments --json
+python3 main.py comments --note-id <note_id> --limit 50 --json
+```
+
+`comments` 返回按文章分组的 `groups`，包含文章序号、评论时间、用户、正文和状态；它不会生成回复候选或修改草稿。
+
+## 扫描待回复评论
+
+只有用户要求回复评论时才运行 `scan`。默认从通知提取候选，先过滤删除、跳过和本地终态，再在线核验：
 
 ```bash
 python3 main.py scan --note-id <note_id> --json

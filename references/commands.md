@@ -46,15 +46,37 @@ python3 main.py login
 
 ```bash
 python3 main.py articles
-python3 main.py articles --limit 20
-python3 main.py articles --limit 20 --json
+python3 main.py articles --limit 10
+python3 main.py articles --limit 10 --json
 ```
 
-`--json` 输出经过精简，不包含 `xsec_token`。
+默认列为 `序号｜发布时间｜评论数｜标题｜笔记 ID`，无标题时显示
+“无标题”。`--json` 会返回同样的 `columns` 列名，并且不包含
+`xsec_token`。
+
+## `comments`：查看最新评论
+
+```bash
+python3 main.py comments
+python3 main.py comments --limit 50
+python3 main.py comments --note-id <笔记ID>
+python3 main.py comments --json
+```
+
+面向用户固定显示 `序号｜时间｜用户｜评论｜状态`，不显示评论 ID；
+JSON 内仍保留 `comment_id`，仅供在线核验和回复定位使用。
+
+完整扫描楼中楼时，程序会自动从本地文章索引取得 `xsec_token`，兼容
+`xiaohongshu-cli 0.6.4` 未给楼中楼接口传递文章令牌的问题。
+
+该命令只读通知并按文章分组，结合评论删除状态、`drafts.json` 本地终态和
+`.cache/skipped.json` 显示“正常、已回复、发送失败、已跳过、已删除”等状态。
+它不会生成回复候选，也不会修改草稿。
 
 ## `scan`：扫描未回复评论
 
-通知快速模式是默认模式：
+`scan` 只用于准备回复，不用于普通查看。通知快速模式会依次过滤已删除、
+跳过、本地终态，并在线核验平台评论树：
 
 ```bash
 python3 main.py scan
@@ -180,7 +202,9 @@ python3 main.py send \
 
 当前实现把 `sent`、`failed` 和 `archived` 都视为自动发送终态。所有 `failed` 评论会自动加入 `.cache/skipped.json`，不会自动重试；需要重试时，必须先向用户展示 `error_type` 和 `last_error`，取得明确授权，并用 `skipped --remove <comment_id>` 移出排除列表。
 
-## `reply`：传统交互回复
+## `reply`：兼容旧版的交互回复
+
+该命令保留给旧脚本使用，但不会绕过安全检查：发送前仍会排除本地已处理状态，并从平台在线核验是否已经回复。在线分页、验证码或楼中楼数据不完整时会停止，不会形成回复或发送。
 
 ```bash
 python3 main.py reply --note-id <笔记ID>

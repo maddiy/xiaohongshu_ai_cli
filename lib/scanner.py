@@ -29,11 +29,28 @@ class CommentScanner:
         return comment.get("user_info", {}).get("user_id", "") == AUTHOR_USER_ID
 
     @staticmethod
-    def _has_author_reply(sub_comments: list) -> bool:
-        return any(
-            sc.get("user_info", {}).get("user_id", "") == AUTHOR_USER_ID
-            for sc in sub_comments
-        )
+    def _author_reply_targets(sub_comments: list, parent_id: str = "") -> set:
+        """返回作者明确回复到的评论 ID；旧数据缺少目标时视为回复一级评论。"""
+        targets = set()
+        for sub in sub_comments:
+            if sub.get("user_info", {}).get("user_id", "") != AUTHOR_USER_ID:
+                continue
+            target_id = sub.get("target_comment", {}).get("id", "")
+            if target_id:
+                targets.add(target_id)
+            elif parent_id:
+                targets.add(parent_id)
+        return targets
+
+    @classmethod
+    def _has_author_reply(cls, sub_comments: list,
+                          target_id: str = "") -> bool:
+        """兼容旧调用；提供 target_id 时只判断作者是否回复了该评论。"""
+        if target_id:
+            return target_id in cls._author_reply_targets(
+                sub_comments, target_id
+            )
+        return bool(cls._author_reply_targets(sub_comments))
 
     @staticmethod
     def _online_reply_index(comments: list) -> tuple:
@@ -70,36 +87,47 @@ class CommentScanner:
         返回 (可回复评论, 已排除明细)。在线请求失败时抛出异常，调用方
         必须停止生成草稿，不能用本地数据库状态代替平台状态。
         """
+        if not xsec_token:
+            try:
+                resolved = self.client.find_note_xsec(note_id)
+                if isinstance(resolved, str):
+                    xsec_token = resolved
+            except RuntimeError:
+                pass
+
         candidate_ids = {
             item.get("comment_id", "") for item in candidates
             if item.get("comment_id")
         }
-        comments = self.client.get_comments_until_ids(
-            note_id, candidate_ids, xsec_token
+        lookup = self.client.get_comments_until_ids(
+            note_id, candidate_ids, xsec_token, with_status=True
         )
+        if isinstance(lookup, tuple):
+            comments, search_complete = lookup
+        else:
+            # 兼容旧客户端与测试替身；新客户端会返回完整性标志。
+            comments, search_complete = lookup, True
+        if not search_complete:
+            raise RuntimeError(
+                "达到在线核验页数上限，尚未找到全部候选评论；"
+                "无法安全判断评论是否已删除"
+            )
 
-        # 候选位于数据未完整展开的楼层时，必须拉取完整楼中楼；否则作者
-        # 较晚发出的回复可能不在内联数组中，仍会被误判为未回复。
+        # 必须展开所有不完整楼层：候选本身或作者对候选的回复都可能位于
+        # 未展示的楼中楼中。只展开“当前看见候选”的楼层仍会误判。
         for comment in comments:
             inline_subs = comment.get("sub_comments", [])
-            visible_ids = {
-                item.get("id", "") for item in inline_subs if item.get("id")
-            }
-            thread_contains_candidate = (
-                comment.get("id", "") in candidate_ids
-                or bool(candidate_ids & visible_ids)
-            )
             expected = int(comment.get("sub_comment_count", 0) or 0)
-            if not thread_contains_candidate or expected <= len(inline_subs):
+            if expected <= len(inline_subs):
                 continue
-            full_subs = self.client.get_sub_comments(note_id, comment.get("id", ""))
+            full_subs = self.client.get_sub_comments(
+                note_id, comment.get("id", ""), xsec_token
+            )
             if len(full_subs) < expected:
-                # 楼中楼在线拉取不全（验证码/限流等），回退到内联数据，
-                # 不再整批中止。内联数据已包含作者较常见的回复，扫描时
-                # 已据此判断未回复状态；一级评论核验不受影响。
-                print(f"  ⚠️ 楼中楼在线数据不全（验证码/限流），回退到内联数据: "
-                      f"{comment.get('id', '')}")
-                continue
+                raise RuntimeError(
+                    "楼中楼在线数据不完整，无法安全判断是否已经回复: "
+                    f"{comment.get('id', '')}"
+                )
             comment["sub_comments"] = full_subs
 
         existing_ids, replied_ids = self._online_reply_index(comments)
@@ -117,12 +145,17 @@ class CommentScanner:
 
     @staticmethod
     def _extract_non_author_subs(sub_comments: list, parent_id: str,
-                                  parent_nick: str, skipped_ids: set = None) -> list:
-        """从内联楼中楼数据中提取非作者的楼中楼评论（无需额外API调用）"""
+                                 parent_nick: str, skipped_ids: set = None,
+                                 replied_ids: set = None) -> list:
+        """提取尚未被作者直接回复的非作者楼中楼评论。"""
         result = []
+        replied_ids = replied_ids or set()
         for sc in sub_comments:
             if sc.get("user_info", {}).get("user_id", "") != AUTHOR_USER_ID:
-                if skipped_ids and sc["id"] in skipped_ids:
+                if (
+                    (skipped_ids and sc["id"] in skipped_ids)
+                    or sc["id"] in replied_ids
+                ):
                     continue
                 result.append({
                     "comment_id": sc["id"],
@@ -179,7 +212,23 @@ class CommentScanner:
         """
         if verbose:
             print(f"📬 拉取最新 {num_notifications} 条评论通知...")
-        aggregated = self.client.get_new_comment_notifications(num=num_notifications)
+        try:
+            aggregated = self.client.get_new_comment_notifications(
+                num=num_notifications
+            )
+        except Exception as error:
+            if verbose:
+                print(f"❌ 读取评论通知失败: {error}")
+            return {
+                "note_id": note_id or "",
+                "note_title": "",
+                "unreplied_level1": [],
+                "unreplied_subs": [],
+                "total_new_notifications": 0,
+                "source": "notifications",
+                "reply_status_verified": False,
+                "scan_error": str(error),
+            }
 
         if verbose:
             print(f"   通知覆盖 {len(aggregated)} 篇笔记")
@@ -196,62 +245,44 @@ class CommentScanner:
             if not new_comments:
                 continue
 
-            # 验证"是否已回复"：拉取该笔记的一级评论，获取内联楼中楼数据
-            # 这样只拉一次全部评论，而不是每条评论单独调API
-            replied_ids = set()
-            reply_status_verified = verify_replied
-            if verify_replied:
-                try:
-                    comments, _ = self.client.get_comments_cached(
-                        eid, entry.get("note_xsec_token", "")
-                    )
-                    need_deeper_check = {}  # {cid: sub_count} 需要拉取完整子评论才能确认的
-                    for c in comments:
-                        cid = c.get("id", "")
-                        inline_subs = c.get("sub_comments", [])
-                        if self._has_author_reply(inline_subs):
-                            replied_ids.add(cid)
-                        else:
-                            sub_count = int(c.get("sub_comment_count", 0) or 0)
-                            if sub_count > len(inline_subs):
-                                # 子评论数超过内联数量，作者回复可能在更深层
-                                need_deeper_check[cid] = sub_count
-
-                    # 对需要深度验证的评论，逐条拉取完整子评论
-                    if need_deeper_check:
-                        from config import REQUEST_DELAY
-                        import time as _time
-                        for cid in need_deeper_check:
-                            try:
-                                _time.sleep(REQUEST_DELAY)
-                                subs = self.client.get_sub_comments(eid, cid)
-                                if self._has_author_reply(subs):
-                                    replied_ids.add(cid)
-                            except Exception:
-                                pass  # 拉取失败就保守处理，不算已回复
-                except Exception:
-                    reply_status_verified = False
-                    if verbose:
-                        print(f"  ⚠️ 无法拉取评论验证回复状态，假定全部未回复")
-
-            unreplied = []
-            for nc in new_comments:
-                cid = nc["comment_id"]
-                if not cid:
+            candidates = []
+            filtered_deleted = 0
+            filtered_skipped = 0
+            for notification in new_comments:
+                comment_id = notification.get("comment_id", "")
+                if not comment_id:
                     continue
-                if cid in skipped_ids:
+                if notification.get("deleted", False):
+                    filtered_deleted += 1
                     continue
-                if verify_replied and cid in replied_ids:
-                    continue  # 已回复，跳过
-                unreplied.append({
-                    "comment_id": cid,
-                    "nickname": nc["nickname"],
-                    "content": nc["content"],
+                if comment_id in skipped_ids:
+                    filtered_skipped += 1
+                    continue
+                candidates.append({
+                    "comment_id": comment_id,
+                    "nickname": notification.get("nickname", "?"),
+                    "content": notification.get("content", ""),
                     "likes": 0,
                     "sub_count": 0,
-                    "inline_subs_count": 0,
-                    "inline_subs": [],
                 })
+
+            reply_status_verified = not verify_replied or not candidates
+            online_excluded = []
+            if verify_replied and candidates:
+                try:
+                    candidates, online_excluded = self.verify_candidates_online(
+                        eid,
+                        candidates,
+                        entry.get("note_xsec_token", ""),
+                    )
+                    reply_status_verified = True
+                except Exception as error:
+                    candidates = []
+                    reply_status_verified = False
+                    if verbose:
+                        print(f"  ❌ 在线核验失败，未返回待回复候选: {error}")
+
+            unreplied = candidates
 
             result = {
                 "note_id": eid,
@@ -262,6 +293,9 @@ class CommentScanner:
                 "source": "notifications",
                 "note_xsec_token": entry.get("note_xsec_token", ""),
                 "reply_status_verified": reply_status_verified,
+                "filtered_deleted": filtered_deleted,
+                "filtered_skipped": filtered_skipped,
+                "filtered_online": len(online_excluded),
             }
             results.append(result)
 
@@ -339,6 +373,18 @@ class CommentScanner:
         comments, from_cache = self.client.get_comments_cached(
             note_id, xsec_token, force_refresh=force_refresh
         )
+        resolved_xsec_token = xsec_token
+        if include_sub_comments and not resolved_xsec_token and any(
+            int(item.get("sub_comment_count", 0) or 0)
+            > len(item.get("sub_comments", []))
+            for item in comments
+        ):
+            try:
+                token = self.client.find_note_xsec(note_id)
+                if isinstance(token, str):
+                    resolved_xsec_token = token
+            except RuntimeError:
+                pass
 
         # 加载跳过列表
         skipped_ids = self.client.get_skipped_ids()
@@ -348,98 +394,91 @@ class CommentScanner:
         skipped_sub = 0
         filtered_skipped = 0
         pending_sub_comment_ids = []
+        verification_errors = []
 
-        # 第一遍：分类评论（已回复 / 待深度验证 / 确定未回复）
-        need_deeper_check = {}  # {cid: info}
-
+        reply_status_verified = True
         for c in comments:
             info = self._extract_comment(c)
-
             if self._is_author(c):
                 continue
 
-            if info["comment_id"] in skipped_ids:
+            cid = info["comment_id"]
+            inline_subs = info["inline_subs"]
+            subs = inline_subs
+            subs_complete = info["sub_count"] <= info["inline_subs_count"]
+            inline_targets = self._author_reply_targets(inline_subs, cid)
+
+            # 一级评论和楼中楼必须独立判断。即使一级评论已回复，只要用户
+            # 要求扫描楼中楼，仍需拉取这个楼层的完整数据。
+            must_fetch = (
+                not subs_complete
+                and (include_sub_comments or cid not in inline_targets)
+            )
+            if must_fetch:
+                try:
+                    time.sleep(REQUEST_DELAY * 0.3)
+                    subs = self.client.get_sub_comments(
+                        note_id, cid, resolved_xsec_token
+                    )
+                    subs_complete = len(subs) >= info["sub_count"]
+                    if not subs_complete:
+                        skipped_sub += 1
+                        reply_status_verified = False
+                        verification_errors.append(
+                            f"楼中楼数据不完整: {cid}"
+                        )
+                        if verbose:
+                            print(f"  ⚠️ 楼中楼数据不完整: @{info['nickname']}")
+                except Exception as error:
+                    subs = inline_subs
+                    subs_complete = False
+                    skipped_sub += 1
+                    reply_status_verified = False
+                    verification_errors.append(
+                        f"楼中楼拉取失败: {cid}: {error}"
+                    )
+                    if verbose:
+                        print(f"  ⚠️ 楼中楼拉取失败: {error}")
+
+            reply_targets = self._author_reply_targets(subs, cid)
+
+            if cid in skipped_ids:
                 filtered_skipped += 1
                 if verbose:
                     print(f"  ⏭️ [已跳过] @{info['nickname']}: {info['content'][:50]}")
+            elif cid not in reply_targets and (
+                subs_complete or info["sub_count"] == 0
+            ):
+                unreplied_l1.append(info)
+                if verbose:
+                    print(f"  ⚠️ [一级] @{info['nickname']}: {info['content'][:50]}")
+
+            if not subs_complete and not include_sub_comments:
+                pending_sub_comment_ids.append({
+                    "comment_id": cid,
+                    "nickname": info["nickname"],
+                    "expected_subs": info["sub_count"],
+                })
                 continue
 
-            inline_subs = info["inline_subs"]
-            if self._has_author_reply(inline_subs):
-                info["_replied"] = True
-            elif info["sub_count"] > info["inline_subs_count"]:
-                need_deeper_check[info["comment_id"]] = info
-            else:
-                unreplied_l1.append(info)
-                if verbose:
-                    print(f"  ⚠️ [一级] @{info['nickname']}: {info['content'][:50]}")
-
-        # 第二遍：深度验证（拉取完整子评论确认回复状态）
-        if need_deeper_check:
-            if verbose:
-                print(f"\n🔍 深度验证 {len(need_deeper_check)} 条评论的回复状态...")
-            for cid, info in need_deeper_check.items():
-                try:
-                    time.sleep(REQUEST_DELAY * 0.3)
-                    subs = self.client.get_sub_comments(note_id, cid)
-                    # 缓存拉取到的子评论用于后续楼中楼提取
-                    info["_fetched_subs"] = subs
-                    if self._has_author_reply(subs):
-                        info["_replied"] = True
-                        if verbose:
-                            print(f"  ✅ [已回复] @{info['nickname']}: {info['content'][:40]}（深层确认）")
-                        continue
-                except Exception:
-                    info["_fetched_subs"] = []
-                unreplied_l1.append(info)
-                if verbose:
-                    print(f"  ⚠️ [一级] @{info['nickname']}: {info['content'][:50]}")
-
-        # 第三遍：处理每条未回复评论的楼中楼
-        if verbose and unreplied_l1:
-            print(f"\n📋 处理 {len(unreplied_l1)} 条未回复评论的楼中楼...")
-        for info in unreplied_l1:
-            if info["sub_count"] > info["inline_subs_count"]:
-                if include_sub_comments:
-                    if verbose:
-                        print(f"  🔍 拉取楼中楼 @{info['nickname']} (sub={info['sub_count']}, inline={info['inline_subs_count']})...")
-                    try:
-                        time.sleep(REQUEST_DELAY * 0.3)
-                        # 优先复用深度验证时已拉取的数据
-                        subs = info.get("_fetched_subs") or self.client.get_sub_comments(note_id, info["comment_id"])
-                        if subs:
-                            non_author = self._extract_non_author_subs(
-                                subs, info["comment_id"], info["nickname"], skipped_ids
-                            )
-                            if non_author:
-                                unreplied_subs.extend(non_author)
-                                if verbose:
-                                    print(f"    🔴 [楼中楼] {len(non_author)}条未回")
-                        else:
-                            skipped_sub += 1
-                            if verbose:
-                                print(f"    ⚠️ 楼中楼未获取到数据")
-                    except Exception as e:
-                        skipped_sub += 1
-                        if verbose:
-                            print(f"    ⚠️ 楼中楼异常: {e}")
-                else:
-                    pending_sub_comment_ids.append({
-                        "comment_id": info["comment_id"],
-                        "nickname": info["nickname"],
-                        "expected_subs": info["sub_count"] - info["inline_subs_count"],
-                    })
-            elif info["inline_subs_count"] > 0:
-                # 内联数据完整，直接提取
-                inline_non_author = self._extract_non_author_subs(
-                    info["inline_subs"], info["comment_id"], info["nickname"], skipped_ids
+            # 完整楼中楼中的每条用户评论单独判断，作者回复其他评论不能
+            # 让整个楼层被视为已回复。
+            if subs_complete:
+                before = len(unreplied_subs)
+                unreplied_subs.extend(self._extract_non_author_subs(
+                    subs,
+                    cid,
+                    info["nickname"],
+                    skipped_ids,
+                    reply_targets,
+                ))
+                filtered_skipped += sum(
+                    1 for sub in subs
+                    if sub.get("id", "") in skipped_ids
                 )
-                if inline_non_author:
-                    unreplied_subs.extend(inline_non_author)
-                    if verbose:
-                        print(f"  📋 [内联楼中楼] {len(inline_non_author)}条 @{info['nickname']}")
-            # 清理临时字段
-            info.pop("_fetched_subs", None)
+                added = len(unreplied_subs) - before
+                if verbose and added:
+                    print(f"  🔴 [楼中楼] @{info['nickname']}: {added} 条未回")
 
         result = {
             "note_id": note_id,
@@ -450,8 +489,10 @@ class CommentScanner:
             "pending_subs": len(pending_sub_comment_ids),
             "skipped": skipped_sub,
             "filtered_skipped": filtered_skipped,
-            "reply_status_verified": True,
+            "reply_status_verified": reply_status_verified,
         }
+        if verification_errors:
+            result["scan_error"] = "；".join(verification_errors)
 
         if verbose:
             l1_count = len(unreplied_l1)
@@ -493,7 +534,7 @@ class CommentScanner:
                 continue
             sc_count = int(c.get("sub_comment_count", 0) or 0)
             inline_subs = c.get("sub_comments", [])
-            if sc_count > len(inline_subs):
+            if sc_count > 0:
                 targets.append((cid, c))
 
         if verbose and targets:
@@ -505,25 +546,30 @@ class CommentScanner:
             if verbose:
                 print(f"  📥 @{nick}: {c.get('content','')[:40]}... (sub_count={sc_count})")
 
-            time.sleep(REQUEST_DELAY * 0.3)
-            try:
-                subs = self.client.get_sub_comments(note_id, cid)
-            except Exception as e:
+            inline_subs = c.get("sub_comments", [])
+            if sc_count <= len(inline_subs):
+                subs = inline_subs
+            else:
+                time.sleep(REQUEST_DELAY * 0.3)
+                try:
+                    subs = self.client.get_sub_comments(note_id, cid)
+                except Exception as e:
+                    if verbose:
+                        print(f"    ⚠️ 失败: {e}")
+                    continue
+
+            if len(subs) < sc_count:
                 if verbose:
-                    print(f"    ⚠️ 失败: {e}")
+                    print(f"    ⚠️ 数据不完整（可能需要浏览器验证）")
                 continue
 
-            if not subs:
-                if verbose:
-                    print(f"    ⚠️ 未获取到数据（可能需要浏览器验证）")
-                continue
-
+            replied_ids = self._author_reply_targets(subs, cid)
             count = 0
             for sc in subs:
                 if self._is_author(sc):
                     continue
                 sub_id = sc["id"]
-                if sub_id in skipped_ids:
+                if sub_id in skipped_ids or sub_id in replied_ids:
                     filtered_count += 1
                     continue
                 sub_info = {

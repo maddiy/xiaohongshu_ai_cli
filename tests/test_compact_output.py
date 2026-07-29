@@ -10,9 +10,125 @@ from unittest.mock import MagicMock, patch
 import main
 from lib.replier import Replier
 from lib.scanner import CommentScanner
+from lib.xhs_client import XHSClient
 
 
 class CompactOutputTests(unittest.TestCase):
+    @patch("main.XHSClient.get_skipped_ids", return_value=set())
+    def test_comment_groups_are_numbered_and_hide_credentials(self, _skipped):
+        groups = main.build_comment_groups([
+            {
+                "time": 1785300000,
+                "title": "评论了你的笔记",
+                "user_info": {"nickname": "用户", "xsec_token": "secret"},
+                "item_info": {
+                    "id": "n1",
+                    "content": "文章",
+                    "xsec_token": "note-secret",
+                },
+                "comment_info": {
+                    "id": "c1",
+                    "content": "评论",
+                    "illegal_info": {"illegal_status": "NORMAL"},
+                },
+            },
+        ])
+        self.assertEqual(groups[0]["note_index"], 1)
+        self.assertEqual(groups[0]["comments"][0]["status"], "正常")
+        self.assertNotIn("secret", json.dumps(groups, ensure_ascii=False))
+
+    @patch("main.XHSClient.get_notifications", return_value=[])
+    def test_comments_json_declares_user_visible_columns(self, _notifications):
+        args = argparse.Namespace(limit=20, note_id=None, json=True)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            main.cmd_comments(args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            payload["columns"],
+            ["序号", "时间", "用户", "评论", "状态"],
+        )
+
+    def test_notification_scan_online_verifies_candidates(self):
+        client = MagicMock()
+        client.get_new_comment_notifications.return_value = [{
+            "note_id": "n1",
+            "note_title": "文章",
+            "note_xsec_token": "token",
+            "new_comments": [{
+                "comment_id": "c1",
+                "nickname": "用户",
+                "content": "评论",
+                "deleted": False,
+            }],
+        }]
+        client.get_skipped_ids.return_value = set()
+        client.get_comments_until_ids.return_value = [{
+            "id": "c1",
+            "sub_comment_count": "0",
+            "sub_comments": [],
+        }]
+        result = CommentScanner(client).scan_via_notifications(
+            note_id="n1", verbose=False
+        )
+        self.assertTrue(result["reply_status_verified"])
+        self.assertEqual(result["unreplied_level1"][0]["comment_id"], "c1")
+
+    def test_notification_scan_filters_deleted_before_online_check(self):
+        client = MagicMock()
+        client.get_new_comment_notifications.return_value = [{
+            "note_id": "n1",
+            "note_title": "文章",
+            "note_xsec_token": "token",
+            "new_comments": [{
+                "comment_id": "c1",
+                "nickname": "用户",
+                "content": "评论",
+                "deleted": True,
+            }],
+        }]
+        client.get_skipped_ids.return_value = set()
+        result = CommentScanner(client).scan_via_notifications(
+            note_id="n1", verbose=False
+        )
+        self.assertTrue(result["reply_status_verified"])
+        self.assertEqual(result["unreplied_level1"], [])
+        self.assertEqual(result["filtered_deleted"], 1)
+        client.get_comments_until_ids.assert_not_called()
+
+    def test_notification_scan_reports_network_failure(self):
+        client = MagicMock()
+        client.get_new_comment_notifications.side_effect = RuntimeError(
+            "network unavailable"
+        )
+        result = CommentScanner(client).scan_via_notifications(verbose=False)
+        self.assertFalse(result["reply_status_verified"])
+        self.assertIn("network unavailable", result["scan_error"])
+
+    @patch("lib.xhs_client.XHSClient._run_xhs")
+    def test_notifications_strict_mode_does_not_hide_failure(self, run_xhs):
+        run_xhs.side_effect = RuntimeError("network unavailable")
+        with self.assertRaises(RuntimeError):
+            XHSClient.get_notifications(strict=True)
+
+    @patch("lib.xhs_client.os.path.exists", return_value=True)
+    @patch("lib.xhs_client.XHSClient._run_xhs")
+    def test_sub_comments_use_xsec_compatibility_helper(
+        self, run_xhs, _exists
+    ):
+        run_xhs.return_value = {
+            "ok": True,
+            "data": {"comments": [{"id": "sub"}], "cursor": ""},
+        }
+        result = XHSClient.get_sub_comments(
+            "note", "root", xsec_token="secret-token"
+        )
+        self.assertEqual(result, [{"id": "sub"}])
+        command = run_xhs.call_args.args[0]
+        self.assertTrue(command[1].endswith("xhs_subcomments_helper.py"))
+        self.assertEqual(command[2:4], ["note", "root"])
+        self.assertIn("secret-token", command)
+
     def test_online_reply_index_tracks_direct_nested_reply(self):
         comments = [{
             "id": "root",
@@ -92,6 +208,158 @@ class CompactOutputTests(unittest.TestCase):
             [{"comment_id": "candidate", "reason": "online_replied"}],
         )
 
+    def test_online_verification_stops_when_search_is_incomplete(self):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = ([], False)
+        with self.assertRaisesRegex(RuntimeError, "页数上限"):
+            CommentScanner(client).verify_candidates_online(
+                "note", [{"comment_id": "candidate"}]
+            )
+
+    def test_online_verification_stops_when_sub_comments_are_incomplete(self):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = ([{
+            "id": "root",
+            "sub_comment_count": "2",
+            "sub_comments": [{
+                "id": "candidate",
+                "user_info": {"user_id": "other"},
+            }],
+        }], True)
+        client.get_sub_comments.return_value = [{
+            "id": "candidate",
+            "user_info": {"user_id": "other"},
+        }]
+        with self.assertRaisesRegex(RuntimeError, "楼中楼在线数据不完整"):
+            CommentScanner(client).verify_candidates_online(
+                "note", [{"comment_id": "candidate"}]
+            )
+
+    @patch("lib.scanner.time.sleep")
+    def test_scan_keeps_unreplied_nested_comment_when_root_was_replied(
+        self, _sleep
+    ):
+        author_id = "6321167e0000000023038acd"
+        client = MagicMock()
+        client.get_skipped_ids.return_value = set()
+        client.get_comments_cached.return_value = ([{
+            "id": "root",
+            "content": "一级评论",
+            "user_info": {"user_id": "other", "nickname": "甲"},
+            "sub_comment_count": "4",
+            "sub_comments": [{
+                "id": "reply-root",
+                "user_info": {"user_id": author_id},
+                "target_comment": {"id": "root"},
+            }],
+        }], False)
+        client.get_sub_comments.return_value = [
+            {
+                "id": "reply-root",
+                "user_info": {"user_id": author_id},
+                "target_comment": {"id": "root"},
+            },
+            {
+                "id": "nested-replied",
+                "content": "已回复的楼中楼",
+                "user_info": {"user_id": "other", "nickname": "乙"},
+            },
+            {
+                "id": "reply-nested",
+                "user_info": {"user_id": author_id},
+                "target_comment": {"id": "nested-replied"},
+            },
+            {
+                "id": "nested-pending",
+                "content": "尚未回复的楼中楼",
+                "user_info": {"user_id": "other", "nickname": "丙"},
+            },
+        ]
+        result = CommentScanner(client).scan_note(
+            "note", include_sub_comments=True, verbose=False
+        )
+        self.assertEqual(result["unreplied_level1"], [])
+        self.assertEqual(
+            [item["comment_id"] for item in result["unreplied_subs"]],
+            ["nested-pending"],
+        )
+        self.assertTrue(result["reply_status_verified"])
+
+    def test_complete_inline_nested_comments_use_target_specific_reply(self):
+        author_id = "6321167e0000000023038acd"
+        client = MagicMock()
+        client.get_skipped_ids.return_value = set()
+        client.get_comments_cached.return_value = ([{
+            "id": "root",
+            "content": "一级评论",
+            "user_info": {"user_id": "other", "nickname": "甲"},
+            "sub_comment_count": "3",
+            "sub_comments": [
+                {
+                    "id": "nested-replied",
+                    "content": "已回复",
+                    "user_info": {"user_id": "other", "nickname": "乙"},
+                },
+                {
+                    "id": "author-reply",
+                    "user_info": {"user_id": author_id},
+                    "target_comment": {"id": "nested-replied"},
+                },
+                {
+                    "id": "nested-pending",
+                    "content": "未回复",
+                    "user_info": {"user_id": "other", "nickname": "丙"},
+                },
+            ],
+        }], False)
+        result = CommentScanner(client).scan_note(
+            "note", include_sub_comments=True, verbose=False
+        )
+        self.assertEqual(
+            [item["comment_id"] for item in result["unreplied_level1"]],
+            ["root"],
+        )
+        self.assertEqual(
+            [item["comment_id"] for item in result["unreplied_subs"]],
+            ["nested-pending"],
+        )
+
+    @patch("lib.scanner.time.sleep")
+    def test_scan_marks_incomplete_nested_data_unverified(self, _sleep):
+        client = MagicMock()
+        client.get_skipped_ids.return_value = set()
+        client.get_comments_cached.return_value = ([{
+            "id": "root",
+            "content": "一级评论",
+            "user_info": {"user_id": "other", "nickname": "甲"},
+            "sub_comment_count": "2",
+            "sub_comments": [],
+        }], False)
+        client.get_sub_comments.return_value = []
+        result = CommentScanner(client).scan_note(
+            "note", include_sub_comments=True, verbose=False
+        )
+        self.assertFalse(result["reply_status_verified"])
+        self.assertIn("楼中楼数据不完整", result["scan_error"])
+        self.assertEqual(result["unreplied_subs"], [])
+
+    @patch("lib.xhs_client.XHSClient._run_xhs")
+    def test_articles_strict_mode_does_not_hide_failure(self, run_xhs):
+        run_xhs.side_effect = RuntimeError("network unavailable")
+        with self.assertRaisesRegex(RuntimeError, "network unavailable"):
+            XHSClient.list_articles(limit=20)
+
+    @patch("main.XHSClient.list_articles", side_effect=RuntimeError("offline"))
+    def test_articles_json_error_remains_valid_json(self, _list_articles):
+        args = argparse.Namespace(limit=20, json=True)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            main.cmd_articles(args)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"ok": False, "error": "offline"},
+        )
+
     def test_compact_comment_removes_internal_fields(self):
         source = {
             "comment_id": "c1",
@@ -169,6 +437,11 @@ class CompactOutputTests(unittest.TestCase):
             main.cmd_articles(args)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["articles"][0]["id"], "n1")
+        self.assertEqual(
+            payload["columns"],
+            ["序号", "发布时间", "评论数", "标题", "笔记ID"],
+        )
+        self.assertEqual(payload["articles"][0]["title"], "标题")
         self.assertNotIn("xsec_token", payload["articles"][0])
         self.assertNotIn("secret", output.getvalue())
 

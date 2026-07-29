@@ -18,6 +18,9 @@ class XHSClient:
     # 内存缓存：避免批量操作中反复读取 skipped.json
     _skipped_cache: Optional[dict] = None
     _skipped_mtime: float = 0.0  # 文件修改时间，用于自动刷新
+    _XHS_TOOL_PYTHON = os.path.expanduser(
+        "~/.local/share/uv/tools/xiaohongshu-cli/bin/python"
+    )
 
     @staticmethod
     def _run_xhs(cmd: list, timeout: int = 30) -> dict:
@@ -60,7 +63,7 @@ class XHSClient:
 
     # ---------- 笔记 ----------
     @staticmethod
-    def get_my_notes(max_pages: int = None):
+    def get_my_notes(max_pages: int = None, strict: bool = False):
         """
         获取我的笔记列表（自动翻页直到取完或达到 max_pages 页）
         返回 [{id, title, comments_count, xsec_token, time}]
@@ -70,6 +73,7 @@ class XHSClient:
         from config import REQUEST_DELAY
 
         all_notes = []
+        xsec_entries = {}
         page = 0
         while True:
             if max_pages is not None and page >= max_pages:
@@ -78,24 +82,35 @@ class XHSClient:
                 data = XHSClient._run_xhs(
                     ["xhs", "my-notes", "--page", str(page), "--json"])
             except RuntimeError:
+                if strict:
+                    raise
                 break
             if not data.get("ok"):
+                if strict:
+                    err = data.get("error", {}).get("message", str(data))
+                    raise RuntimeError(f"获取文章列表失败: {err}")
                 break
             notes = data["data"]["notes"]
             if not notes:
                 break
 
             for n in notes:
+                note_id = n["id"]
+                token = n.get("xsec_token", "")
                 all_notes.append({
-                    "id": n["id"],
+                    "id": note_id,
                     "title": n.get("display_title", ""),
                     "comments_count": int(n.get("comments_count", 0) or 0),
-                    "xsec_token": n.get("xsec_token", ""),
+                    "xsec_token": token,
                     "time": n.get("time", ""),
                 })
+                if note_id and token:
+                    xsec_entries[note_id] = token
             page += 1
             time.sleep(REQUEST_DELAY * 0.3)  # 翻页间隔
 
+        if xsec_entries:
+            XHSClient._merge_xsec_index(xsec_entries)
         return all_notes
 
     @staticmethod
@@ -106,7 +121,7 @@ class XHSClient:
         """
         # 计算需要翻多少页（每页10条）
         pages_needed = (limit + 9) // 10
-        notes = XHSClient.get_my_notes(max_pages=pages_needed)
+        notes = XHSClient.get_my_notes(max_pages=pages_needed, strict=True)
         return notes[:limit]
 
     @staticmethod
@@ -199,7 +214,8 @@ class XHSClient:
 
     # ---------- 通知 ----------
     @staticmethod
-    def get_notifications(num: int = 50, notification_type: str = "mentions") -> list:
+    def get_notifications(num: int = 50, notification_type: str = "mentions",
+                          strict: bool = False) -> list:
         """
         获取最新通知列表
 
@@ -214,6 +230,8 @@ class XHSClient:
                 ["xhs", "notifications", "--type", notification_type,
                  "--num", str(num), "--json"])
         except RuntimeError:
+            if strict:
+                raise
             return []
         if not data.get("ok"):
             return []
@@ -240,7 +258,11 @@ class XHSClient:
             }
         ]
         """
-        notifications = XHSClient.get_notifications(num=num, notification_type="mentions")
+        notifications = XHSClient.get_notifications(
+            num=num,
+            notification_type="mentions",
+            strict=True,
+        )
         if not notifications:
             return []
 
@@ -279,6 +301,9 @@ class XHSClient:
                 "nickname": n.get("user_info", {}).get("nickname", "?"),
                 "content": comment_content,
                 "time": n.get("time", 0),
+                "deleted": comment_info.get("illegal_info", {}).get(
+                    "illegal_status", "NORMAL"
+                ) not in ("", "NORMAL"),
             })
 
         return list(by_note.values())
@@ -322,7 +347,7 @@ class XHSClient:
 
     @staticmethod
     def get_comments_until_ids(note_id, target_ids, xsec_token="",
-                               max_pages=50):
+                               max_pages=50, with_status=False):
         """逐页读取，找到全部目标评论后立即停止，减少在线核验耗时。
 
         max_pages 为安全上限：每页约 10 条，50 页可覆盖约 500 条评论，
@@ -357,23 +382,23 @@ class XHSClient:
                     if sub_id in target_ids:
                         found_ids.add(sub_id)
             if found_ids == target_ids:
-                return comments
+                return (comments, True) if with_status else comments
             next_cursor = str(page.get("cursor", "") or "")
             if (
                 not page.get("has_more", False)
                 or not page_comments
                 or not next_cursor
             ):
-                return comments
+                return (comments, True) if with_status else comments
             if next_cursor in seen_cursors:
                 raise RuntimeError("获取评论失败: 平台返回了重复游标")
             seen_cursors.add(next_cursor)
             cursor = next_cursor
             time.sleep(REQUEST_DELAY * 0.3)
-        return comments
+        return (comments, False) if with_status else comments
 
     @staticmethod
-    def get_sub_comments(note_id, comment_id):
+    def get_sub_comments(note_id, comment_id, xsec_token=""):
         """
         获取某条评论下的所有楼中楼（自动翻页，容错返回）
 
@@ -386,9 +411,23 @@ class XHSClient:
         cursor = None
         page = 0
         while True:
-            cmd = ["xhs", "sub-comments", note_id, comment_id, "--json"]
-            if cursor:
-                cmd += ["--cursor", cursor]
+            if xsec_token and os.path.exists(XHSClient._XHS_TOOL_PYTHON):
+                helper = os.path.join(
+                    os.path.dirname(__file__), "xhs_subcomments_helper.py"
+                )
+                cmd = [
+                    XHSClient._XHS_TOOL_PYTHON,
+                    helper,
+                    note_id,
+                    comment_id,
+                    cursor or "",
+                    xsec_token,
+                    LOGIN_COOKIE_SOURCE,
+                ]
+            else:
+                cmd = ["xhs", "sub-comments", note_id, comment_id, "--json"]
+                if cursor:
+                    cmd += ["--cursor", cursor]
             try:
                 data = XHSClient._run_xhs(cmd)
             except (RuntimeError, json.JSONDecodeError):
