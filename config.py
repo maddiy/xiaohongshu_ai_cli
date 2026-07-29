@@ -4,6 +4,12 @@
 """
 import os
 
+# 正式名称（APP_NAME 保留为旧代码兼容别名）
+SYSTEM_NAME = "小红书AI智能运营系统"
+CLI_NAME = SYSTEM_NAME
+APP_NAME = CLI_NAME
+APP_VERSION = "3.0.0"
+
 # 作者信息
 AUTHOR_USER_ID = "6321167e0000000023038acd"  # 运行 xhs whoami 查看
 

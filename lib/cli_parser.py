@@ -1,6 +1,104 @@
 """命令行参数定义；与业务命令解耦，便于单独测试和扩展。"""
 
 import argparse
+from config import APP_VERSION, CLI_NAME, SYSTEM_NAME
+
+
+COMMAND_NAMES = (
+    "login",
+    "articles",
+    "comments",
+    "scan",
+    "drafts",
+    "send",
+    "reply",
+    "post",
+    "analyze",
+    "skipped",
+    "doctor",
+    "ai-help",
+    "paths",
+    "ai-reply",
+)
+
+COMMAND_EFFECTS = {
+    "login": {
+        "platform": "认证",
+        "local": "更新 xiaohongshu-cli 的本地认证状态",
+        "output": "终端文本",
+    },
+    "articles": {
+        "platform": "读取",
+        "local": "可能更新 .cache/xsec_index.json 敏感令牌索引",
+        "output": "终端文本；--json 时为单一 JSON",
+    },
+    "comments": {
+        "platform": "读取",
+        "local": "仅读取本地终态和排除列表",
+        "output": "终端文本；--json 时为单一 JSON",
+    },
+    "scan": {
+        "platform": "读取",
+        "local": "写入 scan.json，并可能更新评论缓存和令牌索引",
+        "output": "终端文本；--json 时为单一 JSON 摘要",
+    },
+    "drafts": {
+        "platform": "读取并在线核验",
+        "local": "写入 drafts.json，并可能更新敏感令牌索引",
+        "output": "终端文本，可能进入逐条输入",
+    },
+    "send": {
+        "platform": "发送回复",
+        "local": (
+            "逐条更新 drafts.json；失败时更新 skipped.json；"
+            "在线核验可能更新敏感令牌索引"
+        ),
+        "output": "终端文本",
+    },
+    "reply": {
+        "platform": "读取、在线核验并发送回复",
+        "local": "失败或归档时更新 skipped.json，并可能更新敏感令牌索引",
+        "output": "终端文本，smart 策略会逐条输入",
+    },
+    "post": {
+        "platform": "发布笔记；--dry-run 时不发布",
+        "local": "仅读取输入 JSON 和图片",
+        "output": "终端文本",
+    },
+    "analyze": {
+        "platform": "读取",
+        "local": "可能更新评论缓存",
+        "output": "终端文本；--json 时为单一 JSON",
+    },
+    "skipped": {
+        "platform": "不访问",
+        "local": "读取、移除或清空 skipped.json",
+        "output": "终端文本；--clear 会询问确认",
+    },
+    "doctor": {
+        "platform": "不访问",
+        "local": "只检查环境和配置",
+        "output": "终端文本；--json 时为单一 JSON",
+    },
+    "ai-help": {
+        "platform": "不访问",
+        "local": "只读取程序定义和文件清单",
+        "output": "始终为单一 JSON",
+    },
+    "paths": {
+        "platform": "不访问",
+        "local": "只检查固定工作文件是否存在",
+        "output": "始终为单一 JSON",
+    },
+    "ai-reply": {
+        "platform": "prepare/draft 读取并核验；send 发送回复",
+        "local": (
+            "读写固定工作流文件；失败时更新 skipped.json；"
+            "在线核验可能更新敏感令牌索引"
+        ),
+        "output": "始终为单一紧凑 JSON",
+    },
+}
 
 
 def add_common_args(parser):
@@ -25,7 +123,10 @@ def add_limit_args(parser):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="面向中文用户与 AI 助手的小红书发布、评论管理命令行工具",
+        description=(
+            f"{SYSTEM_NAME}｜命令行程序：{CLI_NAME}｜"
+            "面向中文用户与AI助手的发布、评论管理工具"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
@@ -40,6 +141,10 @@ def build_parser():
   python3 main.py doctor
   python3 main.py ai-help
 """,
+    )
+    parser.add_argument(
+        "--version", action="version",
+        version=f"{CLI_NAME} {APP_VERSION}",
     )
     subparsers = parser.add_subparsers(dest="command", help="子命令")
 
@@ -90,14 +195,25 @@ def build_parser():
     )
     drafts.add_argument(
         "--allow-unverified", action="store_true",
-        help="允许使用未核验扫描文件（有重复回复风险）",
+        help="兼容旧扫描文件；生成草稿前仍会强制在线核验",
+    )
+    drafts.add_argument(
+        "--num-notifications", type=int, default=20,
+        help="默认读取的最新评论通知数量（默认20）",
+    )
+    drafts.add_argument(
+        "--full-scan", action="store_true",
+        help="处理全部历史评论和楼中楼；默认只处理最新评论",
     )
 
     send = subparsers.add_parser("send", help="发送已审核的回复草稿")
     send.add_argument("--file", required=True, help="草稿文件路径")
     send.add_argument("--dry-run", action="store_true", help="预览模式，不发送")
     send.add_argument("--confirm", action="store_true", help="发送前二次确认")
-    send.add_argument("--resume", action="store_true", help="断点续发")
+    send.add_argument(
+        "--resume", action="store_true",
+        help="兼容选项，仅改变续发提示；终态和排除过滤始终生效",
+    )
 
     reply = subparsers.add_parser("reply", help="回复评论（兼容旧入口）")
     add_common_args(reply)
@@ -106,6 +222,14 @@ def build_parser():
         help="回复策略: smart=逐条确认, generic=随机话术",
     )
     reply.add_argument("--from-file", help="从JSON文件读取未回复列表")
+    reply.add_argument(
+        "--num-notifications", type=int, default=20,
+        help="默认读取的最新评论通知数量（默认20）",
+    )
+    reply.add_argument(
+        "--full-scan", action="store_true",
+        help="处理全部历史评论和楼中楼；默认只处理最新评论",
+    )
 
     skipped = subparsers.add_parser("skipped", help="管理跳过列表")
     skipped.add_argument("--remove", help="移除指定评论ID")
@@ -130,7 +254,90 @@ def build_parser():
 
     doctor = subparsers.add_parser("doctor", help="检查本地环境与配置（不联网）")
     doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    subparsers.add_parser("ai-help", help="输出 AI 调用协议（JSON）")
+    ai_help = subparsers.add_parser("ai-help", help="输出 AI 调用协议（JSON）")
+    ai_help_mode = ai_help.add_mutually_exclusive_group()
+    ai_help_mode.add_argument(
+        "--summary", action="store_true",
+        help="仅输出权威项目摘要，减少 AI 上下文用量",
+    )
+    ai_help_mode.add_argument(
+        "--command", dest="command_name", choices=COMMAND_NAMES,
+        help="仅输出指定命令的精确参数、副作用和输出约定",
+    )
+    ai_help_mode.add_argument(
+        "--tests", action="store_true",
+        help="仅输出当前测试清单；不能据此推断相对上一版本的新增项",
+    )
     paths = subparsers.add_parser("paths", help="显示固定工作文件路径")
     paths.add_argument("--note-id", default="all", help="笔记ID（默认 all）")
+
+    ai_reply = subparsers.add_parser(
+        "ai-reply", help="AI 专用紧凑回复工作流（仅输出 JSON）"
+    )
+    ai_reply.add_argument("--note-id", required=True, help="笔记ID")
+    ai_reply.add_argument(
+        "--action", required=True, choices=["prepare", "draft", "send"],
+        help="prepare=扫描，draft=生成预览，send=发送",
+    )
+    ai_reply.add_argument(
+        "--replies", metavar="FILE",
+        help="回复映射文件；默认使用固定 reply_map.json",
+    )
+    ai_reply.add_argument(
+        "--confirmed", action="store_true",
+        help="确认用户已审核预览，仅 send 动作使用",
+    )
+    ai_reply.add_argument(
+        "--limit", type=int, default=20,
+        help="prepare 默认读取的最新评论通知数量（默认20）",
+    )
+    ai_reply.add_argument(
+        "--full-scan", action="store_true",
+        help="扫描全部历史评论和楼中楼；默认只处理最新评论",
+    )
+    if set(subparsers.choices) != set(COMMAND_NAMES):
+        raise RuntimeError("参数定义与 COMMAND_NAMES 不一致")
+    if set(COMMAND_EFFECTS) != set(COMMAND_NAMES):
+        raise RuntimeError("命令副作用清单与 COMMAND_NAMES 不一致")
     return parser
+
+
+def build_command_contract(command):
+    """从 argparse 定义生成单条命令的机器可读协议，避免手工抄写参数。"""
+    if command not in COMMAND_NAMES:
+        raise ValueError(f"未知命令: {command}")
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    command_parser = subparsers.choices[command]
+    arguments = []
+    for action in command_parser._actions:
+        if action.dest == "help":
+            continue
+        argument = {
+            "name": action.dest,
+            "flags": list(action.option_strings),
+            "required": bool(action.required),
+            "default": action.default,
+            "help": action.help or "",
+        }
+        if action.choices is not None:
+            argument["choices"] = list(action.choices)
+        if action.nargs is not None:
+            argument["nargs"] = action.nargs
+        if isinstance(action, argparse._StoreTrueAction):
+            argument["type"] = "boolean"
+        elif action.type:
+            argument["type"] = getattr(action.type, "__name__", str(action.type))
+        else:
+            argument["type"] = "string"
+        arguments.append(argument)
+    return {
+        "command": command,
+        "usage": command_parser.format_usage().strip(),
+        "arguments": arguments,
+        "effects": COMMAND_EFFECTS[command],
+        "source": "由 lib/cli_parser.py 的 argparse 定义运行时生成",
+    }

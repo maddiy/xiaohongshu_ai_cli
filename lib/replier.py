@@ -1,13 +1,14 @@
 """
 智能回复器
 支持三种模式: smart(逐条确认) / generic(通用话术) / draft(先生成草稿再发送)
-支持跳过列表：回复失败的评论自动存档，下次扫描自动跳过
+支持跳过列表：回复失败后保留 failed 状态并加入排除列表，下次扫描自动跳过
 """
 import json
 import os
 import time
 import random
 from config import REQUEST_DELAY, GENERIC_REPLIES
+from .cli_support import TERMINAL_SEND_STATUSES
 from .xhs_client import XHSClient
 
 
@@ -34,8 +35,9 @@ class Replier:
         return ""
 
     # ---------- 内部工具 ----------
-    def _archive_on_failure(self, cid: str, nick: str, content: str,
-                             err: str, note_id: str, err_type: str = "unknown_error"):
+    def _exclude_on_failure(self, cid: str, nick: str, content: str,
+                            err: str, note_id: str,
+                            err_type: str = "unknown_error"):
         """
         回复失败处理：所有失败评论统一加入跳过列表，避免后续扫描或其他 AI 重试。
         """
@@ -47,7 +49,10 @@ class Replier:
         if err_type == "comment_deleted":
             print(f"  📁 评论已删除，已加入跳过列表")
         elif err_type == "content_rejected":
-            print(f"  📁 内容被拦截，已加入跳过列表（可调整措辞后手动移除重试）")
+            print(
+                "  📁 内容被拦截，已加入跳过列表"
+                "（重试需用户授权并重置失败状态）"
+            )
         else:
             print(f"  📁 回复失败，已自动加入跳过列表")
 
@@ -201,20 +206,31 @@ class Replier:
 
         参数:
             drafts: generate_drafts() 的输出或从 JSON 文件加载的同构字典
-            resume: 断点续发模式，发送前检查是否已在跳过列表中（已发送/已失败的跳过）
+            resume: 兼容参数，仅改变续发提示文案；终态和排除过滤始终执行
 
         返回: {"success": int, "fail": int, "skip": int}
         """
         note_id = drafts.get("note_id", "")
         items = drafts.get("drafts", [])
+        active_ids = drafts.get("active_comment_ids")
+        if isinstance(active_ids, list):
+            active_ids = set(active_ids)
+            items = [
+                item for item in items
+                if item.get("comment_id") in active_ids
+            ]
 
         # 已成功发送的草稿永远不重复发送，确保不同 AI 可安全接续。
         to_send = [
             d for d in items
             if d.get("action") == "send"
-            and d.get("send_status") not in ("sent", "failed", "archived")
+            and d.get("send_status") not in TERMINAL_SEND_STATUSES
         ]
-        to_archive = [d for d in items if d.get("action") == "archive"]
+        to_archive = [
+            d for d in items
+            if d.get("action") == "archive"
+            and d.get("send_status") != "archived"
+        ]
 
         # 先处理永久跳过（加入跳过列表）
         archived_count = 0
@@ -280,7 +296,7 @@ class Replier:
                 d["send_status"] = "failed"
                 d["error_type"] = err_type
                 d["last_error"] = err[:200]
-                self._archive_on_failure(cid, nick, content, err, note_id, err_type)
+                self._exclude_on_failure(cid, nick, content, err, note_id, err_type)
 
             self._save_state(drafts, state_file)
             time.sleep(REQUEST_DELAY)
@@ -347,7 +363,7 @@ class Replier:
             else:
                 print(f"  ❌ 失败 ({err_type}): {err[:120]}")
                 self.stats["fail"] += 1
-                self._archive_on_failure(cid, nick, content, err, note_id, err_type)
+                self._exclude_on_failure(cid, nick, content, err, note_id, err_type)
 
             time.sleep(REQUEST_DELAY)
 

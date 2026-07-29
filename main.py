@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
 """
-小红书AI智能运营
+小红书AI智能运营系统
+命令行程序：小红书AI智能运营系统
 
-功能:
-  1. login    - 登录（默认读取 Firefox 浏览器 Cookie）
-  2. articles - 查看最新文章列表
-  3. scan     - 扫描文章评论，列出未回复的（自动过滤跳过列表）
-  4. drafts   - 生成回复草稿，逐条确认后保存
-  5. send     - 发送已审核的草稿
-  6. reply    - 扫描+回复（传统交互模式）
-  7. analyze  - 对评论进行统计分析
-  8. skipped  - 管理跳过列表（查看/移除）
-  9. post     - 发布小红书笔记（内容由 AI 生成）
-
-依赖: xiaohongshu-cli (pip install xiaohongshu-cli)
-配置: 修改 config.py 中的 AUTHOR_USER_ID
+准确命令清单和 AI 调用协议请运行：python3 main.py ai-help
+依赖 xiaohongshu-cli；账号与浏览器配置位于 config.py。
 """
 
 import json
@@ -34,10 +24,14 @@ from lib.cli_support import (
     merge_draft_history,
     print_json,
     scan_summary,
+    TERMINAL_SEND_STATUSES,
     workflow_paths,
     write_json,
 )
-from lib.cli_parser import add_common_args, add_limit_args, build_parser
+from lib.cli_parser import (
+    COMMAND_NAMES,
+    build_parser,
+)
 from lib.cli_view import cmd_articles, cmd_comments, cmd_login
 from lib.cli_admin import (
     cmd_ai_help,
@@ -47,6 +41,7 @@ from lib.cli_admin import (
     cmd_post,
     cmd_skipped,
 )
+from lib.cli_ai import cmd_ai_reply
 
 
 def cmd_scan(args):
@@ -247,12 +242,24 @@ def cmd_drafts(args):
         result = {"note_title": ""}  # from-scan 没有标题
         print(f"📂 从扫描结果读取: {len(all_unreplied)} 条未回复")
     else:
-        result = scanner.scan_note(
-            args.note_id,
-            args.xsec_token or "",
-            include_sub_comments=args.with_subs,
-            force_refresh=args.refresh,
-        )
+        if getattr(args, "full_scan", False):
+            result = scanner.scan_note(
+                args.note_id,
+                args.xsec_token or "",
+                include_sub_comments=True,
+                force_refresh=args.refresh,
+            )
+        else:
+            result = scanner.scan_via_notifications(
+                note_id=args.note_id,
+                num_notifications=getattr(args, "num_notifications", 20),
+            )
+        if not result.get("reply_status_verified", False):
+            print(
+                "❌ 最新评论在线核验失败，已停止生成草稿: "
+                f"{result.get('scan_error', '未知错误')}"
+            )
+            return
         all_unreplied = result.get("unreplied_level1", []) + result.get("unreplied_subs", [])
 
     if not all_unreplied:
@@ -347,18 +354,36 @@ def cmd_send(args):
         print(f"❌ 文件不存在: {args.file}")
         return
 
-    with open(args.file) as f:
-        drafts = json.load(f)
+    try:
+        with open(args.file, encoding="utf-8") as file:
+            drafts = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"❌ 无法读取草稿文件: {error}")
+        return
+    if not isinstance(drafts, dict):
+        print("❌ 草稿文件顶层必须是 JSON 对象")
+        return
 
     items = drafts.get("drafts", [])
+    active_ids = drafts.get("active_comment_ids")
+    if isinstance(active_ids, list):
+        active_ids = set(active_ids)
+        items = [
+            item for item in items
+            if item.get("comment_id") in active_ids
+        ]
     to_send = [
         d for d in items
         if d.get("action") == "send"
-        and d.get("send_status") not in ("sent", "failed", "archived")
+        and d.get("send_status") not in TERMINAL_SEND_STATUSES
     ]
     sent = [d for d in items if d.get("send_status") == "sent"]
     to_skip = [d for d in items if d.get("action") == "skip"]
-    to_archive = [d for d in items if d.get("action") == "archive"]
+    to_archive = [
+        d for d in items
+        if d.get("action") == "archive"
+        and d.get("send_status") != "archived"
+    ]
 
     print(f"\n📋 草稿概览")
     print(f"  ✅ 待发送: {len(to_send)}")
@@ -388,6 +413,40 @@ def cmd_send(args):
             print("❌ 已取消")
             return
 
+    # 传统入口也必须在实际发送前在线复核，避免预览期间从其他客户端回复。
+    if to_send:
+        note_id = drafts.get("note_id", "")
+        if not note_id:
+            print("❌ 草稿缺少 note_id，无法执行发送前在线核验")
+            return
+        try:
+            eligible, excluded = CommentScanner().verify_candidates_online(
+                note_id,
+                [compact_comment(item) for item in to_send],
+                "",
+            )
+        except Exception as error:
+            print(f"❌ 发送前在线核验失败，已停止发送: {error}")
+            return
+        eligible_ids = {
+            item.get("comment_id") for item in eligible
+            if item.get("comment_id")
+        }
+        excluded_by_id = {
+            item.get("comment_id"): item.get("reason", "online_excluded")
+            for item in excluded
+        }
+        for item in to_send:
+            comment_id = item.get("comment_id", "")
+            if comment_id not in eligible_ids:
+                item["send_status"] = "archived"
+                item["archive_reason"] = excluded_by_id.get(
+                    comment_id, "online_excluded"
+                )
+        if excluded:
+            print(f"🌐 发送前在线核验排除 {len(excluded)} 条评论")
+        write_json(drafts, args.file)
+
     replier = Replier()
     replier.send_drafts(drafts, resume=args.resume, state_file=args.file)
     saved_path = write_json(drafts, args.file)
@@ -412,12 +471,24 @@ def cmd_reply(args):
             print("❌ 请指定笔记ID: --note-id <id>")
             return
 
-        result = scanner.scan_note(
-            args.note_id,
-            args.xsec_token or "",
-            include_sub_comments=args.with_subs,
-            force_refresh=args.refresh,
-        )
+        if getattr(args, "full_scan", False):
+            result = scanner.scan_note(
+                args.note_id,
+                args.xsec_token or "",
+                include_sub_comments=True,
+                force_refresh=args.refresh,
+            )
+        else:
+            result = scanner.scan_via_notifications(
+                note_id=args.note_id,
+                num_notifications=getattr(args, "num_notifications", 20),
+            )
+        if not result.get("reply_status_verified", False):
+            print(
+                "❌ 最新评论在线核验失败，已停止回复: "
+                f"{result.get('scan_error', '未知错误')}"
+            )
+            return
 
         note_id = args.note_id
         unreplied = (
@@ -450,6 +521,24 @@ def cmd_reply(args):
     replier.reply_batch(note_id, unreplied, args.strategy)
 
 
+COMMAND_HANDLERS = {
+    "login": cmd_login,
+    "articles": cmd_articles,
+    "comments": cmd_comments,
+    "scan": cmd_scan,
+    "drafts": cmd_drafts,
+    "send": cmd_send,
+    "reply": cmd_reply,
+    "post": cmd_post,
+    "skipped": cmd_skipped,
+    "analyze": cmd_analyze,
+    "doctor": cmd_doctor,
+    "ai-help": cmd_ai_help,
+    "paths": cmd_paths,
+    "ai-reply": cmd_ai_reply,
+}
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -458,22 +547,9 @@ def main():
         parser.print_help()
         return
 
-    commands = {
-        "login": cmd_login,
-        "articles": cmd_articles,
-        "comments": cmd_comments,
-        "scan": cmd_scan,
-        "drafts": cmd_drafts,
-        "send": cmd_send,
-        "reply": cmd_reply,
-        "post": cmd_post,
-        "skipped": cmd_skipped,
-        "analyze": cmd_analyze,
-        "doctor": cmd_doctor,
-        "ai-help": cmd_ai_help,
-        "paths": cmd_paths,
-    }
-    commands[args.command](args)
+    if set(COMMAND_HANDLERS) != set(COMMAND_NAMES):
+        raise RuntimeError("命令处理器与 cli_parser.COMMAND_NAMES 不一致")
+    COMMAND_HANDLERS[args.command](args)
 
 
 if __name__ == "__main__":

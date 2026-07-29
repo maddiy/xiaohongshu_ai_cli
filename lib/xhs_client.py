@@ -4,8 +4,10 @@
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Optional
 
@@ -15,12 +17,44 @@ from config import CACHE_DIR, CACHE_TTL_MINUTES, LOGIN_COOKIE_SOURCE
 class XHSClient:
     """封装 xiaohongshu-cli 的所有功能"""
 
+    REPLY_ERROR_TYPES = (
+        "comment_deleted",
+        "rate_limited",
+        "content_rejected",
+        "unknown_error",
+    )
+    REPLY_ERROR_MARKERS = {
+        "comment_deleted": ("评论已删除",),
+        "rate_limited": ("-9043", "太快", "过快", "频率", "请稍后"),
+        "content_rejected": ("-9126", "-9128"),
+    }
+
     # 内存缓存：避免批量操作中反复读取 skipped.json
     _skipped_cache: Optional[dict] = None
     _skipped_mtime: float = 0.0  # 文件修改时间，用于自动刷新
-    _XHS_TOOL_PYTHON = os.path.expanduser(
-        "~/.local/share/uv/tools/xiaohongshu-cli/bin/python"
-    )
+    _XHS_TOOL_PYTHON = os.environ.get("XHS_TOOL_PYTHON", "")
+
+    @classmethod
+    def _find_xhs_tool_python(cls) -> str:
+        """从环境变量、xhs 启动脚本或 uv 默认位置定位工具解释器。"""
+        candidates = []
+        if cls._XHS_TOOL_PYTHON:
+            candidates.append(cls._XHS_TOOL_PYTHON)
+        xhs_path = shutil.which("xhs")
+        if xhs_path:
+            try:
+                with open(os.path.realpath(xhs_path), encoding="utf-8") as file:
+                    first_line = file.readline().strip()
+                if first_line.startswith("#!"):
+                    candidates.append(first_line[2:])
+            except OSError:
+                pass
+        candidates.append(os.path.expanduser(
+            "~/.local/share/uv/tools/xiaohongshu-cli/bin/python"
+        ))
+        return next(
+            (path for path in candidates if path and os.path.exists(path)), ""
+        )
 
     @staticmethod
     def _run_xhs(cmd: list, timeout: int = 30) -> dict:
@@ -198,7 +232,7 @@ class XHSClient:
 
     @staticmethod
     def _merge_xsec_index(new_entries: dict):
-        """合并新条目到本地索引"""
+        """原子合并令牌索引，并将文件权限限制为当前用户可读写。"""
         path = XHSClient._xsec_index_path()
         existing = {}
         if os.path.exists(path):
@@ -209,8 +243,25 @@ class XHSClient:
                 pass
         existing.update(new_entries)
         XHSClient._ensure_cache_dir()
-        with open(path, "w") as f:
-            json.dump(existing, f, ensure_ascii=False)
+        temp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=os.path.dirname(os.path.abspath(path)),
+                prefix=".xsec_index.",
+                suffix=".tmp",
+                delete=False,
+            ) as file:
+                temp_path = file.name
+                json.dump(existing, file, ensure_ascii=False)
+                file.flush()
+                os.fsync(file.fileno())
+            os.chmod(temp_path, 0o600)
+            os.replace(temp_path, path)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
 
     # ---------- 通知 ----------
     @staticmethod
@@ -268,6 +319,7 @@ class XHSClient:
 
         # 按 note_id 聚合
         by_note = {}  # note_id -> {note_title, note_xsec_token, new_comments: []}
+        seen_comment_ids = {}
         for n in notifications:
             ntype = n.get("type", "")
             # 只处理"评论了你的笔记"类型的通知
@@ -287,6 +339,8 @@ class XHSClient:
             comment_id = ""
             if "anchorCommentId=" in link:
                 comment_id = link.split("anchorCommentId=")[-1].split("&")[0]
+            if not comment_id:
+                comment_id = comment_info.get("id", "")
 
             if note_id not in by_note:
                 by_note[note_id] = {
@@ -295,6 +349,12 @@ class XHSClient:
                     "note_xsec_token": item_info.get("xsec_token", ""),
                     "new_comments": [],
                 }
+                seen_comment_ids[note_id] = set()
+
+            # 同一通知可能因分页或平台重复投递出现多次；禁止形成重复草稿。
+            if not comment_id or comment_id in seen_comment_ids[note_id]:
+                continue
+            seen_comment_ids[note_id].add(comment_id)
 
             by_note[note_id]["new_comments"].append({
                 "comment_id": comment_id,
@@ -411,12 +471,13 @@ class XHSClient:
         cursor = None
         page = 0
         while True:
-            if xsec_token and os.path.exists(XHSClient._XHS_TOOL_PYTHON):
+            tool_python = XHSClient._find_xhs_tool_python()
+            if xsec_token and tool_python:
                 helper = os.path.join(
                     os.path.dirname(__file__), "xhs_subcomments_helper.py"
                 )
                 cmd = [
-                    XHSClient._XHS_TOOL_PYTHON,
+                    tool_python,
                     helper,
                     note_id,
                     comment_id,
@@ -525,12 +586,21 @@ class XHSClient:
         return err_msg, error_str
 
     @staticmethod
+    def _classify_reply_error(err_msg: str, output: str) -> str:
+        """按权威标记和固定优先级识别回复失败类型。"""
+        combined = f"{err_msg}\n{output}".lower()
+        for error_type, markers in XHSClient.REPLY_ERROR_MARKERS.items():
+            if any(marker.lower() in combined for marker in markers):
+                return error_type
+        return "unknown_error"
+
+    @staticmethod
     def reply(note_id, comment_id, content):
         """
         回复评论
 
         返回: (ok: bool, err_msg: str, err_type: str)
-          err_type: "" | "comment_deleted" | "content_rejected" | "unknown_error"
+          成功时 err_type=""；失败时取 REPLY_ERROR_TYPES 中的值。
         """
         result = subprocess.run(
             ["xhs", "reply", note_id, "--comment-id", comment_id, "-c", content],
@@ -544,23 +614,7 @@ class XHSClient:
         raw_output = result.stdout or output
         err_msg, error_str = XHSClient._extract_error_from_output(raw_output)
 
-        # 分级错误类型
-        err_type = "unknown_error"
-        combined = output.lower()
-
-        # 1) 评论已删除（最高优先级：同时检查解析出的 msg 和原始输出）
-        if "评论已删除" in err_msg or "评论已删除" in combined:
-            err_type = "comment_deleted"
-        # 2) 频率限制：-9043 或 "太快" / "过快" / "频率"
-        elif "-9043" in combined or "太快" in combined or "过快" in combined or "频率" in combined or "请稍后" in combined:
-            err_type = "rate_limited"
-        # 3) 内容审核拦截：-9126, -9128
-        elif "-9126" in combined or "-9128" in combined:
-            err_type = "content_rejected"
-        # 4) 其他回复失败
-        elif "回复失败" in combined:
-            err_type = "unknown_error"
-
+        err_type = XHSClient._classify_reply_error(err_msg, output)
         return False, error_str, err_type
 
     # ---------- 缓存 ----------

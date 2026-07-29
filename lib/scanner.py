@@ -55,7 +55,7 @@ class CommentScanner:
     @staticmethod
     def _online_reply_index(comments: list) -> tuple:
         """
-        从平台实时评论树建立“存在的评论”和“作者已直接回复的评论”索引。
+        从平台实时评论树建立"存在的评论"和"作者已直接回复的评论"索引。
 
         作者回复楼中楼时，以 target_comment.id 为准，不能只把所属的
         一级评论标记为已回复，否则会漏掉人工回复过的楼中楼评论。
@@ -114,7 +114,7 @@ class CommentScanner:
             )
 
         # 必须展开所有不完整楼层：候选本身或作者对候选的回复都可能位于
-        # 未展示的楼中楼中。只展开“当前看见候选”的楼层仍会误判。
+        # 未展示的楼中楼中。只展开"当前看见候选"的楼层仍会误判。
         for comment in comments:
             inline_subs = comment.get("sub_comments", [])
             expected = int(comment.get("sub_comment_count", 0) or 0)
@@ -268,6 +268,7 @@ class CommentScanner:
 
             reply_status_verified = not verify_replied or not candidates
             online_excluded = []
+            verification_error = ""
             if verify_replied and candidates:
                 try:
                     candidates, online_excluded = self.verify_candidates_online(
@@ -279,6 +280,7 @@ class CommentScanner:
                 except Exception as error:
                     candidates = []
                     reply_status_verified = False
+                    verification_error = str(error)
                     if verbose:
                         print(f"  ❌ 在线核验失败，未返回待回复候选: {error}")
 
@@ -297,6 +299,8 @@ class CommentScanner:
                 "filtered_skipped": filtered_skipped,
                 "filtered_online": len(online_excluded),
             }
+            if verification_error:
+                result["scan_error"] = verification_error
             results.append(result)
 
             if verbose:

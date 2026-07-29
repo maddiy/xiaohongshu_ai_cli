@@ -7,7 +7,12 @@ description: >
   通过本项目操作小红书时使用此技能。
 ---
 
-# 小红书命令行助手
+# 小红书AI智能运营系统
+
+命令行程序：`小红书AI智能运营系统`。
+
+其他AI进入项目后优先读取根目录`AGENTS.md`；该文件是精简执行协议。
+本SKILL保留更完整的操作规则和说明。
 
 使用本项目的 `main.py` 管理小红书笔记和评论。面向用户使用中文输出，面向 AI 提供稳定的 JSON 接口。
 
@@ -20,20 +25,21 @@ description: >
 5. AI 和脚本应优先使用 `--json` 与 `--output`，不要解析表格或 emoji。
 6. 用户只要求查看评论时使用 `comments`；只有要求回复时才使用 `scan`。
 7. 回复任务默认使用通知快速扫描；只有用户明确要求完整检查时才使用 `--full-scan`。
-8. 不回复已删除或已加入跳过列表的评论。
-9. 批量回复时保留配置的请求间隔，避免触发平台限流。
-10. 不向用户展示 Cookie、`xsec_token` 或其他登录凭据。
-11. 向用户展示笔记列表、评论列表、回复草稿或发送结果明细时，统一使用 Markdown 表格。
-12. 表格只用于面向用户展示；AI 与命令行之间仍使用 JSON 文件或 `--json` 输出。
-13. 使用 `--output` 后优先读取生成的文件，不要求命令在终端重复输出完整数据。
-14. 评论分析默认使用摘要；只有用户明确需要全部明细时才使用 `analyze --json --details`。
-15. 所有 AI 必须复用 `.cache/workflows/<笔记ID>/`，不得为同一批任务另建临时存档。
-16. 生成任何回复内容前，必须先检查该评论是否已经被作者回复。
-17. 只有扫描结果中 `reply_status_verified` 为 `true` 时，才生成回复草稿。
-18. `scan.json` 中的未回复数组只是候选；`drafts.json` 的历史发送状态优先级更高。
-19. 同一 `comment_id` 已标记为 `sent`、`failed` 或 `archived` 时，不得重新生成或发送。
-20. 本地没有发送记录不等于平台没有回复；运行 `drafts` 时必须再次在线读取评论树，并按作者回复的 `target_comment.id` 核验一级评论和楼中楼。
-21. 在线核验失败、需要验证码或候选评论在平台不可见时，停止生成该评论的草稿，不得用本地状态推断为未回复。
+8. 在线楼中楼数据不完整时必须停止；这是防止重复回复的安全规则，不得降级猜测。
+9. 不回复已删除或已加入跳过列表的评论。
+10. 批量回复时保留配置的请求间隔，避免触发平台限流。
+11. 不向用户展示 Cookie、`xsec_token` 或其他登录凭据。
+12. 向用户展示笔记列表、评论列表、回复草稿或发送结果明细时，统一使用 Markdown 表格。
+13. 表格只用于面向用户展示；AI 与命令行之间仍使用 JSON 文件或 `--json` 输出。
+14. 使用 `--output` 后优先读取生成的文件，不要求命令在终端重复输出完整数据。
+15. 评论分析默认使用摘要；只有用户明确需要全部明细时才使用 `analyze --json --details`。
+16. 所有 AI 必须复用 `.cache/workflows/<笔记ID>/`，不得为同一批任务另建临时存档。
+17. 生成任何回复内容前，必须先检查该评论是否已经被作者回复。
+18. 只有扫描结果中 `reply_status_verified` 为 `true` 时，才生成回复草稿。
+19. `scan.json` 中的未回复数组只是候选；`drafts.json` 的历史发送状态优先级更高。
+20. 同一 `comment_id` 已标记为 `sent`、`failed` 或 `archived` 时，不得重新生成或发送。
+21. 本地没有发送记录不等于平台没有回复；运行 `drafts` 时必须再次在线读取评论树，并按作者回复的 `target_comment.id` 核验一级评论和楼中楼。
+22. 在线核验失败、需要验证码或候选评论在平台不可见时，停止生成该评论的草稿，不得用本地状态推断为未回复。
 
 ## 固定工作目录
 
@@ -77,8 +83,8 @@ python3 main.py paths --note-id <note_id>
 2. 如果 scan.json.reply_status_verified != true：停止，不生成回复。
 3. 对 scan.json 的每个候选评论：
    a. drafts.json 中 send_status == sent：排除，状态为“已回复”。
-   b. drafts.json 中 send_status == archived：排除，状态为“已归档”。
-   c. drafts.json 中 send_status == failed：排除，状态为“发送失败”；程序应已将其加入排除列表。
+   b. drafts.json 中 send_status == failed：排除，状态为“发送失败”；程序应已将其加入排除列表。
+   c. drafts.json 中 send_status == archived：排除，状态为“已归档”。
    d. comment_id 在 .cache/skipped.json：排除，状态为“已跳过”。
    e. 平台确认评论已删除或作者已回复：排除。
    f. 以上均不成立：加入本次可回复清单。
@@ -93,7 +99,9 @@ python3 main.py paths --note-id <note_id>
 - 通知扫描存在延迟，已经发送成功的评论可能再次出现在 `unreplied_level1` 中。
 - `unreplied_level1` 和 `unreplied_subs` 的含义是“本次平台候选”，不是“最终允许发送”。
 - 本地 `send_status` 是防止不同 AI 重复发送的最终依据。
-- `failed` 在当前程序中属于终态，所有失败评论都会自动加入 `.cache/skipped.json`；如需重试，必须先展示失败原因、获得明确授权并移出排除列表。
+- `failed` 在当前程序中属于终态，所有失败评论都会自动加入
+  `.cache/skipped.json`；如需重试，必须先展示失败原因、获得明确授权，
+  同时移出排除列表并重置 `drafts.json` 中的失败终态。
 
 ## 表格展示规范
 
@@ -132,8 +140,17 @@ python3 main.py login
 查看供 AI 使用的调用协议：
 
 ```bash
+python3 main.py ai-help --summary
+python3 main.py ai-help --command <命令>
+python3 main.py ai-help --tests
 python3 main.py ai-help
 ```
+
+首次理解项目优先使用`--summary`；核对单条命令时使用`--command`，其参数、
+默认值、副作用和输出约定由程序自动生成；只有需要完整状态规则和发布协议时
+才读取完整输出。
+`--tests`只列出当前快照的测试。没有旧快照或版本控制差异时，禁止推断哪些
+测试或实现是本轮新增、删除或修改。
 
 ## 查看笔记
 
@@ -147,9 +164,11 @@ python3 main.py articles --limit 10
 AI 或脚本使用：
 
 ```bash
-python3 main.py articles --limit 10 --json
+python3 main.py articles --json
 ```
 
+`--limit`可省略，默认10篇。`articles`对平台只读，但可能更新本地权限为
+0600的敏感`xsec_index.json`令牌索引。
 使用返回的 `id` 作为后续命令的 `<note_id>`。不得向用户展示结果中的 `xsec_token`。
 
 ## 查看评论
@@ -161,6 +180,7 @@ python3 main.py comments --json
 python3 main.py comments --note-id <note_id> --limit 50 --json
 ```
 
+`--limit`可省略，默认20条。
 `comments` 返回按文章分组的 `groups`，包含文章序号、评论时间、用户、正文和状态；它不会生成回复候选或修改草稿。
 
 ## 扫描待回复评论
@@ -194,7 +214,8 @@ python3 main.py scan --note-id <note_id> \
 - 同时读取 `.cache/skipped.json`，排除已跳过评论。
 - 已回复、已发送、已归档、已跳过或已删除的评论不得进入回复映射。
 - 核验失败时停止生成回复，并向用户说明原因。
-- `--allow-unverified` 仅用于用户明确接受重复回复风险的特殊情况，不得默认使用。
+- `--allow-unverified` 仅用于兼容缺少核验标记的旧扫描文件，不得默认使用；
+  即使启用，生成草稿前仍会强制在线核验。
 
 ## 生成回复草稿
 
@@ -225,7 +246,13 @@ python3 main.py scan --note-id <note_id> \
 
 - `send`：发送回复
 - `skip`：本次跳过
-- `archive`：永久跳过并加入跳过列表
+- `archive`：用户确认并执行`send`动作后永久跳过并加入跳过列表，不向平台回复
+
+`skip`和`archive`的`reply`可以为空；只有`action=send`要求非空回复。
+`action=send` 时 `reply` 必须是非空字符串；映射格式错误时程序返回
+`ok=false` 和 `details`，不会生成可发送草稿。
+映射值可直接使用非空字符串，等价于`action=send`。本次候选缺少映射时
+默认`skip`，不得由AI自动补写通用回复。
 
 将回复映射转换成草稿：
 
@@ -236,6 +263,39 @@ python3 main.py drafts --note-id <note_id> \
 ```
 
 ## 预览和发送回复
+
+### AI 优先使用的低 token 流程
+
+```bash
+python3 main.py ai-reply --note-id <note_id> --action prepare
+# 根据 candidates 写入返回的 paths.reply_map
+python3 main.py ai-reply --note-id <note_id> --action draft
+# 展示 preview 并取得用户明确确认
+python3 main.py ai-reply --note-id <note_id> --action send --confirmed
+```
+
+每个动作只输出一个紧凑 JSON。`send` 会再次在线核验；未提供
+`--confirmed` 时不得发送。除非需要兼容旧脚本，AI 不再组合调用
+`paths → scan → drafts → send --dry-run`。
+
+`prepare` 会停用上一批草稿，`draft` 将当前候选写入
+`drafts.json.active_comment_ids`，`send` 只发送本次活动批次，历史草稿
+不会混入本次发送。
+`draft`开始时也会先停用旧活动批次，但保留全部历史草稿和终态；只有成功
+生成后才写入新的`active_comment_ids`。
+
+在线请求、验证码、分页或完整性核验失败时必须硬停止且不归档候选；只有
+平台成功返回并确认评论已回复或不存在时，发送阶段才标记`archived`。
+补拉楼中楼后数量仍少于平台`sub_comment_count`时会抛异常硬停止，不使用
+部分数据继续判断。
+核验展开本次在线查询返回的所有不完整楼层，是因为内联数据不足时无法
+预先定位候选或作者回复所在楼层，不表示回复关系可以跨楼层。
+
+`prepare` 默认只处理最新20条评论通知中的一级评论和楼中楼。只有用户
+明确要求全部历史评论时，才追加 `--full-scan`；使用 `--limit` 可以
+调整最新评论通知数量。
+全量`prepare`固定使用`force_refresh=true`绕过评论TTL缓存，并读取完整
+楼中楼。
 
 必须先预览：
 
@@ -249,12 +309,17 @@ python3 main.py send --file .cache/workflows/<note_id>/drafts.json --dry-run
 python3 main.py send --file .cache/workflows/<note_id>/drafts.json
 ```
 
+传统 `send` 同样只处理 `active_comment_ids` 指定的本批项目，并在实际发送前
+再次在线核验；平台数据不完整或草稿缺少 `note_id` 时停止。
+平台明确判定为已回复或不存在的项目会标记`archived`并写回草稿。
+
 发送中断后可以续发：
 
 ```bash
 python3 main.py send --file .cache/workflows/<note_id>/drafts.json --resume
 ```
 
+`--resume`仅改变续发提示文案；终态和全局排除过滤始终生效。
 完成后先给出成功、失败和跳过数量，再使用“发送结果”表格展示明细，不得把失败描述成成功。
 
 ## 发布笔记
@@ -307,6 +372,8 @@ python3 main.py skipped --clear
 清空跳过列表会改变本地持久状态，执行前必须获得确认。
 
 ## 错误处理
+
+失败类型以`XHSClient.REPLY_ERROR_TYPES`为准，当前处理规则如下：
 
 - `comment_deleted`：加入排除列表且不重试，不把评论删除描述成发送成功。
 - `rate_limited`：停止发送或延迟重试，不连续快速提交。

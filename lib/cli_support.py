@@ -11,6 +11,9 @@ from config import WORK_DIR
 from .xhs_client import XHSClient
 
 
+TERMINAL_SEND_STATUSES = ("sent", "failed", "archived")
+
+
 def print_json(data):
     """输出紧凑 UTF-8 JSON，减少 AI 上下文 token。"""
     print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
@@ -190,12 +193,14 @@ def filter_scan_local_state(result):
         )
         return result
     states = load_local_comment_states(result.get("note_id", ""))
-    terminal = {"sent", "failed", "archived"}
     filtered = 0
     for key in ("unreplied_level1", "unreplied_subs"):
         kept = []
         for comment in result.get(key, []):
-            if states.get(comment.get("comment_id", "")) in terminal:
+            if (
+                states.get(comment.get("comment_id", ""))
+                in TERMINAL_SEND_STATUSES
+            ):
                 filtered += 1
             else:
                 kept.append(comment)
@@ -262,7 +267,7 @@ def merge_draft_history(existing, new):
     for item in new_items:
         comment_id = item.get("comment_id")
         old = by_id.get(comment_id)
-        if old and old.get("send_status") in ("sent", "failed", "archived"):
+        if old and old.get("send_status") in TERMINAL_SEND_STATUSES:
             continue
         by_id[comment_id] = item
         if comment_id not in order:

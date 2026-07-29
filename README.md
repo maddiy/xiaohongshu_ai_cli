@@ -1,10 +1,16 @@
-# 小红书命令行助手
+# 小红书AI智能运营系统 v3.0.0
 
-一个面向中文用户和 AI 助手的小红书命令行工具。
+- 系统名称：`小红书AI智能运营系统`
+- 命令行程序：`小红书AI智能运营系统`
+
+这是一个面向中文用户和 AI 助手的小红书运营工具。
 
 它负责连接小红书、读取笔记与评论、保存回复草稿以及执行发布；内容创作和回复文案可以由任意 AI 编程助手完成，不依赖特定模型或厂商。
 
 **AI 一句话安装使用：** 在任意支持终端和文件操作的 AI 编程助手中打开本项目，然后说“安装并检查本项目，使用浏览器 Cookie 登录小红书，按统一工作目录读取笔记和评论、生成并预览回复或笔记，获得我的确认后再发送或发布”即可。
+
+**其他AI首先读取：** [`AGENTS.md`](AGENTS.md)。该文件是最短、最稳定的
+执行入口；`README.md`用于人工说明，`references/commands.md`用于参数查询。
 
 ## 可以做什么
 
@@ -22,16 +28,54 @@
 | 跳过列表 | `skipped` | 管理不再处理的评论 |
 | 发布笔记 | `post` | 发布 AI 或人工准备好的图文笔记 |
 | AI 协议 | `ai-help` | 输出机器可读的标准调用流程 |
+| 工作路径 | `paths` | 返回跨 AI 共用的固定状态文件路径 |
+| AI 回复 | `ai-reply` | 用紧凑 JSON 完成扫描、草稿预览和发送 |
 
 ### 代码结构
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | 回复工作流编排与命令分发 |
-| `lib/cli_parser.py` | 命令行参数定义 |
-| `lib/cli_view.py` | 登录、文章和评论查看 |
+| `AGENTS.md` | 其他 AI 首先读取的最短执行协议 |
+| `main.py` | `COMMAND_HANDLERS`命令分发及传统回复工作流编排 |
+| `config.py` | 应用名称、账号、浏览器、延迟和工作目录配置 |
+| `lib/cli_parser.py` | 唯一命令清单和命令行参数定义 |
+| `lib/cli_view.py` | 登录及文章、评论查看；其中登录会更新认证状态 |
 | `lib/cli_admin.py` | 发布、分析、环境检查和 AI 协议 |
+| `lib/cli_ai.py` | AI 专用 `prepare → draft → send` 工作流 |
 | `lib/cli_support.py` | 原子存储、状态合并和精简输出 |
+| `lib/scanner.py` | 最新/全量扫描和在线回复核验 |
+| `lib/replier.py` | 草稿生成、发送和失败排除 |
+| `lib/analyzer.py` | 评论统计与摘要分析 |
+| `lib/poster.py` | 图文笔记校验、预览和发布 |
+| `lib/xhs_client.py` | `xhs` CLI 封装及私有令牌索引 |
+| `lib/xhs_subcomments_helper.py` | `xiaohongshu-cli 0.6.4` 楼中楼令牌兼容层 |
+| `tests/test_compact_output.py` | 自动化回归测试；数量以实际运行结果为准 |
+
+当前共有14个子命令，没有快捷别名。`schema_version: 3` 表示 AI 输出协议
+版本，应用版本单独由 `python3 main.py --version` 查看。
+
+项目概况优先读取 `python3 main.py ai-help --summary`；需要完整协议时再运行
+`python3 main.py ai-help`。`main.py` 不只是分发
+入口，还保留了 `scan`、`drafts`、`send`、`reply` 四个传统工作流的编排；
+AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，不是每条都
+必须使用 `input()`。
+
+`COMMAND_NAMES`校验参数解析器中的命令，`main.COMMAND_HANDLERS`单独校验
+实际处理器；两项检查共同保证14个命令没有漏定义或漏分发。
+
+需要核对单条命令时运行
+`python3 main.py ai-help --command <命令>`。参数、默认值、副作用和输出约定
+由当前参数定义自动生成，其他AI不应手工推测或复制旧参数表。
+
+需要当前测试清单时运行`python3 main.py ai-help --tests`。该输出只能证明
+当前工作区有哪些测试；没有明确旧版本或版本控制差异时，不得把现有测试、
+安全机制或辅助模块描述成“相比上次新增”。
+
+生产源码数量和清单以`ai-help --summary`返回的`source_inventory`为准，
+完整相关文件看`project_inventory`；不要在文档中固定测试文件行数。
+`login`会导入浏览器Cookie并更新本地认证状态，因此不能归入只读命令。
+`articles`对平台是只读操作，但读取笔记时可能更新本地权限为0600的敏感
+`xsec_index.json`令牌索引。
 
 ## 设计目标
 
@@ -40,6 +84,7 @@
 - **人机分工**：AI 负责理解、创作和生成回复，CLI 负责读取、校验、缓存和执行。
 - **先审后发**：回复和笔记都支持预览，默认工作流要求用户确认后再执行。
 - **先查后写**：生成回复前先核验评论是否已经回复，避免重复生成和发送。
+- **不完整即停止**：楼中楼在线数据不完整时拒绝形成草稿，不以内联数据猜测。
 - **机器可读**：关键查询支持 UTF-8 JSON，AI 不需要解析终端表格。
 - **可恢复**：使用缓存、跳过列表和断点续发，减少重复请求和重复回复。
 
@@ -108,6 +153,10 @@ python3 main.py paths --note-id <笔记ID>
 - 只有用户明确要求保留多个版本时才创建额外文件。
 - `.cache/` 已被 Git 忽略，不会提交账号工作数据。
 - 每条发送结果会立即写回 `drafts.json`；其他 AI 读取 `send_status` 后不会重复发送。
+- `ai-reply` 会在 `drafts.json` 中保存 `active_comment_ids`；发送动作只处理
+  本次活动批次，不会把历史未完成草稿混入本次发送。
+- `.cache/xsec_index.json` 是敏感的本地令牌索引，不是业务状态文件；不得展示、
+  复制或提交。
 
 ## 回复评论的唯一判定逻辑
 
@@ -116,10 +165,12 @@ python3 main.py paths --note-id <笔记ID>
 状态优先级从高到低：
 
 1. `drafts.json` 中 `send_status: "sent"`：已经发送成功，禁止再次生成、预览或发送。
-2. `drafts.json` 中 `send_status: "archived"`，或评论 ID 已在 `.cache/skipped.json`：已经归档，禁止回复。
-3. `drafts.json` 中 `send_status: "failed"`：本轮已经尝试失败，程序会自动加入 `.cache/skipped.json`，禁止自动重试。
+2. `drafts.json` 中 `send_status: "failed"`：本轮已经尝试失败，程序会自动加入 `.cache/skipped.json`，禁止自动重试，并保留失败原因。
+3. `drafts.json` 中 `send_status: "archived"`，或评论 ID 已在 `.cache/skipped.json`：已经归档，禁止回复。
 4. 平台扫描确认已回复或评论已删除：禁止生成回复。
-5. 只有不属于以上状态、出现在本次扫描候选中，并且 `reply_status_verified: true` 的评论，才是“可回复评论”。
+5. 本次扫描候选只取得继续核验的资格；只有不属于以上状态、
+   `reply_status_verified: true`，并通过草稿前及发送前在线复核的评论，
+   才能生成并发送回复。
 
 可回复条件必须全部成立：
 
@@ -148,7 +199,9 @@ AND 评论未删除
 - 不得因为评论再次出现在 `scan.json` 中，就把它视为新的未回复评论。
 - 不得覆盖或删除历史 `send_status` 来绕过去重。
 - 本地数据库没有发送记录，不代表平台上没有回复；`drafts` 会强制在线核验，在线核验失败时停止生成草稿。
-- 所有 `failed` 评论都会自动加入排除列表。需要重试时必须先说明失败原因、取得用户明确授权，并从跳过列表移除。
+- 所有 `failed` 评论都会自动加入排除列表。需要重试时必须先说明失败原因、
+  取得用户明确授权，同时从跳过列表移除并重置 `drafts.json` 中的 `failed`
+  终态；仅执行 `skipped --remove` 不会自动重置草稿。
 - 不得在没有新候选时复用旧 `reply_map.json` 批量重建草稿。
 
 ## 安装
@@ -251,8 +304,10 @@ python3 main.py articles --limit 10
 机器可读输出：
 
 ```bash
-python3 main.py articles --limit 10 --json
+python3 main.py articles --json
 ```
+
+`--limit`可省略，默认显示10篇；仅在用户要求其他数量时添加。
 
 ### 3. 查看最新评论
 
@@ -264,6 +319,7 @@ python3 main.py comments --note-id <笔记ID>
 python3 main.py comments --limit 50 --json
 ```
 
+`--limit`可省略，默认读取20条通知。
 结果按文章分组，并结合平台删除状态、本地发送终态和排除列表显示状态。
 
 ### 4. 扫描可回复评论
@@ -286,6 +342,9 @@ python3 main.py scan \
 结果默认保存到 `.cache/workflows/<笔记ID>/scan.json`。
 
 ### 5. 生成回复草稿
+
+未提供扫描文件时，`drafts` 默认只读取最新20条评论通知。只有明确需要
+处理全部历史评论和楼中楼时才使用 `--full-scan`。
 
 人工逐条输入：
 
@@ -324,47 +383,70 @@ python3 main.py send --file .cache/workflows/<笔记ID>/drafts.json --dry-run
 python3 main.py send --file .cache/workflows/<笔记ID>/drafts.json
 ```
 
+传统 `send` 也会遵守 `active_comment_ids`，并在实际发送前再次在线核验；
+如果草稿缺少 `note_id`、平台数据不完整或核验失败，程序停止发送。
+平台明确判定为`online_replied`或`online_missing`的项目会标记为
+`archived`并立即写回草稿文件。
+
 如果发送中断：
 
 ```bash
 python3 main.py send --file .cache/workflows/<笔记ID>/drafts.json --resume
 ```
 
+`--resume`是兼容选项，只改变续发提示文案；无论是否使用该参数，程序都会
+过滤`sent`、`failed`、`archived`终态和全局排除列表。
+
 ## AI 标准工作流
 
-任意 AI 助手都可以遵循以下流程：
+其他 AI 优先使用 `ai-reply`，每个动作只输出一个紧凑 JSON，不需要
+另外执行 `paths`、读取 `scan.json`、调用 `drafts` 或运行 `--dry-run`：
 
 ```bash
-# 1. 检查环境
-python3 main.py doctor --json
+# 1. 默认只扫描最新20条评论通知，同时识别一级评论和楼中楼
+python3 main.py ai-reply --note-id <note_id> --action prepare
 
-# 2. 查看笔记并取得 note_id
-python3 main.py articles --limit 10 --json
+# 2. AI 将回复映射写入返回的 paths.reply_map
 
-# 3. 扫描评论
-python3 main.py scan --note-id <note_id> --json
+# 3. 再次在线核验并直接返回 preview
+python3 main.py ai-reply --note-id <note_id> --action draft
 
-# 4. AI 同时读取 scan.json、drafts.json 和 .cache/skipped.json，
-#    按 comment_id 排除 sent、failed、archived、已跳过和已删除评论
-
-# 5. 仅为过滤后仍可回复的评论更新同目录 reply_map.json
-
-# 6. 生成可审核草稿
-python3 main.py drafts \
+# 4. 展示 preview，获得用户明确确认后发送
+python3 main.py ai-reply \
   --note-id <note_id> \
-  --from-scan .cache/workflows/<note_id>/scan.json \
-  --batch .cache/workflows/<note_id>/reply_map.json
-
-# 7. 预览
-python3 main.py send --file .cache/workflows/<note_id>/drafts.json --dry-run
-
-# 8. 获得用户确认后发送
-python3 main.py send --file .cache/workflows/<note_id>/drafts.json
+  --action send \
+  --confirmed
 ```
+
+`prepare`和`draft`开始时都会停用旧`active_comment_ids`，但不会删除历史
+草稿或终态；`draft`成功后写入本次新的活动批次。
+
+`send` 动作还会在实际发送前进行最后一次在线核验。缺少
+`--confirmed` 时程序拒绝发送。
+
+在线请求失败、验证码或数据不完整会直接停止且不会归档候选；只有平台明确
+确认候选已经回复或不存在时，发送阶段才将其标记为`archived`。
+如果补拉后的楼中楼数量仍少于平台`sub_comment_count`，程序会抛出异常
+硬停止，不使用部分数据猜测作者是否已回复。
+核验会展开本次在线查询返回的所有不完整楼层，因为内联数据缺失时无法
+预先可靠定位候选或作者直接回复所在楼层；这不表示回复关系可以跨楼层。
+
+只有用户明确要求处理全部历史评论时才使用：
+
+```bash
+python3 main.py ai-reply \
+  --note-id <note_id> \
+  --action prepare \
+  --full-scan
+```
+
+该全量动作固定使用`force_refresh=true`绕过评论TTL缓存，并拉取完整楼中楼。
+可用 `--limit <数量>` 调整默认读取的最新评论通知数量。
 
 查看完整的机器调用协议：
 
 ```bash
+python3 main.py ai-help --command ai-reply
 python3 main.py ai-help
 ```
 
@@ -438,7 +520,9 @@ python3 main.py scan \
 {"reply_status_verified": true}
 ```
 
-`drafts` 默认只接受已经核验回复状态的扫描文件。核验失败时应重新扫描，不要直接生成回复；只有用户明确接受重复回复风险时才使用 `--allow-unverified`。
+`drafts` 默认只接受已经核验回复状态的扫描文件。核验失败时应重新扫描。
+`--allow-unverified` 仅用于兼容缺少核验标记的旧扫描文件；即使使用该参数，
+生成草稿前仍会强制执行在线核验。
 
 ### AI 回复映射
 
@@ -474,7 +558,12 @@ python3 main.py scan \
 
 - `send`：发送回复
 - `skip`：本次跳过，下次扫描仍可能出现
-- `archive`：永久跳过，写入 `.cache/skipped.json`
+- `archive`：在用户确认并执行发送动作后永久跳过，写入
+  `.cache/skipped.json`，但不向平台回复
+
+`skip`和`archive`的`reply`都可以为空；只有`send`要求非空回复。
+本次候选没有出现在映射中时，程序将其视为`skip`，不会发送。其他AI不得
+因为映射缺少某个候选而自动补写通用回复。
 
 ### 回复草稿
 
@@ -570,6 +659,9 @@ python3 main.py skipped --clear
 
 ## 错误处理
 
+当前失败类型以`XHSClient.REPLY_ERROR_TYPES`为唯一清单，识别条件以
+`XHSClient.REPLY_ERROR_MARKERS`为准，不从其他接口的错误码推测：
+
 | 错误类型 | 建议处理 |
 |---|---|
 | `comment_deleted` | 评论已删除，自动加入排除列表，不再重试 |
@@ -577,7 +669,9 @@ python3 main.py skipped --clear
 | `content_rejected` | 修改措辞，重新预览后再发送 |
 | `unknown_error` | 保存错误信息，检查登录和平台状态 |
 
-无论错误类型是什么，回复失败后都会写入 `.cache/skipped.json`。如需重试，必须先获得用户明确授权，再使用 `skipped --remove <comment_id>` 移出排除列表。
+无论错误类型是什么，回复失败后都会写入 `.cache/skipped.json`。如需重试，
+必须先获得用户明确授权，再移出排除列表并重置 `drafts.json` 中对应评论的
+`failed` 终态。
 
 如果出现验证码或平台验证，应停止自动操作，由用户亲自完成验证。
 
@@ -585,7 +679,7 @@ python3 main.py skipped --clear
 
 - 不要提交或公开 Cookie、`xsec_token` 和账号凭据。
 - 不要在未经审核的情况下批量发送 AI 生成内容。
-- 发布和回复前始终使用 `--dry-run`。
+- 发布使用 `--dry-run` 预览；AI 回复使用 `ai-reply --action draft` 预览。
 - 对争议或攻击性评论保持克制，优先讨论事实和逻辑。
 - 不要使用过短的请求间隔规避平台限制。
 - 大批量操作应拆分执行，并检查每批结果。
