@@ -26,6 +26,11 @@ from lib.cli_support import TERMINAL_SEND_STATUSES
 
 
 class CompactOutputTests(unittest.TestCase):
+    def test_ai_large_rows_are_capped_without_losing_total_source(self):
+        rows = [{"index": index} for index in range(25)]
+        self.assertEqual(len(cli_ai._inline_rows(rows)), 20)
+        self.assertEqual(cli_ai._inline_rows(rows)[-1]["index"], 19)
+
     def test_command_manifest_matches_parser(self):
         parser = build_parser()
         subparsers = next(
@@ -442,6 +447,9 @@ class CompactOutputTests(unittest.TestCase):
             "评论已删除": "comment_deleted",
             "操作太快，请稍后": "rate_limited",
             "API error -9126": "content_rejected",
+            "API error -9131，由于对方设置，你无法发表评论": (
+                "permission_denied"
+            ),
             "其他回复失败": "unknown_error",
         }
         for output, expected in cases.items():
@@ -1795,14 +1803,66 @@ class CompactOutputTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             main.cmd_articles(args)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["articles"][0]["id"], "n1")
+        self.assertEqual(payload["articles"][0]["note_id"], "n1")
         self.assertEqual(
             payload["columns"],
             ["序号", "发布时间", "评论数", "标题", "笔记ID"],
         )
+        self.assertEqual(
+            payload["column_fields"]["笔记ID"], "note_id"
+        )
         self.assertEqual(payload["articles"][0]["title"], "标题")
         self.assertNotIn("xsec_token", payload["articles"][0])
         self.assertNotIn("secret", output.getvalue())
+
+    @patch("main.XHSClient.list_articles")
+    def test_articles_large_json_is_cached_and_paginated(
+        self, list_articles
+    ):
+        list_articles.return_value = [{
+            "id": f"n{index}",
+            "title": f"标题{index}",
+            "comments_count": index,
+            "time": "2026-07-30 10:00",
+        } for index in range(1, 46)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = os.path.join(temp_dir, "articles.json")
+            first_args = argparse.Namespace(
+                limit=45,
+                json=True,
+                page=1,
+                page_size=20,
+                cache=False,
+                output=cache_path,
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                main.cmd_articles(first_args)
+            first = json.loads(output.getvalue())
+            self.assertEqual(first["count"], 20)
+            self.assertEqual(first["total_count"], 45)
+            self.assertEqual(first["articles"][0]["note_id"], "n1")
+            self.assertTrue(first["pagination"]["has_more"])
+            self.assertIn("--page 2", first["pagination"]["next_command"])
+            self.assertEqual(first["cache_path"], cache_path)
+            with open(cache_path, encoding="utf-8") as saved:
+                self.assertEqual(len(json.load(saved)["articles"]), 45)
+
+            second_args = argparse.Namespace(
+                limit=10,
+                json=True,
+                page=2,
+                page_size=20,
+                cache=True,
+                output=cache_path,
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                main.cmd_articles(second_args)
+            second = json.loads(output.getvalue())
+            self.assertEqual(second["articles"][0]["index"], 21)
+            self.assertEqual(second["articles"][0]["note_id"], "n21")
+            self.assertEqual(list_articles.call_count, 1)
 
     def test_compact_analysis_removes_duplicate_arrays(self):
         result = {
@@ -2081,6 +2141,145 @@ class CompactOutputTests(unittest.TestCase):
                 self.assertEqual(
                     drafts["drafts"][0]["send_status"], "failed"
                 )
+
+    @patch("lib.xhs_client.subprocess.Popen")
+    @patch("lib.xhs_client.os.path.exists", return_value=True)
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    def test_persistent_reply_session_reuses_one_process(
+        self, _tool_python, _exists, popen
+    ):
+        process = popen.return_value
+        process.stdout.readline.side_effect = [
+            '{"ok":true,"comment_id":"c1"}\n',
+            '{"ok":true,"comment_id":"c2"}\n',
+        ]
+        process.wait.return_value = 0
+        client = XHSClient()
+        with client.reply_session("n1") as session:
+            self.assertEqual(session.reply("c1", "回复一"), (True, "", ""))
+            self.assertEqual(session.reply("c2", "回复二"), (True, "", ""))
+        popen.assert_called_once()
+        self.assertEqual(process.stdin.write.call_count, 2)
+
+    @patch("lib.xhs_client.subprocess.Popen")
+    @patch("lib.xhs_client.os.path.exists", return_value=True)
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    def test_persistent_session_can_post_top_level_comment(
+        self, _tool_python, _exists, popen
+    ):
+        process = popen.return_value
+        process.stdout.readline.return_value = (
+            '{"ok":true,"action":"comment","sequence":1,'
+            '"comment_id":"new-comment"}\n'
+        )
+        process.wait.return_value = 0
+        client = XHSClient()
+        with client.reply_session("n1") as session:
+            self.assertEqual(
+                session.comment("顶层评论", sequence=1),
+                (True, "", "", "new-comment"),
+            )
+        payload = json.loads(
+            process.stdin.write.call_args.args[0].strip()
+        )
+        self.assertEqual(payload["action"], "comment")
+        self.assertEqual(payload["sequence"], 1)
+        self.assertEqual(payload["content"], "顶层评论")
+
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    @patch("lib.xhs_client.XHSClient._run_xhs")
+    def test_full_comment_read_uses_one_session_and_expands_subs(
+        self, run_xhs, _tool_python
+    ):
+        run_xhs.return_value = {
+            "ok": True,
+            "data": {"comments": [{"id": "root"}]},
+        }
+        result = XHSClient.get_all_comments(
+            "n1", "token", include_sub_comments=True
+        )
+        self.assertEqual(result, [{"id": "root"}])
+        command = run_xhs.call_args.args[0]
+        self.assertTrue(command[1].endswith("xhs_comments_helper.py"))
+        self.assertEqual(command[9], "1")
+        self.assertEqual(run_xhs.call_args.kwargs["timeout"], 300)
+
+    @patch("lib.replier.time.sleep")
+    def test_batch_stops_after_account_level_error(self, _sleep):
+        client = MagicMock()
+        client.is_skipped.return_value = False
+        client.reply.return_value = (
+            False, "verification_required", "verification_required"
+        )
+        drafts = {
+            "note_id": "n1",
+            "drafts": [
+                {
+                    "comment_id": "c1", "nickname": "甲",
+                    "content": "评论一", "reply": "回复一", "action": "send",
+                },
+                {
+                    "comment_id": "c2", "nickname": "乙",
+                    "content": "评论二", "reply": "回复二", "action": "send",
+                },
+            ],
+        }
+        stats = Replier(client).send_drafts(drafts)
+        self.assertTrue(stats["stopped"])
+        self.assertEqual(stats["remaining"], 1)
+        client.reply.assert_called_once()
+        self.assertEqual(drafts["drafts"][0]["send_status"], "failed")
+        self.assertNotIn("send_status", drafts["drafts"][1])
+
+    def test_scan_requests_complete_subs_in_shared_read_session(self):
+        client = MagicMock()
+        client.get_comments_cached.return_value = ([], False)
+        client.get_skipped_ids.return_value = set()
+        CommentScanner(client).scan_note(
+            "n1", include_sub_comments=True, verbose=False
+        )
+        self.assertTrue(
+            client.get_comments_cached.call_args.kwargs[
+                "include_sub_comments"
+            ]
+        )
+
+    def test_known_complete_parent_makes_missing_sub_conclusive(self):
+        client = MagicMock()
+        client.find_note_xsec.return_value = ""
+        client.get_comments_until_ids.return_value = ([{
+            "id": "root",
+            "sub_comment_count": 0,
+            "sub_comments": [],
+        }, {
+            "id": "unrelated",
+            "sub_comment_count": 3,
+            "sub_comments": [],
+        }], False)
+        eligible, excluded = CommentScanner(
+            client
+        ).verify_candidates_online(
+            "n1",
+            [{
+                "comment_id": "missing-sub",
+                "parent_comment_id": "root",
+            }],
+        )
+        self.assertEqual(eligible, [])
+        self.assertEqual(
+            excluded,
+            [{"comment_id": "missing-sub", "reason": "online_missing"}],
+        )
+        client.get_sub_comments.assert_not_called()
 
 
 if __name__ == "__main__":

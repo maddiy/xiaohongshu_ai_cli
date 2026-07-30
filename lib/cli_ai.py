@@ -26,6 +26,7 @@ from .scanner import CommentScanner
 
 DRAFT_COLUMNS = ["序号", "用户", "原评论", "拟回复", "操作"]
 RESULT_COLUMNS = ["序号", "用户", "回复摘要", "结果", "失败原因"]
+INLINE_ROW_LIMIT = 20
 
 
 def _workflow_error(action, error, prefix="", paths=None):
@@ -126,6 +127,11 @@ def _result_rows(items):
         **({"error_type": item.get("error_type", "")}
            if item.get("send_status") == "failed" else {}),
     } for index, item in enumerate(items, start=1)]
+
+
+def _inline_rows(rows):
+    """限制机器接口内联明细；完整数据始终保留在状态文件。"""
+    return rows[:INLINE_ROW_LIMIT]
 
 
 def _validate_reply_map(reply_map, candidate_ids):
@@ -315,8 +321,11 @@ def _prepare(args, paths):
         "scan_method": scan_method,
         "verification_mode": verification_mode,
         "note_id": args.note_id,
-        "candidates": candidates,
+        "candidates": _inline_rows(candidates),
         "count": len(candidates),
+        "candidates_returned": min(len(candidates), INLINE_ROW_LIMIT),
+        "candidates_truncated": len(candidates) > INLINE_ROW_LIMIT,
+        "candidates_source": paths["scan"],
         "deferred_count": output.get("deferred_online", 0),
         "next": (
             (
@@ -496,6 +505,7 @@ def _draft(args, paths):
         if item.get("action") == "archive"
         and item.get("send_status") != "archived"
     ]
+    preview_rows = _preview(active_items)
     print_json({
         "ok": True,
         "action": "draft",
@@ -510,7 +520,11 @@ def _draft(args, paths):
         "revision": revision,
         "preview_hash": current_preview_hash,
         "columns": DRAFT_COLUMNS,
-        "preview": _preview(active_items),
+        "preview": _inline_rows(preview_rows),
+        "preview_total": len(preview_rows),
+        "preview_returned": min(len(preview_rows), INLINE_ROW_LIMIT),
+        "preview_truncated": len(preview_rows) > INLINE_ROW_LIMIT,
+        "preview_source": paths["drafts"],
         "next": (
             "向用户展示 preview；明确确认后运行 "
             "ai-reply --action send --confirmed "
@@ -706,12 +720,17 @@ def _send(args, paths):
             )
         )
         write_json(drafts, paths["drafts"])
+        result_rows = _result_rows(active_items)
         print_json({
             "ok": True, "action": "send", "sent": reconciled_sent,
             "failed": 0,
             "skipped": len(skipped_items) + online_archived_count,
             "columns": RESULT_COLUMNS,
-            "results": _result_rows(active_items),
+            "results": _inline_rows(result_rows),
+            "results_total": len(result_rows),
+            "results_returned": min(len(result_rows), INLINE_ROW_LIMIT),
+            "results_truncated": len(result_rows) > INLINE_ROW_LIMIT,
+            "results_source": paths["drafts"],
             "batch_id": expected_batch_id,
         })
         return
@@ -730,22 +749,35 @@ def _send(args, paths):
         state_file=paths["drafts"],
         quiet=True,
     )
-    active_batch["status"] = (
-        "completed_with_failures"
-        if stats.get("fail", 0) else "completed"
-    )
-    active_batch["completed_at"] = (
-        datetime.datetime.now().astimezone().isoformat(
-            timespec="seconds"
+    if stats.get("stopped"):
+        active_batch["status"] = "paused"
+        active_batch["paused_at"] = (
+            datetime.datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
         )
-    )
+        active_batch["pause_reason"] = stats.get("stop_reason", "")
+    else:
+        active_batch["status"] = (
+            "completed_with_failures"
+            if stats.get("fail", 0) else "completed"
+        )
+        active_batch["completed_at"] = (
+            datetime.datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
+        )
     active_batch.pop("send_started_at", None)
     write_json(drafts, paths["drafts"])
+    result_rows = _result_rows(active_items)
     print_json({
-        "ok": stats.get("fail", 0) == 0,
+        "ok": stats.get("fail", 0) == 0 and not stats.get("stopped"),
         "action": "send",
         "sent": stats.get("success", 0) + reconciled_sent,
         "failed": stats.get("fail", 0),
+        "paused": bool(stats.get("stopped")),
+        "pause_reason": stats.get("stop_reason", ""),
+        "remaining": stats.get("remaining", 0),
         "skipped": (
             stats.get("skip", 0)
             + online_archived_count
@@ -753,7 +785,11 @@ def _send(args, paths):
         ),
         "batch_id": expected_batch_id,
         "columns": RESULT_COLUMNS,
-        "results": _result_rows(active_items),
+        "results": _inline_rows(result_rows),
+        "results_total": len(result_rows),
+        "results_returned": min(len(result_rows), INLINE_ROW_LIMIT),
+        "results_truncated": len(result_rows) > INLINE_ROW_LIMIT,
+        "results_source": paths["drafts"],
         "state_file": paths["drafts"],
     })
 

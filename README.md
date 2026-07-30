@@ -49,6 +49,7 @@
 | `lib/poster.py` | 图文笔记校验、预览和发布 |
 | `lib/xhs_client.py` | `xhs` CLI 封装及私有令牌索引 |
 | `lib/xhs_comments_helper.py` | 单一登录会话内完成评论分页及候选楼层补全 |
+| `lib/xhs_reply_helper.py` | 单一登录会话内连续回复并逐条回传结果 |
 | `lib/xhs_subcomments_helper.py` | `xiaohongshu-cli 0.6.4` 楼中楼令牌兼容层 |
 | `tests/test_compact_output.py` | 自动化回归测试；数量以实际运行结果为准 |
 
@@ -266,6 +267,9 @@ python3 main.py doctor --json
 AUTHOR_USER_ID = "你的小红书用户ID"
 LOGIN_COOKIE_SOURCE = "firefox"
 REQUEST_DELAY = 3
+BATCH_REPLY_DELAY = 2.0
+BATCH_REPLY_PAUSE_EVERY = 50
+BATCH_REPLY_PAUSE_SECONDS = 8
 CACHE_TTL_MINUTES = 30
 ```
 
@@ -275,7 +279,10 @@ CACHE_TTL_MINUTES = 30
 |---|---|
 | `AUTHOR_USER_ID` | 用于判断评论是否由笔记作者回复 |
 | `LOGIN_COOKIE_SOURCE` | 登录时读取 Cookie 的浏览器 |
-| `REQUEST_DELAY` | 连续请求或回复之间的间隔秒数 |
+| `REQUEST_DELAY` | 兼容旧单次进程发送模式的间隔秒数 |
+| `BATCH_REPLY_DELAY` | 推荐批量回复会话的最小间隔，可由环境变量调整 |
+| `BATCH_REPLY_PAUSE_EVERY` | 大批量回复每发送多少条主动休息一次 |
+| `BATCH_REPLY_PAUSE_SECONDS` | 每次主动休息的秒数 |
 | `CACHE_TTL_MINUTES` | 评论缓存有效时间 |
 | `GENERIC_REPLIES` | 通用回复模式使用的话术 |
 | `SKIPPED_FILE` | 永久跳过列表的保存位置 |
@@ -311,9 +318,13 @@ python3 main.py articles --limit 10
 
 ```bash
 python3 main.py articles --json
+python3 main.py articles --limit 100 --json
 ```
 
 `--limit`可省略，默认显示10篇；仅在用户要求其他数量时添加。
+JSON中的“笔记ID”字段固定为`note_id`。超过20篇时完整列表自动保存到
+`.cache/articles.json`，标准输出只返回一页；按`pagination.next_command`
+读取后续缓存页，直至`has_more=false`，避免执行工具截断长输出。
 
 ### 3. 查看最新评论
 
@@ -716,6 +727,10 @@ python3 main.py skipped --clear
 | `comment_deleted` | 评论已删除，自动加入排除列表，不再重试 |
 | `rate_limited` | 停止或延迟发送，避免连续请求 |
 | `content_rejected` | 修改措辞，重新预览后再发送 |
+| `permission_denied` | 对方设置不允许评论，加入排除列表且不重试 |
+| `verification_required` | 停止自动重试，按返回提示处理验证 |
+| `not_authenticated` | 重新登录后接续暂停批次 |
+| `session_error` | 检查本地环境后接续暂停批次 |
 | `unknown_error` | 保存错误信息，检查登录和平台状态 |
 
 无论错误类型是什么，回复失败后都会写入 `.cache/skipped.json`。如需重试，
@@ -778,3 +793,6 @@ python3 main.py post --help
 ```
 
 更详细的命令参考见 [`references/commands.md`](references/commands.md)。
+为避免大批量输出被终端截断，`ai-reply`的候选、草稿和发送结果最多内联
+20行；完整数据分别保存在返回的`candidates_source`、`preview_source`和
+`results_source`文件中。

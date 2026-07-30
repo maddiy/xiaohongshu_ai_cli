@@ -20,8 +20,19 @@ AUTHOR_USER_ID = "6321167e0000000023038acd"  # 运行 xhs whoami 查看
 # 登录时默认读取的浏览器 Cookie
 LOGIN_COOKIE_SOURCE = "firefox"
 
-# 请求间隔（秒），避免频率限制
+# 兼容单次 xhs 进程发送时的请求间隔（秒）。
+# 推荐批量发送会复用一个登录会话，由 xhs 客户端自身执行下面的动态间隔。
 REQUEST_DELAY = 3
+
+# 持久会话批量回复的最小间隔。xiaohongshu-cli 会在此基础上加入随机抖动，
+# 程序还会周期性短暂停顿；仍比“每条重启进程+固定等待3秒”更快、更稳定。
+BATCH_REPLY_DELAY = float(os.environ.get("XHS_BATCH_REPLY_DELAY", "2.0"))
+BATCH_REPLY_PAUSE_EVERY = int(
+    os.environ.get("XHS_BATCH_REPLY_PAUSE_EVERY", "50")
+)
+BATCH_REPLY_PAUSE_SECONDS = float(
+    os.environ.get("XHS_BATCH_REPLY_PAUSE_SECONDS", "8")
+)
 
 # 只读分页间隔。发送回复仍使用上面的请求间隔。
 READ_PAGE_DELAY = 0.1

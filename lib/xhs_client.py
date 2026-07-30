@@ -10,8 +10,162 @@ import sys
 import time
 from typing import Optional
 
-from config import CACHE_DIR, CACHE_TTL_MINUTES, LOGIN_COOKIE_SOURCE
+from config import (
+    BATCH_REPLY_DELAY,
+    CACHE_DIR,
+    CACHE_TTL_MINUTES,
+    LOGIN_COOKIE_SOURCE,
+)
 from .state_io import atomic_write_json, file_lock
+
+
+class _PersistentReplySession:
+    """复用一个 xhs 登录会话发送多条回复，并逐条返回结构化结果。"""
+
+    def __init__(self, client, note_id):
+        self.client = client
+        self.note_id = note_id
+        self.process = None
+
+    def __enter__(self):
+        tool_python = self.client._find_xhs_tool_python()
+        helper = os.path.join(
+            os.path.dirname(__file__), "xhs_reply_helper.py"
+        )
+        if not tool_python or not os.path.exists(helper):
+            return self
+        try:
+            self.process = subprocess.Popen(
+                [
+                    tool_python,
+                    helper,
+                    self.note_id,
+                    LOGIN_COOKIE_SOURCE,
+                    str(BATCH_REPLY_DELAY),
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+        except OSError:
+            self.process = None
+        return self
+
+    def __exit__(self, *_args):
+        if self.process is None:
+            return
+        try:
+            self.process.stdin.close()
+        except (AttributeError, OSError):
+            pass
+        try:
+            self.process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        try:
+            self.process.stdout.close()
+        except (AttributeError, OSError):
+            pass
+
+    def reply(self, comment_id, content):
+        """保持与 XHSClient.reply 相同的三元组返回约定。"""
+        if self.process is None:
+            return self.client.reply(self.note_id, comment_id, content)
+        request = json.dumps(
+            {"comment_id": comment_id, "content": content},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        try:
+            self.process.stdin.write(request + "\n")
+            self.process.stdin.flush()
+            line = self.process.stdout.readline()
+        except (AttributeError, BrokenPipeError, OSError):
+            line = ""
+        if not line:
+            return False, "批量回复会话意外结束", "session_error"
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return False, "批量回复会话返回了无效数据", "session_error"
+        if payload.get("ok"):
+            return True, "", ""
+        error = payload.get("error", {})
+        code = (
+            str(error.get("code", "") or "")
+            if isinstance(error, dict) else ""
+        )
+        message = (
+            str(error.get("message", "") or "")
+            if isinstance(error, dict) else str(error)
+        )
+        detail = f"{code}: {message}".strip(": ") or "批量回复失败"
+        error_type = (
+            code
+            if code in self.client.REPLY_ERROR_TYPES
+            else self.client._classify_reply_error(message, detail)
+        )
+        return False, detail[:200], error_type
+
+    def comment(self, content, sequence=None):
+        """在当前笔记发布顶层评论，复用同一个登录会话。"""
+        if self.process is None:
+            return False, "批量评论需要持久会话", "session_error", ""
+        request = json.dumps(
+            {
+                "action": "comment",
+                "sequence": sequence,
+                "content": content,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        try:
+            self.process.stdin.write(request + "\n")
+            self.process.stdin.flush()
+            line = self.process.stdout.readline()
+        except (AttributeError, BrokenPipeError, OSError):
+            line = ""
+        if not line:
+            return (
+                False,
+                "批量评论会话意外结束",
+                "session_error",
+                "",
+            )
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return (
+                False,
+                "批量评论会话返回了无效数据",
+                "session_error",
+                "",
+            )
+        if payload.get("ok"):
+            return True, "", "", str(payload.get("comment_id", "") or "")
+        error = payload.get("error", {})
+        code = (
+            str(error.get("code", "") or "")
+            if isinstance(error, dict) else ""
+        )
+        message = (
+            str(error.get("message", "") or "")
+            if isinstance(error, dict) else str(error)
+        )
+        detail = f"{code}: {message}".strip(": ") or "批量评论失败"
+        error_type = (
+            code
+            if code in self.client.REPLY_ERROR_TYPES
+            else self.client._classify_reply_error(message, detail)
+        )
+        return False, detail[:200], error_type, ""
 
 
 class XHSClient:
@@ -21,12 +175,26 @@ class XHSClient:
         "comment_deleted",
         "rate_limited",
         "content_rejected",
+        "permission_denied",
+        "verification_required",
+        "not_authenticated",
+        "session_error",
         "unknown_error",
     )
     REPLY_ERROR_MARKERS = {
         "comment_deleted": ("评论已删除",),
         "rate_limited": ("-9043", "太快", "过快", "频率", "请稍后"),
         "content_rejected": ("-9126", "-9128"),
+        "permission_denied": (
+            "-9131", "无法发表评论", "对方设置",
+        ),
+        "verification_required": (
+            "verification_required", "captcha", "验证码",
+        ),
+        "not_authenticated": (
+            "not_authenticated", "未登录", "登录已过期",
+        ),
+        "session_error": ("批量回复会话",),
     }
 
     # 内存缓存：避免批量操作中反复读取 skipped.json
@@ -398,10 +566,39 @@ class XHSClient:
 
     # ---------- 评论 ----------
     @staticmethod
-    def get_all_comments(note_id, xsec_token=""):
-        """逐页获取全部一级评论，避免底层 ``--all`` 长时间无输出。"""
+    def get_all_comments(note_id, xsec_token="",
+                         include_sub_comments=False):
+        """在一个登录会话内读取全部评论，必要时同时补全楼中楼。"""
         from config import READ_PAGE_DELAY
 
+        tool_python = XHSClient._find_xhs_tool_python()
+        helper = os.path.join(
+            os.path.dirname(__file__), "xhs_comments_helper.py"
+        )
+        if tool_python and os.path.exists(helper):
+            data = XHSClient._run_xhs([
+                tool_python,
+                helper,
+                note_id,
+                xsec_token,
+                LOGIN_COOKIE_SOURCE,
+                "500",
+                "[]",
+                "[]",
+                "[]",
+                "1" if include_sub_comments else "0",
+                "",
+            ], timeout=300)
+            if not data.get("ok"):
+                error_info = data.get("error", {})
+                detail = (
+                    error_info.get("message", "")
+                    if isinstance(error_info, dict) else str(error_info)
+                )
+                raise RuntimeError(f"获取评论失败: {detail or data}")
+            return data.get("data", {}).get("comments", [])
+
+        # 兼容无法定位 xiaohongshu-cli Python 环境的安装方式。
         comments = []
         cursor = ""
         seen_cursors = set()
@@ -467,6 +664,13 @@ class XHSClient:
             os.path.dirname(__file__), "xhs_comments_helper.py"
         )
         if xsec_token and groups and tool_python and os.path.exists(helper):
+            # 少量候选走楼层直达，通常十几秒完成；全量候选会在助手内改为
+            # 顺序翻页并补全相关楼层，需要按规模放宽总进程时间。单次HTTP
+            # 请求仍由助手限制为8秒，放宽这里只避免完整批次被45秒误杀。
+            helper_timeout = min(
+                300,
+                max(45, 30 + max_pages * 3 + len(groups) // 5),
+            )
             data = XHSClient._run_xhs([
                 tool_python,
                 helper,
@@ -491,7 +695,7 @@ class XHSClient:
                 ),
                 "1" if expand_unresolved else "0",
                 "",
-            ], timeout=min(45, max(12, 8 + max_pages * 2)))
+            ], timeout=helper_timeout)
             if not data.get("ok"):
                 error_info = data.get("error", {})
                 detail = (
@@ -782,6 +986,10 @@ class XHSClient:
         err_type = XHSClient._classify_reply_error(err_msg, output)
         return False, error_str, err_type
 
+    def reply_session(self, note_id):
+        """创建复用Cookie和网络连接的批量回复会话。"""
+        return _PersistentReplySession(self, note_id)
+
     # ---------- 缓存 ----------
     @staticmethod
     def _cache_path(note_id: str) -> str:
@@ -839,7 +1047,9 @@ class XHSClient:
     @staticmethod
     def get_comments_cached(note_id: str, xsec_token: str = "",
                             force_refresh: bool = False,
-                            max_age_minutes: int = None) -> tuple[list, bool]:
+                            max_age_minutes: int = None,
+                            include_sub_comments: bool = False
+                            ) -> tuple[list, bool]:
         """
         获取评论（优先使用缓存）
 
@@ -851,12 +1061,22 @@ class XHSClient:
         if not force_refresh:
             cached = XHSClient.load_cache(note_id, max_age_minutes)
             if cached is not None:
-                return cached, True
+                nested_complete = all(
+                    int(item.get("sub_comment_count", 0) or 0)
+                    <= len(item.get("sub_comments", []))
+                    for item in cached
+                )
+                if not include_sub_comments or nested_complete:
+                    return cached, True
 
         comments = None
         # 第一次：不带 xsec_token（优先）
         try:
-            comments = XHSClient.get_all_comments(note_id, "")
+            comments = XHSClient.get_all_comments(
+                note_id,
+                "",
+                include_sub_comments=include_sub_comments,
+            )
             XHSClient.save_cache(note_id, comments)
             return comments, False
         except RuntimeError:
@@ -873,7 +1093,11 @@ class XHSClient:
 
         if resolved_token:
             try:
-                comments = XHSClient.get_all_comments(note_id, resolved_token)
+                comments = XHSClient.get_all_comments(
+                    note_id,
+                    resolved_token,
+                    include_sub_comments=include_sub_comments,
+                )
                 XHSClient.save_cache(note_id, comments)
                 return comments, False
             except RuntimeError:

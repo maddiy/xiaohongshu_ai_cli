@@ -1,11 +1,28 @@
 """登录、文章列表和评论列表命令。"""
 
+import json
+import math
+import os
+import shlex
+
+from config import CACHE_DIR
 from .cli_support import (
     build_comment_groups,
     call_for_output,
     print_json,
+    write_json,
 )
 from .xhs_client import XHSClient
+
+
+ARTICLE_COLUMNS = ["序号", "发布时间", "评论数", "标题", "笔记ID"]
+ARTICLE_COLUMN_FIELDS = {
+    "序号": "index",
+    "发布时间": "time",
+    "评论数": "comments_count",
+    "标题": "title",
+    "笔记ID": "note_id",
+}
 
 
 def cmd_login(args):
@@ -19,27 +36,109 @@ def cmd_login(args):
 def cmd_articles(args):
     """查看最新文章列表。"""
     client = XHSClient()
+    output_path = os.path.abspath(
+        getattr(args, "output", None)
+        or os.path.join(CACHE_DIR, "articles.json")
+    )
+    use_cache = bool(getattr(args, "cache", False))
+    page = getattr(args, "page", 1) or 1
+    page_size = getattr(args, "page_size", 20) or 20
+    if page < 1 or page_size < 1:
+        error = "page和page-size必须大于0"
+        print_json({"ok": False, "error": error}) if args.json \
+            else print(f"❌ {error}")
+        return
     try:
-        articles = call_for_output(
-            client.list_articles, limit=args.limit, quiet=args.json
-        )
-        if not articles:
-            print_json({"ok": True, "articles": [], "count": 0}) if args.json \
-                else print("暂无文章")
-            return
-        if args.json:
-            safe_articles = [{
-                "index": index,
-                "id": item["id"],
+        if use_cache:
+            with open(output_path, encoding="utf-8") as file:
+                cached = json.load(file)
+            articles = [{
+                "index": item.get("index", index),
+                "note_id": item.get("note_id") or item.get("id", ""),
                 "title": item.get("title", "") or "无标题",
                 "comments_count": item.get("comments_count", 0),
                 "time": item.get("time", ""),
-            } for index, item in enumerate(articles, start=1)]
+            } for index, item in enumerate(
+                cached.get("articles", []), start=1
+            )]
+            source = "cache"
+        else:
+            raw_articles = call_for_output(
+                client.list_articles, limit=args.limit, quiet=args.json
+            )
+            articles = [{
+                "index": index,
+                "note_id": item["id"],
+                "title": item.get("title", "") or "无标题",
+                "comments_count": item.get("comments_count", 0),
+                "time": item.get("time", ""),
+            } for index, item in enumerate(raw_articles, start=1)]
+            source = "online"
+            if args.json and (
+                len(articles) > page_size
+                or getattr(args, "output", None)
+            ):
+                write_json({
+                    "ok": True,
+                    "columns": ARTICLE_COLUMNS,
+                    "column_fields": ARTICLE_COLUMN_FIELDS,
+                    "articles": articles,
+                    "count": len(articles),
+                }, output_path)
+    except RuntimeError as error:
+        print_json({"ok": False, "error": str(error)}) if args.json \
+            else print(f"❌ {error}")
+        return
+    except (OSError, json.JSONDecodeError) as error:
+        message = f"文章缓存读取失败: {error}"
+        print_json({"ok": False, "error": message}) if args.json \
+            else print(f"❌ {message}")
+        return
+    try:
+        if not articles:
             print_json({
                 "ok": True,
-                "columns": ["序号", "发布时间", "评论数", "标题", "笔记ID"],
-                "articles": safe_articles,
-                "count": len(safe_articles),
+                "columns": ARTICLE_COLUMNS,
+                "column_fields": ARTICLE_COLUMN_FIELDS,
+                "articles": [],
+                "count": 0,
+                "total_count": 0,
+            }) if args.json else print("暂无文章")
+            return
+        if args.json:
+            total_count = len(articles)
+            total_pages = math.ceil(total_count / page_size)
+            start = (page - 1) * page_size
+            page_articles = articles[start:start + page_size]
+            has_more = page < total_pages
+            cache_available = (
+                use_cache
+                or total_count > page_size
+                or bool(getattr(args, "output", None))
+            )
+            next_command = ""
+            if has_more and cache_available:
+                next_command = (
+                    "python3 main.py articles --cache --json "
+                    f"--page {page + 1} --page-size {page_size} "
+                    f"--output {shlex.quote(output_path)}"
+                )
+            print_json({
+                "ok": True,
+                "columns": ARTICLE_COLUMNS,
+                "column_fields": ARTICLE_COLUMN_FIELDS,
+                "articles": page_articles,
+                "count": len(page_articles),
+                "total_count": total_count,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "has_more": has_more,
+                    "next_command": next_command,
+                },
+                "source": source,
+                **({"cache_path": output_path} if cache_available else {}),
             })
             return
         print(f"\n{'='*80}")
@@ -52,7 +151,7 @@ def cmd_articles(args):
             print(
                 f"{index:<4} {article['time']:<18} "
                 f"{article['comments_count']:<6} {title[:50]:<52} "
-                f"{article['id']}"
+                f"{article.get('note_id') or article.get('id', '')}"
             )
         total = sum(item["comments_count"] for item in articles)
         with_comments = sum(

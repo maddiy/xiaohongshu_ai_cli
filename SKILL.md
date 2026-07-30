@@ -169,7 +169,11 @@ python3 main.py articles --json
 
 `--limit`可省略，默认10篇。`articles`对平台只读，但可能更新本地权限为
 0600的敏感`xsec_index.json`令牌索引。
-使用返回的 `id` 作为后续命令的 `<note_id>`。不得向用户展示结果中的 `xsec_token`。
+严格按`columns`和`column_fields`展示所有列，“笔记ID”对应`note_id`，
+不得省略。超过20篇时按`pagination.next_command`读取`.cache/articles.json`
+后续页，直到`has_more=false`；不得依赖可能被截断的一条超长输出。
+使用返回的`note_id`作为后续命令的`<note_id>`。不得向用户展示结果中的
+`xsec_token`。
 
 ## 查看评论
 
@@ -414,6 +418,7 @@ python3 main.py skipped --clear
 - `comment_deleted`：加入排除列表且不重试，不把评论删除描述成发送成功。
 - `rate_limited`：停止发送或延迟重试，不连续快速提交。
 - `content_rejected`：修改措辞并重新预览，不原样反复提交。
+- `permission_denied`：对方设置不允许评论，加入排除列表且不重试。
 - `unknown_error`：保留错误信息并向用户准确汇报。
 - `workflow_busy`：同一笔记已有AI工作流运行，等待后重试，不启动并行进程。
 - `stale_preview`或`preview_content_changed`：重新运行draft、展示新预览并
@@ -426,6 +431,9 @@ python3 main.py skipped --clear
   这是无可见挑战信息的API风控，浏览器正常也可能发生；先重新导入Firefox
   Cookie并重跑当前action，仍失败则等待。只有出现可见挑战时才请用户在
   Firefox完成验证；不得尝试绕过验证。
+- 大批量回复复用一个登录会话并逐条保存结果；出现`rate_limited`、
+  `verification_required`、`not_authenticated`或`session_error`时立即暂停
+  剩余评论，不把尚未请求的评论误记为失败。
 - 硬停止不会把候选标记为`archived`或`failed`，但`prepare`和`draft`
   开始时仍会停用旧`active_comment_ids`；不得描述为完全不写本地状态。
 

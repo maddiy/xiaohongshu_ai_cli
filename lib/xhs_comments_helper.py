@@ -116,23 +116,30 @@ def main():
             max_retries=1,
         ) as client:
             # 通知通常携带一级评论或目标评论ID。先用top_comment_id直达
-            # 对应楼层，避免为了少量最新评论从头翻几十页历史评论。
-            for index, group in enumerate(target_groups):
-                anchors = (
-                    target_anchors[index]
-                    if index < len(target_anchors) else []
-                )
-                for anchor in anchors:
-                    page = client.get_comments(
-                        note_id,
-                        xsec_token=xsec_token,
-                        top_comment_id=anchor,
-                    )
-                    if isinstance(page, dict):
-                        comments.extend(page.get("comments", []))
-                        pages_fetched += 1
+            # 对应楼层，避免为了少量最新评论从头翻几十页历史评论。候选很多
+            # 时逐条直达会产生数百次请求；此时直接顺序翻页只需几十次请求。
+            direct_lookup = len(target_groups) <= 20
+            if direct_lookup:
+                for index, group in enumerate(target_groups):
+                    # 多条楼中楼候选可能属于同一个一级楼层。前一次请求已经
+                    # 加载该楼层时不再重复请求。
                     if group & _loaded_ids(comments):
-                        break
+                        continue
+                    anchors = (
+                        target_anchors[index]
+                        if index < len(target_anchors) else []
+                    )
+                    for anchor in anchors:
+                        page = client.get_comments(
+                            note_id,
+                            xsec_token=xsec_token,
+                            top_comment_id=anchor,
+                        )
+                        if isinstance(page, dict):
+                            comments.extend(page.get("comments", []))
+                            pages_fetched += 1
+                        if group & _loaded_ids(comments):
+                            break
 
             loaded_ids = _loaded_ids(comments)
             contexts_found = (
@@ -176,6 +183,7 @@ def main():
                 set().union(*target_groups) if target_groups else set()
             )
             checked_threads = set()
+            completed_thread_ids = []
             for comment in comments:
                 if not (_loaded_ids([comment]) & context_ids):
                     continue
@@ -184,12 +192,30 @@ def main():
                 ):
                     expanded_threads += 1
                 checked_threads.add(id(comment))
+                completed_thread_ids.append(_loaded_ids([comment]))
 
             # 部分通知只有楼中楼评论ID，没有可靠的一级楼层提示。候选仍未
             # 定位时才检查其他不完整楼层，并继续复用当前登录会话。
-            unresolved_ids = target_ids - _loaded_ids(comments)
+            loaded_ids = _loaded_ids(comments)
+            context_resolved_missing = set()
+            for index, anchors in enumerate(target_anchors):
+                if not anchors:
+                    continue
+                candidate_id = str(anchors[-1])
+                hints = set(str(item) for item in anchors[:-1] if item)
+                if (
+                    candidate_id
+                    and candidate_id not in loaded_ids
+                    and hints
+                    and any(hints & ids for ids in completed_thread_ids)
+                ):
+                    context_resolved_missing.add(candidate_id)
+            unresolved_ids = (
+                target_ids - loaded_ids - context_resolved_missing
+            )
             deferred_errors = []
-            if unresolved_ids and expand_unresolved:
+            expand_all = expand_unresolved and not target_ids
+            if (unresolved_ids or expand_all) and expand_unresolved:
                 for comment in comments:
                     if id(comment) in checked_threads:
                         continue
@@ -206,9 +232,19 @@ def main():
                     except Exception as error:
                         deferred_errors.append(str(error))
                         continue
-                    unresolved_ids = target_ids - _loaded_ids(comments)
-                    if not unresolved_ids:
+                    if not expand_all:
+                        unresolved_ids = (
+                            target_ids
+                            - _loaded_ids(comments)
+                            - context_resolved_missing
+                        )
+                    if not expand_all and not unresolved_ids:
                         break
+            if expand_all and deferred_errors:
+                raise RuntimeError(
+                    "部分楼中楼在线数据不完整: "
+                    + "；".join(deferred_errors)
+                )
             if unresolved_ids and deferred_errors:
                 raise RuntimeError(
                     "候选评论尚未定位，且部分楼中楼在线数据不完整: "

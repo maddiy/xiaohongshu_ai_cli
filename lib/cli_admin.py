@@ -172,6 +172,9 @@ def cmd_ai_help(args):
     from config import (
         AI_SCHEMA_VERSION,
         APP_VERSION,
+        BATCH_REPLY_DELAY,
+        BATCH_REPLY_PAUSE_EVERY,
+        BATCH_REPLY_PAUSE_SECONDS,
         CACHE_TTL_MINUTES,
         LOGIN_COOKIE_SOURCE,
         READ_PAGE_DELAY,
@@ -271,6 +274,7 @@ def cmd_ai_help(args):
             "lib/poster.py": "图文笔记校验、预览和发布",
             "lib/xhs_client.py": "xhs CLI封装、缓存和令牌索引",
             "lib/xhs_comments_helper.py": "单会话评论分页和候选楼层补全加速层",
+            "lib/xhs_reply_helper.py": "单会话批量回复与逐条结果回传加速层",
             "lib/xhs_subcomments_helper.py": "楼中楼xsec_token兼容层",
             "tests/test_compact_output.py": (
                 "自动化回归测试；数量以实际运行结果为准"
@@ -285,6 +289,9 @@ def cmd_ai_help(args):
             "full_history_requires": "--full-scan",
             "cache_ttl_minutes": CACHE_TTL_MINUTES,
             "request_delay_seconds": REQUEST_DELAY,
+            "batch_reply_delay_seconds": BATCH_REPLY_DELAY,
+            "batch_reply_pause_every": BATCH_REPLY_PAUSE_EVERY,
+            "batch_reply_pause_seconds": BATCH_REPLY_PAUSE_SECONDS,
             "read_page_delay_seconds": READ_PAGE_DELAY,
             "login_cookie_source": LOGIN_COOKIE_SOURCE,
         },
@@ -295,7 +302,8 @@ def cmd_ai_help(args):
                 "ai-help", "paths", "ai-reply",
             ],
             "draft_preview": (
-                "preview是本次活动批次的JSON数组，含send/skip/archive；"
+                "prepare/draft/send明细最多内联20行，完整数据读取返回的"
+                "*_source状态文件；preview含send/skip/archive，"
                 "由AI按columns转换为Markdown表格"
             ),
             "send_results": (
@@ -306,6 +314,10 @@ def cmd_ai_help(args):
                 "提交batch_id和preview_hash，防止确认后内容被替换"
             ),
             "scan_candidates": "仅为候选，不能直接发送",
+            "article_list": (
+                "严格按columns和column_fields展示全部列，笔记ID对应note_id；"
+                "大列表按pagination.next_command读取缓存后续页，直到has_more=false"
+            ),
             "prepare_metadata": (
                 "scan_method明确实际扫描入口；verification_mode为"
                 "candidate_online_recheck或full_tree_scan，禁止据scope猜测"
@@ -400,7 +412,8 @@ def cmd_ai_help(args):
             "send": (
                 "先校验batch_id和preview_hash，再对action=send待发送项核验；"
                 "请求/数据不完整时硬停止且不归档，online_replied/"
-                "online_missing才标记archived"
+                "online_missing才标记archived；批量发送复用一个登录会话并"
+                "逐条保存结果，账号级错误会暂停剩余批次"
             ),
             "skip_or_archive": "不向平台发送回复，因此不执行发送阶段核验",
             "incomplete_sub_comments": (
@@ -500,7 +513,11 @@ def cmd_ai_help(args):
             "view_articles": [
                 "python3 main.py articles --json",
                 "--limit可省略，默认10；读取平台时可能更新敏感xsec索引",
-                "按 columns 和 index 展示，必须显示标题",
+                "按columns和column_fields展示，必须显示标题和笔记ID",
+                (
+                    "若pagination.has_more=true，依次执行next_command读取本地"
+                    "缓存直到false；不得用一条超长stdout或省略中间条目"
+                ),
             ],
             "view_comments": [
                 "python3 main.py comments --json",
@@ -650,6 +667,7 @@ def cmd_ai_help(args):
             },
             "defaults": {
                 "articles": payload["defaults"]["articles"],
+                "articles_page_size": 20,
                 "comments": payload["defaults"]["comments_notifications"],
                 "reply_scope": payload["defaults"]["reply_scope"],
                 "full_history_requires": "--full-scan",
@@ -672,11 +690,13 @@ def cmd_ai_help(args):
                 ),
             },
             "critical_rules": [
+                "文章大列表按pagination.next_command读完缓存页；笔记ID对应note_id",
                 "scan候选不等于可回复，draft和send继续在线核验",
                 "prepare快速预算内未定位的深层楼中楼计入deferred_count，不生成草稿",
                 "同一笔记工作流由跨进程锁串行化；workflow_busy时等待",
                 "旧批次或内容变化返回stale_preview，必须重新预览确认",
                 "平台写入前先保存sending；uncertain_send_state禁止自动重发",
+                "全量读取和批量发送复用单一登录会话；账号级错误暂停剩余批次",
                 "楼中楼数据不完整、验证码或网络核验失败时硬停止",
                 "send失败默认写入skipped；sent/failed/archived不自动重试",
                 "评论ID和xsec_token不得显示给用户",
@@ -692,6 +712,9 @@ def cmd_ai_help(args):
             "error_actions": {
                 "workflow_busy": "等待当前进程结束后重试，不并行启动",
                 "verification_required": "停止自动重试，按next提示处理",
+                "rate_limited": "当前失败项进入排除列表，剩余批次暂停",
+                "not_authenticated": "重新登录后接续暂停批次",
+                "session_error": "检查本地环境后接续暂停批次",
                 "stale_preview": "重新draft、展示并确认",
                 "uncertain_send_state": "用户在线核对，禁止自动重发",
             },

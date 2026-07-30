@@ -37,6 +37,10 @@ python3 main.py ai-help --summary
 - 回复默认只处理最新20条通知中的一级评论和楼中楼。
 - 只有用户明确要求全部历史评论时才使用`--full-scan`。
 - `ai-reply prepare --full-scan`会忽略评论TTL缓存并拉取完整楼中楼。
+- 全量评论读取和批量回复都复用单一登录会话；禁止退回每页或每条重启
+  `xhs`进程的低效调用。遇到限流、验证码或登录失效时暂停剩余批次。
+- `ai-reply`的大列表最多内联20行；看到`*_truncated=true`时从对应
+  `*_source`固定状态文件读取完整数据，不得把内联片段当作全部结果。
 
 ## 查看文章
 
@@ -44,7 +48,11 @@ python3 main.py ai-help --summary
 python3 main.py articles --json
 ```
 
-向用户按返回的`columns`显示Markdown表格，必须显示标题。
+向用户按返回的`columns`显示Markdown表格，必须显示标题和笔记ID。
+必须逐列遵守`column_fields`，其中“笔记ID”对应`note_id`，不得省略。
+请求超过20篇时程序会自动写入`.cache/articles.json`并分页返回；持续执行
+`pagination.next_command`，直到`has_more=false`，再按序合并展示。不得依赖
+一条超长终端输出，也不得只补报“缺失区间”。
 
 ## 查看评论
 

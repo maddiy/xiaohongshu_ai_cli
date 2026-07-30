@@ -3,9 +3,15 @@
 支持三种模式: smart(逐条确认) / generic(通用话术) / draft(先生成草稿再发送)
 支持跳过列表：回复失败后保留 failed 状态并加入排除列表，下次扫描自动跳过
 """
+from contextlib import nullcontext
 import time
 import random
-from config import REQUEST_DELAY, GENERIC_REPLIES
+from config import (
+    BATCH_REPLY_PAUSE_EVERY,
+    BATCH_REPLY_PAUSE_SECONDS,
+    GENERIC_REPLIES,
+    REQUEST_DELAY,
+)
 from .cli_support import NON_RESEND_STATUSES, write_json
 from .xhs_client import XHSClient
 
@@ -266,41 +272,92 @@ class Replier:
         print(f"🚀 发送回复 — {total} 条")
         print(f"{'='*60}")
 
-        for i, d in enumerate(to_send):
-            cid = d["comment_id"]
-            nick = d["nickname"]
-            content = d["content"]
-            reply = d["reply"]
+        session_factory = getattr(type(self.client), "reply_session", None)
+        reply_method = getattr(type(self.client), "reply", None)
+        native_reply_method = (
+            getattr(reply_method, "__module__", "") == "lib.xhs_client"
+        )
+        session_context = (
+            self.client.reply_session(note_id)
+            if callable(session_factory) and native_reply_method
+            else nullcontext(None)
+        )
+        stop_error_types = {
+            "rate_limited",
+            "verification_required",
+            "not_authenticated",
+            "session_error",
+        }
+        with session_context as reply_session:
+            persistent = bool(
+                reply_session is not None
+                and getattr(reply_session, "process", None) is not None
+            )
+            for i, d in enumerate(to_send):
+                cid = d["comment_id"]
+                nick = d["nickname"]
+                content = d["content"]
+                reply = d["reply"]
 
-            print(f"\n[{i+1}/{total}] @{nick}")
-            print(f"  💬 评论：{content}")
-            print(f"  ✏️ 回复：{reply}")
+                print(f"\n[{i+1}/{total}] @{nick}")
+                print(f"  💬 评论：{content}")
+                print(f"  ✏️ 回复：{reply}")
 
-            # 在平台写请求之前先落盘。若进程在请求期间退出，状态会停在
-            # sending，后续流程只能在线对账，不能自动重复发送。
-            d["send_status"] = "sending"
-            d["send_started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            self._save_state(drafts, state_file)
-            ok, err, err_type = self.client.reply(note_id, cid, reply)
-            if ok:
-                print(f"  ✅ 成功")
-                self.stats["success"] += 1
-                d["send_status"] = "sent"
-                d["sent_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                d.pop("send_started_at", None)
-                d.pop("last_error", None)
-                d.pop("error_type", None)
-            else:
-                print(f"  ❌ 失败 ({err_type}): {err[:120]}")
-                self.stats["fail"] += 1
-                d["send_status"] = "failed"
-                d.pop("send_started_at", None)
-                d["error_type"] = err_type
-                d["last_error"] = err[:200]
-                self._exclude_on_failure(cid, nick, content, err, note_id, err_type)
+                # 在平台写请求之前先落盘。若进程在请求期间退出，状态会停在
+                # sending，后续流程只能在线对账，不能自动重复发送。
+                d["send_status"] = "sending"
+                d["send_started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                self._save_state(drafts, state_file)
+                if reply_session is not None:
+                    ok, err, err_type = reply_session.reply(cid, reply)
+                else:
+                    ok, err, err_type = self.client.reply(
+                        note_id, cid, reply
+                    )
+                if ok:
+                    print(f"  ✅ 成功")
+                    self.stats["success"] += 1
+                    d["send_status"] = "sent"
+                    d["sent_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    d.pop("send_started_at", None)
+                    d.pop("last_error", None)
+                    d.pop("error_type", None)
+                else:
+                    print(f"  ❌ 失败 ({err_type}): {err[:120]}")
+                    self.stats["fail"] += 1
+                    d["send_status"] = "failed"
+                    d.pop("send_started_at", None)
+                    d["error_type"] = err_type
+                    d["last_error"] = err[:200]
+                    self._exclude_on_failure(
+                        cid, nick, content, err, note_id, err_type
+                    )
 
-            self._save_state(drafts, state_file)
-            time.sleep(REQUEST_DELAY)
+                self._save_state(drafts, state_file)
+                if not ok and err_type in stop_error_types:
+                    self.stats["stopped"] = True
+                    self.stats["stop_reason"] = err_type
+                    self.stats["remaining"] = total - i - 1
+                    print(
+                        "  ⏸️ 检测到账号/会话级错误，已停止本批，"
+                        "避免后续评论连续失败"
+                    )
+                    break
+                # 持久会话内部已经执行动态间隔和随机抖动；旧命令模式保留
+                # 原有固定间隔，避免重复等待拖慢推荐路径。
+                if not persistent and i + 1 < total:
+                    time.sleep(REQUEST_DELAY)
+                elif (
+                    persistent
+                    and BATCH_REPLY_PAUSE_EVERY > 0
+                    and (i + 1) % BATCH_REPLY_PAUSE_EVERY == 0
+                    and i + 1 < total
+                ):
+                    print(
+                        f"  ⏸️ 已连续发送{i + 1}条，"
+                        f"主动休息{BATCH_REPLY_PAUSE_SECONDS:g}秒"
+                    )
+                    time.sleep(BATCH_REPLY_PAUSE_SECONDS)
 
         self._print_summary()
         return self.stats

@@ -29,7 +29,10 @@ COMMAND_EFFECTS = {
     },
     "articles": {
         "platform": "读取",
-        "local": "可能更新 .cache/xsec_index.json 敏感令牌索引",
+        "local": (
+            "可能更新 .cache/xsec_index.json 敏感令牌索引；"
+            "大列表写入 .cache/articles.json 供分页读取"
+        ),
         "output": "终端文本；--json 时为单一 JSON",
     },
     "comments": {
@@ -154,6 +157,22 @@ def build_parser():
         "--limit", type=int, default=10, help="显示文章数量（默认10）"
     )
     articles.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    articles.add_argument(
+        "--page", type=int, default=1,
+        help="JSON结果页码（默认1）",
+    )
+    articles.add_argument(
+        "--page-size", type=int, default=20,
+        help="JSON每页数量（默认20）",
+    )
+    articles.add_argument(
+        "--cache", action="store_true",
+        help="从文章缓存读取，不再次访问平台",
+    )
+    articles.add_argument(
+        "--output",
+        help="文章缓存文件；默认大列表保存到 .cache/articles.json",
+    )
 
     comments = subparsers.add_parser(
         "comments", help="查看最新评论（只读，不生成回复候选）"

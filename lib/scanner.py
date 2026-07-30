@@ -145,6 +145,7 @@ class CommentScanner:
         context_groups = []
         context_anchors = []
         context_ids = set()
+        context_hints = {}
         for candidate in candidates:
             comment_id = candidate.get("comment_id", "")
             if not comment_id:
@@ -159,6 +160,7 @@ class CommentScanner:
             anchors.append(comment_id)
             context_groups.append(group)
             context_anchors.append(list(dict.fromkeys(anchors)))
+            context_hints[comment_id] = set(anchors[:-1])
             context_ids.update(group)
         try:
             lookup = self.client.get_comments_until_ids(
@@ -204,7 +206,26 @@ class CommentScanner:
         # 楼层。逐层尝试定位；无关楼层拉取失败先记录，不立即阻断。只要
         # 所有候选最终都在完整楼层中找到，这些无关失败就不影响安全判断。
         existing_ids, _ = self._online_reply_index(comments)
-        unresolved_ids = candidate_ids - existing_ids
+        completed_thread_ids = []
+        for comment in comments:
+            if id(comment) in checked_threads:
+                completed_thread_ids.append(
+                    self._thread_comment_ids(comment)
+                )
+        context_resolved_missing = {
+            comment_id
+            for comment_id, hints in context_hints.items()
+            if (
+                comment_id not in existing_ids
+                and hints
+                and any(hints & ids for ids in completed_thread_ids)
+            )
+        }
+        # 已知父楼层已完整展开时，候选不在其中即可安全判定为已删除，
+        # 不需要再遍历与它无关的其他楼层。
+        unresolved_ids = (
+            candidate_ids - existing_ids - context_resolved_missing
+        )
         deferred_incomplete = []
         if unresolved_ids and not allow_partial:
             for comment in comments:
@@ -224,12 +245,18 @@ class CommentScanner:
                     deferred_incomplete.append(error)
                     continue
                 existing_ids, _ = self._online_reply_index(comments)
-                unresolved_ids = candidate_ids - existing_ids
+                unresolved_ids = (
+                    candidate_ids
+                    - existing_ids
+                    - context_resolved_missing
+                )
                 if not unresolved_ids:
                     break
 
         existing_ids, replied_ids = self._online_reply_index(comments)
-        unresolved_ids = candidate_ids - existing_ids
+        unresolved_ids = (
+            candidate_ids - existing_ids - context_resolved_missing
+        )
         if unresolved_ids and deferred_incomplete:
             if not allow_partial:
                 raise RuntimeError(
@@ -508,16 +535,27 @@ class CommentScanner:
                 "skipped": int,            # 无法获取楼中楼的评论数
             }
         """
-        # 不再主动查找 xsec_token，由 get_comments_cached 内部按需降级
-        if xsec_token and verbose:
+        resolved_xsec_token = xsec_token
+        # 全量楼中楼扫描需要令牌。先从0600本地索引命中，避免先进行一次
+        # 无令牌的完整分页后才失败重来。
+        if include_sub_comments and not resolved_xsec_token:
+            try:
+                token = self.client.find_note_xsec(note_id)
+                if isinstance(token, str):
+                    resolved_xsec_token = token
+            except RuntimeError:
+                pass
+        if resolved_xsec_token and verbose:
             print(f"  🔑 使用指定的 xsec_token")
 
         if verbose:
             print(f"📥 拉取全部一级评论...")
         comments, from_cache = self.client.get_comments_cached(
-            note_id, xsec_token, force_refresh=force_refresh
+            note_id,
+            resolved_xsec_token,
+            force_refresh=force_refresh,
+            include_sub_comments=include_sub_comments,
         )
-        resolved_xsec_token = xsec_token
         if include_sub_comments and not resolved_xsec_token and any(
             int(item.get("sub_comment_count", 0) or 0)
             > len(item.get("sub_comments", []))

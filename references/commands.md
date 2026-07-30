@@ -56,6 +56,7 @@ python3 main.py login
 python3 main.py articles
 python3 main.py articles --limit 10
 python3 main.py articles --limit 10 --json
+python3 main.py articles --limit 100 --json
 ```
 
 `--limit`可省略，默认10。该命令对平台只读，但`get_my_notes`可能更新本地
@@ -63,6 +64,9 @@ python3 main.py articles --limit 10 --json
 默认列为 `序号｜发布时间｜评论数｜标题｜笔记 ID`，无标题时显示
 “无标题”。`--json` 会返回同样的 `columns` 列名，并且不包含
 `xsec_token`。
+“笔记ID”对应字段`note_id`。JSON超过20篇时完整结果自动保存到
+`.cache/articles.json`，并通过`pagination`分页返回。调用方必须持续执行
+`next_command`直到`has_more=false`，不得省略中间页。
 
 ## `comments`：查看最新评论
 
