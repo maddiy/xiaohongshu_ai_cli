@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import stat
@@ -878,8 +879,60 @@ class CompactOutputTests(unittest.TestCase):
             payload["verification_mode"], "candidate_online_recheck"
         )
         self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["deferred_count"], 0)
         self.assertEqual(payload["candidates"][0]["comment_id"], "c1")
         scanner_class.return_value.scan_note.assert_not_called()
+        scan_kwargs = (
+            scanner_class.return_value.scan_via_notifications
+            .call_args.kwargs
+        )
+        self.assertEqual(scan_kwargs["verification_max_pages"], 6)
+        self.assertTrue(scan_kwargs["allow_partial_verification"])
+
+    @patch(
+        "lib.cli_ai.load_local_comment_states",
+        return_value={
+            "sent-id": "sent",
+            "failed-id": "failed",
+            "sending-id": "sending",
+            "pending-id": "",
+        },
+    )
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_reply_prepare_prefilters_non_resend_local_states(
+        self, scanner_class, _local_states
+    ):
+        scanner_class.return_value.scan_via_notifications.return_value = {
+            "note_id": "n1",
+            "source": "notifications",
+            "reply_status_verified": True,
+            "unreplied_level1": [],
+            "unreplied_subs": [],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            args = argparse.Namespace(
+                note_id="n1", action="prepare",
+                replies=None, confirmed=False,
+                full_scan=False, limit=20,
+            )
+            output = io.StringIO()
+            with patch("lib.cli_ai.workflow_paths", return_value=paths):
+                with contextlib.redirect_stdout(output):
+                    cli_ai.cmd_ai_reply(args)
+        excluded = (
+            scanner_class.return_value.scan_via_notifications
+            .call_args.kwargs["excluded_comment_ids"]
+        )
+        self.assertEqual(
+            excluded,
+            {"sent-id", "failed-id", "sending-id"},
+        )
 
     @patch("lib.cli_ai.CommentScanner")
     def test_ai_reply_full_prepare_bypasses_cache(self, scanner_class):
@@ -1003,6 +1056,43 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(result["filtered_deleted"], 1)
         client.get_comments_until_ids.assert_not_called()
 
+    def test_notification_scan_filters_local_terminal_before_online_check(self):
+        client = MagicMock()
+        client.get_new_comment_notifications.return_value = [{
+            "note_id": "n1",
+            "note_title": "文章",
+            "note_xsec_token": "token",
+            "new_comments": [{
+                "comment_id": "sent",
+                "nickname": "旧用户",
+                "content": "已处理",
+                "deleted": False,
+            }, {
+                "comment_id": "new",
+                "nickname": "新用户",
+                "content": "新评论",
+                "deleted": False,
+            }],
+        }]
+        client.get_skipped_ids.return_value = set()
+        client.get_comments_until_ids.return_value = [{
+            "id": "new",
+            "sub_comment_count": "0",
+            "sub_comments": [],
+        }]
+        result = CommentScanner(client).scan_via_notifications(
+            note_id="n1",
+            verbose=False,
+            excluded_comment_ids={"sent"},
+        )
+        self.assertEqual(result["filtered_local"], 1)
+        self.assertEqual(
+            [item["comment_id"] for item in result["unreplied_level1"]],
+            ["new"],
+        )
+        requested = client.get_comments_until_ids.call_args.args[1]
+        self.assertNotIn("sent", requested)
+
     def test_notification_scan_reports_network_failure(self):
         client = MagicMock()
         client.get_new_comment_notifications.side_effect = RuntimeError(
@@ -1086,13 +1176,58 @@ class CompactOutputTests(unittest.TestCase):
         }
         comments, complete = XHSClient.get_comments_until_ids(
             "note",
-            {"candidate", "root1"},
+            {"candidate"},
             with_status=True,
             target_groups=[{"candidate", "root1"}],
         )
         self.assertTrue(complete)
         self.assertEqual(comments[0]["id"], "root1")
         run_xhs.assert_called_once()
+
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    @patch("lib.xhs_client.XHSClient._run_xhs")
+    def test_comment_lookup_uses_one_session_for_pagination(
+        self, run_xhs, _tool_python
+    ):
+        run_xhs.return_value = {
+            "ok": True,
+            "data": {
+                "comments": [{"id": "root1", "sub_comments": []}],
+                "search_complete": True,
+                "pages_fetched": 4,
+            },
+        }
+        comments, complete = XHSClient.get_comments_until_ids(
+            "note",
+            {"candidate", "root1"},
+            xsec_token="secret-token",
+            with_status=True,
+            target_groups=[{"candidate", "root1"}],
+            target_anchors=[["root1", "candidate"]],
+        )
+        self.assertTrue(complete)
+        self.assertEqual(comments[0]["id"], "root1")
+        run_xhs.assert_called_once()
+        command = run_xhs.call_args.args[0]
+        self.assertTrue(command[1].endswith("xhs_comments_helper.py"))
+        self.assertEqual(command[2], "note")
+        self.assertEqual(json.loads(command[8]), [["root1", "candidate"]])
+        self.assertEqual(command[9], "1")
+
+    @patch("lib.xhs_client.subprocess.run")
+    def test_run_xhs_timeout_does_not_leak_command_secrets(self, run):
+        run.side_effect = subprocess.TimeoutExpired(
+            ["helper", "--xsec-token", "secret-token"], 12
+        )
+        with self.assertRaisesRegex(RuntimeError, "请求超时") as raised:
+            XHSClient._run_xhs(
+                ["helper", "--xsec-token", "secret-token"],
+                timeout=12,
+            )
+        self.assertNotIn("secret-token", str(raised.exception))
 
     def test_xsec_index_is_atomic_and_private(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1298,6 +1433,27 @@ class CompactOutputTests(unittest.TestCase):
                 "note", [{"comment_id": "candidate"}]
             )
 
+    def test_online_verification_defers_unresolved_in_partial_mode(self):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = ([], False)
+        eligible, excluded = CommentScanner(
+            client
+        ).verify_candidates_online(
+            "note",
+            [{"comment_id": "candidate"}],
+            max_pages=6,
+            allow_partial=True,
+        )
+        self.assertEqual(eligible, [])
+        self.assertEqual(
+            excluded,
+            [{"comment_id": "candidate", "reason": "online_unresolved"}],
+        )
+        kwargs = client.get_comments_until_ids.call_args.kwargs
+        self.assertEqual(kwargs["max_pages"], 6)
+        self.assertFalse(kwargs["expand_unresolved"])
+        client.get_sub_comments.assert_not_called()
+
     def test_online_verification_stops_when_sub_comments_are_incomplete(self):
         client = MagicMock()
         client.get_comments_until_ids.return_value = ([{
@@ -1409,6 +1565,12 @@ class CompactOutputTests(unittest.TestCase):
             }],
         )
         self.assertEqual(excluded, [])
+        self.assertEqual(
+            client.get_comments_until_ids.call_args.kwargs[
+                "target_anchors"
+            ],
+            [["target1", "candidate"]],
+        )
         client.get_sub_comments.assert_called_once_with(
             "note", "root1", "", strict=True
         )

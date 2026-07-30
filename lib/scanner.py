@@ -3,7 +3,7 @@
 负责：发现文章 → 扫描评论和楼中楼 → 过滤已回复 → 输出未回复列表
 """
 import time
-from config import AUTHOR_USER_ID, REQUEST_DELAY
+from config import AUTHOR_USER_ID, READ_PAGE_DELAY
 from .xhs_client import XHSClient
 
 
@@ -119,7 +119,9 @@ class CommentScanner:
         return True, ""
 
     def verify_candidates_online(self, note_id: str, candidates: list,
-                                 xsec_token: str = "") -> tuple:
+                                 xsec_token: str = "",
+                                 max_pages: int = 50,
+                                 allow_partial: bool = False) -> tuple:
         """
         草稿生成前强制从平台重新核验候选评论。
 
@@ -141,25 +143,33 @@ class CommentScanner:
         if not candidate_ids:
             return [], []
         context_groups = []
+        context_anchors = []
         context_ids = set()
         for candidate in candidates:
             comment_id = candidate.get("comment_id", "")
             if not comment_id:
                 continue
             group = {comment_id}
+            anchors = []
             for key in ("parent_comment_id", "target_comment_id"):
                 hint_id = candidate.get(key, "")
                 if hint_id:
                     group.add(hint_id)
+                    anchors.append(hint_id)
+            anchors.append(comment_id)
             context_groups.append(group)
+            context_anchors.append(list(dict.fromkeys(anchors)))
             context_ids.update(group)
         try:
             lookup = self.client.get_comments_until_ids(
                 note_id,
-                context_ids,
+                candidate_ids,
                 xsec_token,
+                max_pages=max_pages,
                 with_status=True,
                 target_groups=context_groups,
+                target_anchors=context_anchors,
+                expand_unresolved=not allow_partial,
             )
         except TypeError:
             # 兼容尚未支持target_groups的旧客户端替身。
@@ -196,7 +206,7 @@ class CommentScanner:
         existing_ids, _ = self._online_reply_index(comments)
         unresolved_ids = candidate_ids - existing_ids
         deferred_incomplete = []
-        if unresolved_ids:
+        if unresolved_ids and not allow_partial:
             for comment in comments:
                 if id(comment) in checked_threads:
                     continue
@@ -221,16 +231,18 @@ class CommentScanner:
         existing_ids, replied_ids = self._online_reply_index(comments)
         unresolved_ids = candidate_ids - existing_ids
         if unresolved_ids and deferred_incomplete:
-            raise RuntimeError(
-                "候选评论尚未定位，且部分楼中楼在线数据不完整，"
-                "无法安全判断评论是否已删除: "
-                + "；".join(deferred_incomplete)
-            )
+            if not allow_partial:
+                raise RuntimeError(
+                    "候选评论尚未定位，且部分楼中楼在线数据不完整，"
+                    "无法安全判断评论是否已删除: "
+                    + "；".join(deferred_incomplete)
+                )
         if unresolved_ids and not search_complete:
-            raise RuntimeError(
-                "达到在线核验页数上限，尚未找到全部候选评论；"
-                "无法安全判断评论是否已删除"
-            )
+            if not allow_partial:
+                raise RuntimeError(
+                    "达到在线核验页数上限，尚未找到全部候选评论；"
+                    "无法安全判断评论是否已删除"
+                )
 
         eligible = []
         excluded = []
@@ -239,7 +251,14 @@ class CommentScanner:
             if comment_id in replied_ids:
                 excluded.append({"comment_id": comment_id, "reason": "online_replied"})
             elif comment_id not in existing_ids:
-                excluded.append({"comment_id": comment_id, "reason": "online_missing"})
+                reason = (
+                    "online_unresolved"
+                    if allow_partial and (
+                        not search_complete or deferred_incomplete
+                    )
+                    else "online_missing"
+                )
+                excluded.append({"comment_id": comment_id, "reason": reason})
             else:
                 eligible.append(candidate)
         return eligible, excluded
@@ -287,7 +306,10 @@ class CommentScanner:
     def scan_via_notifications(self, note_id: str = None,
                                 verbose: bool = True,
                                 num_notifications: int = 50,
-                                verify_replied: bool = True) -> dict:
+                                verify_replied: bool = True,
+                                excluded_comment_ids=None,
+                                verification_max_pages: int = 50,
+                                allow_partial_verification: bool = False) -> dict:
         """
         通过通知快速扫描：只从最新评论通知中提取该文章的新评论，
         不需要拉取全部评论做对比。
@@ -300,6 +322,8 @@ class CommentScanner:
             num_notifications: 拉取的通知数量
             verify_replied: 是否通过拉取一级评论验证"是否已回复"（默认True）
                            设为 False 则通知中出现的都视为未回复
+            excluded_comment_ids: 在线核验前排除的本地终态评论ID，避免为
+                                  已处理评论重复读取平台评论树
 
         返回:
             {
@@ -311,6 +335,7 @@ class CommentScanner:
                 "source": "notifications",         # 标识来源
             }
         """
+        excluded_comment_ids = set(excluded_comment_ids or ())
         if verbose:
             print(f"📬 拉取最新 {num_notifications} 条评论通知...")
         try:
@@ -349,6 +374,7 @@ class CommentScanner:
             candidates = []
             filtered_deleted = 0
             filtered_skipped = 0
+            filtered_local = 0
             for notification in new_comments:
                 comment_id = notification.get("comment_id", "")
                 if not comment_id:
@@ -358,6 +384,9 @@ class CommentScanner:
                     continue
                 if comment_id in skipped_ids:
                     filtered_skipped += 1
+                    continue
+                if comment_id in excluded_comment_ids:
+                    filtered_local += 1
                     continue
                 candidates.append({
                     "comment_id": comment_id,
@@ -379,6 +408,8 @@ class CommentScanner:
                         eid,
                         candidates,
                         entry.get("note_xsec_token", ""),
+                        max_pages=verification_max_pages,
+                        allow_partial=allow_partial_verification,
                     )
                     reply_status_verified = True
                 except Exception as error:
@@ -402,6 +433,11 @@ class CommentScanner:
                 "filtered_deleted": filtered_deleted,
                 "filtered_skipped": filtered_skipped,
                 "filtered_online": len(online_excluded),
+                "deferred_online": sum(
+                    item.get("reason") == "online_unresolved"
+                    for item in online_excluded
+                ),
+                "filtered_local": filtered_local,
             }
             if verification_error:
                 result["scan_error"] = verification_error
@@ -524,7 +560,8 @@ class CommentScanner:
             )
             if must_fetch:
                 try:
-                    time.sleep(REQUEST_DELAY * 0.3)
+                    if READ_PAGE_DELAY:
+                        time.sleep(READ_PAGE_DELAY)
                     subs = self.client.get_sub_comments(
                         note_id, cid, resolved_xsec_token
                     )
@@ -623,8 +660,6 @@ class CommentScanner:
 
         返回: 未回复的楼中楼列表 [{comment_id, nickname, content, parent_comment_id, parent_nickname}]
         """
-        from config import REQUEST_DELAY
-
         # 获取跳过列表
         skipped_ids = self.client.get_skipped_ids()
 
@@ -658,7 +693,8 @@ class CommentScanner:
             if sc_count <= len(inline_subs):
                 subs = inline_subs
             else:
-                time.sleep(REQUEST_DELAY * 0.3)
+                if READ_PAGE_DELAY:
+                    time.sleep(READ_PAGE_DELAY)
                 try:
                     subs = self.client.get_sub_comments(note_id, cid)
                 except Exception as e:

@@ -48,6 +48,7 @@
 | `lib/analyzer.py` | 评论统计与摘要分析 |
 | `lib/poster.py` | 图文笔记校验、预览和发布 |
 | `lib/xhs_client.py` | `xhs` CLI 封装及私有令牌索引 |
+| `lib/xhs_comments_helper.py` | 单一登录会话内完成评论分页及候选楼层补全 |
 | `lib/xhs_subcomments_helper.py` | `xiaohongshu-cli 0.6.4` 楼中楼令牌兼容层 |
 | `tests/test_compact_output.py` | 自动化回归测试；数量以实际运行结果为准 |
 
@@ -436,6 +437,9 @@ prepare结果通过`scan_method`和`verification_mode`明确本次执行方式�
 在线核验应称为“条件式多阶段核验”，不能描述成三个动作固定核验三次。
 通知中的楼中楼候选会保留内部`target_comment_id`，用于直接定位相关楼层，
 但该ID不在面向用户的评论表格中显示。
+默认`prepare`只为在线定位使用最多6页的快速预算。超过预算仍无法定位的
+深层楼中楼不会被猜测或写入草稿，而计入`deferred_count`；其他已安全核验
+的候选继续返回。确需处理这些延后项时使用`--full-scan`。
 `draft`在联网前先检查`reply_map.json`是否存在、JSON语法和顶层对象类型，
 并校验本次候选映射中的`action`和`reply`，避免格式错误浪费在线核验请求。
 `reply_map.json`中其他批次的旧键允许保留，不参与本次校验或发送。

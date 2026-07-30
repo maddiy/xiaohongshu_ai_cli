@@ -174,6 +174,7 @@ def cmd_ai_help(args):
         APP_VERSION,
         CACHE_TTL_MINUTES,
         LOGIN_COOKIE_SOURCE,
+        READ_PAGE_DELAY,
         REQUEST_DELAY,
         SYSTEM_NAME,
     )
@@ -269,6 +270,7 @@ def cmd_ai_help(args):
             "lib/analyzer.py": "评论统计与摘要分析",
             "lib/poster.py": "图文笔记校验、预览和发布",
             "lib/xhs_client.py": "xhs CLI封装、缓存和令牌索引",
+            "lib/xhs_comments_helper.py": "单会话评论分页和候选楼层补全加速层",
             "lib/xhs_subcomments_helper.py": "楼中楼xsec_token兼容层",
             "tests/test_compact_output.py": (
                 "自动化回归测试；数量以实际运行结果为准"
@@ -283,6 +285,7 @@ def cmd_ai_help(args):
             "full_history_requires": "--full-scan",
             "cache_ttl_minutes": CACHE_TTL_MINUTES,
             "request_delay_seconds": REQUEST_DELAY,
+            "read_page_delay_seconds": READ_PAGE_DELAY,
             "login_cookie_source": LOGIN_COOKIE_SOURCE,
         },
         "output_contract": {
@@ -381,7 +384,10 @@ def cmd_ai_help(args):
             "preferred_term": "条件式多阶段在线核验",
             "prepare": (
                 "通知模式显式传verify_replied=true，有候选时调用"
-                "verify_candidates_online；全量模式由scan_note以"
+                "verify_candidates_online；在线核验前先排除本地终态，"
+                "评论分页和候选楼层补全在单一登录会话中完成，找到候选后"
+                "立即停止；默认最多用6页快速定位预算，仍未定位的深层"
+                "楼中楼计入deferred_count且不进入本批；全量模式由scan_note以"
                 "include_sub_comments=true、force_refresh=true完整扫描，"
                 "绕过评论TTL缓存且不调用该核验函数"
             ),
@@ -667,6 +673,7 @@ def cmd_ai_help(args):
             },
             "critical_rules": [
                 "scan候选不等于可回复，draft和send继续在线核验",
+                "prepare快速预算内未定位的深层楼中楼计入deferred_count，不生成草稿",
                 "同一笔记工作流由跨进程锁串行化；workflow_busy时等待",
                 "旧批次或内容变化返回stale_preview，必须重新预览确认",
                 "平台写入前先保存sending；uncertain_send_state禁止自动重发",

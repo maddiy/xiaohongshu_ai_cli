@@ -308,6 +308,8 @@ python3 main.py ai-reply --note-id <note_id> --action send --confirmed \
 
 在线请求、验证码、分页或完整性核验失败时必须硬停止且不归档候选；只有
 平台成功返回并确认评论已回复或不存在时，发送阶段才标记`archived`。
+默认`prepare`达到6页快速定位预算不是平台失败：无法定位的深层楼中楼只计入
+`deferred_count`并排除在本批之外，其余已核验候选可以继续。
 这种在线排除只写本地`send_status=archived`；只有映射中的
 `action=archive`会在确认send后写入全局`skipped.json`。
 候选已定位时只补全候选所在楼层，该楼层补拉后仍少于平台
@@ -321,6 +323,9 @@ helper普通故障时才回退原生`sub-comments`；验证码或
 `prepare` 默认只处理最新20条评论通知中的一级评论和楼中楼。只有用户
 明确要求全部历史评论时，才追加 `--full-scan`；使用 `--limit` 可以
 调整最新评论通知数量。
+默认通知模式最多使用6页快速定位预算；无法定位的深层楼中楼计入
+`deferred_count`且不进入本批草稿。只有用户明确要求处理这些延后项时才用
+`--full-scan`。
 默认入口是`scan_via_notifications`。`--full-scan`改用`scan_note`读取
 整篇笔记，不是通知扫描，也不调用`verify_candidates_online`。
 prepare输出中的`scan_method`和`verification_mode`给出本次真实执行方式。

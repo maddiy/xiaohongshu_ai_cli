@@ -181,7 +181,8 @@ def compact_scan_result(result):
     for key in (
         "total", "total_new_notifications", "pending_subs", "skipped",
         "filtered_skipped", "filtered_deleted", "filtered_online",
-        "filtered_local", "reply_status_verified", "scan_error",
+        "filtered_local", "deferred_online", "reply_status_verified",
+        "scan_error",
     ):
         if key in result:
             compact[key] = result[key]
@@ -212,7 +213,7 @@ def filter_scan_local_state(result):
         )
         return result
     states = load_local_comment_states(result.get("note_id", ""))
-    filtered = 0
+    filtered = int(result.get("filtered_local", 0) or 0)
     for key in ("unreplied_level1", "unreplied_subs"):
         kept = []
         for comment in result.get(key, []):

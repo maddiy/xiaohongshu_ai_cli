@@ -9,6 +9,7 @@ from .cli_support import (
     compact_comment,
     compact_scan_result,
     filter_scan_local_state,
+    load_local_comment_states,
     merge_draft_history,
     new_batch_id,
     NON_RESEND_STATUSES,
@@ -269,11 +270,19 @@ def _prepare(args, paths):
             scan_method = "scan_note"
             verification_mode = "full_tree_scan"
         else:
+            local_states = load_local_comment_states(args.note_id)
+            excluded_comment_ids = {
+                comment_id for comment_id, status in local_states.items()
+                if status in NON_RESEND_STATUSES
+            }
             result = call_for_output(
                 scanner.scan_via_notifications,
                 note_id=args.note_id,
                 num_notifications=getattr(args, "limit", 20) or 20,
                 verify_replied=True,
+                excluded_comment_ids=excluded_comment_ids,
+                verification_max_pages=6,
+                allow_partial_verification=True,
                 verbose=False,
                 quiet=True,
             )
@@ -308,10 +317,23 @@ def _prepare(args, paths):
         "note_id": args.note_id,
         "candidates": candidates,
         "count": len(candidates),
+        "deferred_count": output.get("deferred_online", 0),
         "next": (
-            "将回复映射写入 paths.reply_map，再运行 "
-            "ai-reply --action draft"
-            if candidates else "没有可回复评论，停止"
+            (
+                "将回复映射写入 paths.reply_map，再运行 "
+                "ai-reply --action draft"
+                + (
+                    "；另有深层楼中楼超过快速核验预算，未进入本批；"
+                    "确需处理全部评论时使用 --full-scan"
+                    if output.get("deferred_online", 0) else ""
+                )
+            )
+            if candidates else (
+                "本次没有已安全定位的可回复评论；存在超过快速核验预算的"
+                "深层楼中楼，确需处理时使用 --full-scan"
+                if output.get("deferred_online", 0)
+                else "没有可回复评论，停止"
+            )
         ),
         "paths": paths,
     })

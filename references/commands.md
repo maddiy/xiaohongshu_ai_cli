@@ -316,7 +316,7 @@ python3 main.py ai-reply --note-id <笔记ID> --action send --confirmed \
 
 | 动作 | 输出 | 说明 |
 |---|---|---|
-| `prepare` | `candidates`、`paths` | 默认扫描最新20条通知中的评论和楼中楼 |
+| `prepare` | `candidates`、`paths`、`deferred_count` | 默认扫描最新20条通知；深层楼中楼使用6页快速定位预算 |
 | `draft` | `preview`、`paths`、`batch_id`、`revision`、`preview_hash` | 读取固定回复映射并再次在线核验 |
 | `send` | `results`、发送统计 | 发送前再次核验；必须提供确认、批次号和预览指纹 |
 
@@ -380,6 +380,8 @@ prepare结果中的`scan_method`和`verification_mode`标识本次实际路径�
 需要区分两种结果：在线请求、分页或完整性核验失败时硬停止且不改变候选
 终态；平台成功返回并明确判定`online_replied`或`online_missing`时，发送
 阶段才把对应候选标记为`archived`。
+默认`prepare`达到6页快速定位预算不属于平台请求失败；未定位的深层楼中楼
+计入`deferred_count`且不进入草稿，其他已核验候选继续。
 硬停止仍可能清空旧`active_comment_ids`，不能描述为完全不写本地状态。
 在线排除只写本地`send_status=archived`；用户映射中的`action=archive`
 才会在确认send后写入全局`skipped.json`。

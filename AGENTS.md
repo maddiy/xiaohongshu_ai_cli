@@ -67,6 +67,12 @@ python3 main.py ai-reply --note-id <笔记ID> --action prepare
 ```
 
 读取返回的`candidates`和`paths`。若`count=0`，报告没有可回复评论并停止。
+默认模式会在在线核验前排除本地终态，并在一个登录会话内连续读取评论分页
+及补全候选楼层；不要把命令拆成多条底层`xhs comments`或
+`xhs sub-comments`调用，否则会重复启动进程和读取Cookie。
+若返回`deferred_count>0`，表示深层楼中楼超过默认6页快速定位预算，已安全
+排除在本批之外；不要为它生成回复。用户明确要求处理全部评论时改用
+`--full-scan`。
 
 ### 2. 写回复映射
 
@@ -189,6 +195,8 @@ python3 main.py ai-reply \
 - `scan.json`候选不等于可回复，必须继续通过本地状态和在线复核。
 - 在线请求或完整性核验失败时硬停止且不归档；只有明确判定为平台已回复
   或不存在的候选，才在发送阶段标记`archived`。
+- 默认`prepare`达到6页快速定位预算不是请求失败；未定位深层楼中楼只计入
+  `deferred_count`并排除在本批之外。
 - “硬停止不归档”不等于完全不写本地状态：`prepare`和`draft`开始时仍会
   清空旧`active_comment_ids`，防止误发旧预览。
 - 没有持续运行日志统计时，不得根据一两次执行声称某类错误“最常见”或

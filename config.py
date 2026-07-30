@@ -23,6 +23,9 @@ LOGIN_COOKIE_SOURCE = "firefox"
 # 请求间隔（秒），避免频率限制
 REQUEST_DELAY = 3
 
+# 只读分页间隔。发送回复仍使用上面的请求间隔。
+READ_PAGE_DELAY = 0.1
+
 # 回复策略
 REPLY_STRATEGY = "smart"  # "smart" 逐条手动确认 | "auto" 自动生成回复 | "generic" 使用通用话术
 

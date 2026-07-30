@@ -79,7 +79,14 @@ class XHSClient:
     @staticmethod
     def _run_xhs(cmd: list, timeout: int = 30) -> dict:
         """执行 xhs CLI 命令并检查返回码，返回解析后的 JSON"""
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout
+            )
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired 的默认文本会包含完整命令参数，其中可能带有
+            # xsec_token。只返回脱敏后的固定错误。
+            raise RuntimeError(f"xhs 请求超时（{timeout}秒）") from None
         if result.returncode != 0:
             detail = XHSClient._cli_error_message(result)
             raise RuntimeError(
@@ -126,7 +133,7 @@ class XHSClient:
         参数:
             max_pages: 最多翻多少页（None 表示取完所有）
         """
-        from config import REQUEST_DELAY
+        from config import READ_PAGE_DELAY
 
         all_notes = []
         xsec_entries = {}
@@ -163,7 +170,8 @@ class XHSClient:
                 if note_id and token:
                     xsec_entries[note_id] = token
             page += 1
-            time.sleep(REQUEST_DELAY * 0.3)  # 翻页间隔
+            if READ_PAGE_DELAY:
+                time.sleep(READ_PAGE_DELAY)
 
         if xsec_entries:
             XHSClient._merge_xsec_index(xsec_entries)
@@ -188,7 +196,7 @@ class XHSClient:
         参数:
             max_pages: 最多翻多少页（None 表示翻到底）
         """
-        from config import AUTHOR_USER_ID, REQUEST_DELAY
+        from config import AUTHOR_USER_ID, READ_PAGE_DELAY
 
         # 先查本地索引缓存
         cache = XHSClient._load_xsec_index()
@@ -224,7 +232,8 @@ class XHSClient:
                     pass
             if not cursor or not notes:
                 break
-            time.sleep(REQUEST_DELAY * 0.2)
+            if READ_PAGE_DELAY:
+                time.sleep(READ_PAGE_DELAY)
 
         # 写入索引缓存
         if new_entries:
@@ -391,7 +400,7 @@ class XHSClient:
     @staticmethod
     def get_all_comments(note_id, xsec_token=""):
         """逐页获取全部一级评论，避免底层 ``--all`` 长时间无输出。"""
-        from config import REQUEST_DELAY
+        from config import READ_PAGE_DELAY
 
         comments = []
         cursor = ""
@@ -421,13 +430,15 @@ class XHSClient:
                 raise RuntimeError("获取评论失败: 平台返回了重复游标")
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-            time.sleep(REQUEST_DELAY * 0.3)
+            if READ_PAGE_DELAY:
+                time.sleep(READ_PAGE_DELAY)
         return comments
 
     @staticmethod
     def get_comments_until_ids(note_id, target_ids, xsec_token="",
                                max_pages=50, with_status=False,
-                               target_groups=None):
+                               target_groups=None, target_anchors=None,
+                               expand_unresolved=True):
         """逐页读取，找到全部目标评论后立即停止，减少在线核验耗时。
 
         max_pages 为安全上限：每页约 10 条，50 页可覆盖约 500 条评论，
@@ -435,13 +446,67 @@ class XHSClient:
         target_groups 可表示候选定位的替代条件，例如候选ID或其目标评论ID
         任一出现即认为该候选的楼层上下文已定位。
         """
-        from config import REQUEST_DELAY
+        from config import READ_PAGE_DELAY
 
         target_ids = set(target_ids)
         groups = [
             set(group) for group in (target_groups or [])
             if set(group)
         ]
+        lookup_ids = set(target_ids)
+        for group in groups:
+            lookup_ids.update(group)
+        anchor_groups = [
+            list(dict.fromkeys(str(item) for item in anchors if item))
+            for anchors in (target_anchors or [])
+        ]
+        # 原生 CLI 每翻一页都会新建进程并重新读取浏览器 Cookie。在线核验
+        # 已有令牌时，优先在同一登录会话中连续翻页，保持原有停止条件。
+        tool_python = XHSClient._find_xhs_tool_python()
+        helper = os.path.join(
+            os.path.dirname(__file__), "xhs_comments_helper.py"
+        )
+        if xsec_token and groups and tool_python and os.path.exists(helper):
+            data = XHSClient._run_xhs([
+                tool_python,
+                helper,
+                note_id,
+                xsec_token,
+                LOGIN_COOKIE_SOURCE,
+                str(max_pages),
+                json.dumps(
+                    [sorted(group) for group in groups],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    sorted(target_ids),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    anchor_groups,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "1" if expand_unresolved else "0",
+                "",
+            ], timeout=min(45, max(12, 8 + max_pages * 2)))
+            if not data.get("ok"):
+                error_info = data.get("error", {})
+                detail = (
+                    error_info.get("message", "")
+                    if isinstance(error_info, dict) else str(error_info)
+                )
+                raise RuntimeError(f"获取评论失败: {detail or data}")
+            payload = data.get("data", {})
+            comments = payload.get("comments", [])
+            search_complete = bool(payload.get("search_complete", False))
+            return (
+                (comments, search_complete)
+                if with_status else comments
+            )
+
         comments = []
         found_ids = set()
         cursor = ""
@@ -461,11 +526,11 @@ class XHSClient:
             comments.extend(page_comments)
             for comment in page_comments:
                 comment_id = comment.get("id", "")
-                if comment_id in target_ids:
+                if comment_id in lookup_ids:
                     found_ids.add(comment_id)
                 for sub in comment.get("sub_comments", []):
                     sub_id = sub.get("id", "")
-                    if sub_id in target_ids:
+                    if sub_id in lookup_ids:
                         found_ids.add(sub_id)
             contexts_found = (
                 all(group & found_ids for group in groups)
@@ -484,7 +549,8 @@ class XHSClient:
                 raise RuntimeError("获取评论失败: 平台返回了重复游标")
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-            time.sleep(REQUEST_DELAY * 0.3)
+            if READ_PAGE_DELAY:
+                time.sleep(READ_PAGE_DELAY)
         return (comments, False) if with_status else comments
 
     @staticmethod
@@ -496,7 +562,7 @@ class XHSClient:
         strict=True时验证码/verification_required立即停止，其他路径全部失败
         也会抛异常，供回复核验保留真实失败原因。
         """
-        from config import REQUEST_DELAY
+        from config import READ_PAGE_DELAY
         all_subs = []
         cursor = None
         seen_cursors = set()
@@ -593,7 +659,8 @@ class XHSClient:
                 break
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-            time.sleep(REQUEST_DELAY * 0.3)
+            if READ_PAGE_DELAY:
+                time.sleep(READ_PAGE_DELAY)
         return all_subs
 
     @staticmethod
