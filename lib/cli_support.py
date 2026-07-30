@@ -2,16 +2,52 @@
 
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
-import tempfile
+import uuid
 
 from config import WORK_DIR
+from .state_io import atomic_write_json, file_lock, StateLockTimeout
 from .xhs_client import XHSClient
 
 
+# 默认终态：正常流程不会再次发送。failed只有在用户明确授权、移出
+# skipped.json并重置草稿状态后才能重试，不能理解为物理上不可修改。
 TERMINAL_SEND_STATUSES = ("sent", "failed", "archived")
+INFLIGHT_SEND_STATUSES = ("sending",)
+NON_RESEND_STATUSES = TERMINAL_SEND_STATUSES + INFLIGHT_SEND_STATUSES
+
+
+@contextlib.contextmanager
+def workflow_lock(note_id, timeout=5.0, directory=None):
+    """串行化同一笔记的prepare/draft/send，其他笔记互不影响。"""
+    directory = directory or workflow_paths(note_id)["directory"]
+    with file_lock(
+        os.path.join(directory, ".workflow.lock"), timeout=timeout
+    ):
+        yield
+
+
+def new_batch_id():
+    """生成短而不可猜错的草稿批次编号。"""
+    return uuid.uuid4().hex[:16]
+
+
+def preview_hash(items):
+    """计算用户预览内容指纹；发送时必须与草稿内容完全一致。"""
+    payload = [{
+        "comment_id": item.get("comment_id", ""),
+        "nickname": item.get("nickname", ""),
+        "content": item.get("content", ""),
+        "reply": item.get("reply", ""),
+        "action": item.get("action", "send"),
+    } for item in items]
+    encoded = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def print_json(data):
@@ -21,24 +57,7 @@ def print_json(data):
 
 def write_json(data, path):
     """原子写入 JSON，避免程序中断时留下半个状态文件。"""
-    path = os.path.abspath(path)
-    directory = os.path.dirname(path)
-    os.makedirs(directory, exist_ok=True)
-    temp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=directory,
-            prefix=f".{os.path.basename(path)}.", suffix=".tmp", delete=False,
-        ) as file:
-            temp_path = file.name
-            json.dump(data, file, ensure_ascii=False, separators=(",", ":"))
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp_path, path)
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
-    return path
+    return atomic_write_json(data, path)
 
 
 def workflow_paths(note_id):
@@ -141,7 +160,7 @@ def compact_comment(comment):
     """只保留生成回复所需字段。"""
     keys = (
         "comment_id", "nickname", "content", "likes", "sub_count",
-        "parent_comment_id", "parent_nickname",
+        "parent_comment_id", "parent_nickname", "target_comment_id",
     )
     return {key: comment[key] for key in keys if key in comment}
 
@@ -199,7 +218,7 @@ def filter_scan_local_state(result):
         for comment in result.get(key, []):
             if (
                 states.get(comment.get("comment_id", ""))
-                in TERMINAL_SEND_STATUSES
+                in NON_RESEND_STATUSES
             ):
                 filtered += 1
             else:
@@ -253,7 +272,12 @@ def compact_analysis(result):
 
 
 def merge_draft_history(existing, new):
-    """合并固定草稿文件，保留历史发送状态并追加新评论。"""
+    """合并草稿历史并保留新批次标记。
+
+    全部旧条目先保留；同ID旧终态或sending不被覆盖，同ID其他非终态可由
+    新草稿更新，本次未再次出现的旧非终态也继续保留，但不在新的
+    active_comment_ids中。
+    """
     merged = dict(new)
     old_items = existing.get("drafts", []) if isinstance(existing, dict) else []
     new_items = new.get("drafts", [])
@@ -267,7 +291,7 @@ def merge_draft_history(existing, new):
     for item in new_items:
         comment_id = item.get("comment_id")
         old = by_id.get(comment_id)
-        if old and old.get("send_status") in TERMINAL_SEND_STATUSES:
+        if old and old.get("send_status") in NON_RESEND_STATUSES:
             continue
         by_id[comment_id] = item
         if comment_id not in order:

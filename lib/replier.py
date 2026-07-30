@@ -3,12 +3,10 @@
 支持三种模式: smart(逐条确认) / generic(通用话术) / draft(先生成草稿再发送)
 支持跳过列表：回复失败后保留 failed 状态并加入排除列表，下次扫描自动跳过
 """
-import json
-import os
 import time
 import random
 from config import REQUEST_DELAY, GENERIC_REPLIES
-from .cli_support import TERMINAL_SEND_STATUSES
+from .cli_support import NON_RESEND_STATUSES, write_json
 from .xhs_client import XHSClient
 
 
@@ -192,12 +190,7 @@ class Replier:
         """原子替换草稿状态文件，避免中断后丢失已发送进度。"""
         if not state_file:
             return
-        state_file = os.path.abspath(state_file)
-        os.makedirs(os.path.dirname(state_file), exist_ok=True)
-        temp_file = f"{state_file}.tmp"
-        with open(temp_file, "w", encoding="utf-8") as f:
-            json.dump(drafts, f, ensure_ascii=False, separators=(",", ":"))
-        os.replace(temp_file, state_file)
+        write_json(drafts, state_file)
 
     def send_drafts(self, drafts: dict, resume: bool = False,
                     state_file: str = None) -> dict:
@@ -220,11 +213,12 @@ class Replier:
                 if item.get("comment_id") in active_ids
             ]
 
-        # 已成功发送的草稿永远不重复发送，确保不同 AI 可安全接续。
+        # 默认终态均不重复发送。failed只有在用户授权并由外部同时清理
+        # skipped记录、重置草稿状态后才能重新进入待发送集合。
         to_send = [
             d for d in items
             if d.get("action") == "send"
-            and d.get("send_status") not in TERMINAL_SEND_STATUSES
+            and d.get("send_status") not in NON_RESEND_STATUSES
         ]
         to_archive = [
             d for d in items
@@ -282,18 +276,25 @@ class Replier:
             print(f"  💬 评论：{content}")
             print(f"  ✏️ 回复：{reply}")
 
+            # 在平台写请求之前先落盘。若进程在请求期间退出，状态会停在
+            # sending，后续流程只能在线对账，不能自动重复发送。
+            d["send_status"] = "sending"
+            d["send_started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._save_state(drafts, state_file)
             ok, err, err_type = self.client.reply(note_id, cid, reply)
             if ok:
                 print(f"  ✅ 成功")
                 self.stats["success"] += 1
                 d["send_status"] = "sent"
                 d["sent_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                d.pop("send_started_at", None)
                 d.pop("last_error", None)
                 d.pop("error_type", None)
             else:
                 print(f"  ❌ 失败 ({err_type}): {err[:120]}")
                 self.stats["fail"] += 1
                 d["send_status"] = "failed"
+                d.pop("send_started_at", None)
                 d["error_type"] = err_type
                 d["last_error"] = err[:200]
                 self._exclude_on_failure(cid, nick, content, err, note_id, err_type)

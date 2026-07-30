@@ -1,7 +1,6 @@
 # AI 执行指南
 
 - 系统名称：`小红书AI智能运营系统`
-- 命令行程序：`小红书AI智能运营系统`
 
 本项目面向中文用户；AI负责理解与生成内容，程序负责登录、读取、在线核验、
 保存状态和发送。
@@ -89,6 +88,14 @@ python3 main.py ai-reply --note-id <笔记ID> --action prepare
 `skip`和`archive`的`reply`都可以为空。
 `skip`只跳过本批；`archive`要在用户确认并执行`send`动作后才写入
 `skipped.json`。二者都不会向平台回复。
+`draft`会在联网前先检查映射文件是否存在、JSON语法和顶层对象类型；
+同时校验本次候选的映射语义。其他AI仍应使用合法JSON写入，中文引号可
+直接使用，英文双引号必须转义。文件中的其他批次旧键允许保留，不参与
+本次校验或发送。
+同一用户、相同正文的多条候选最多保留一条`send`，其余必须设为`skip`；
+否则`draft`返回`duplicate_send_mapping`且不会发起在线复核。
+只有辱骂、贴标签且没有实质观点的评论默认`skip`。回复不得编造数据、来源
+或无法核实的绝对结论，也不得升级冲突。
 
 ### 3. 生成并展示草稿
 
@@ -97,8 +104,17 @@ python3 main.py ai-reply --note-id <笔记ID> --action draft
 ```
 
 使用Markdown表格向用户展示返回的`preview`，然后等待明确确认。
+同时保存返回的`batch_id`和`preview_hash`；它们绑定了用户实际审核的
+草稿内容，发送时必须原样提交。
+`comment_id`只供AI写映射和程序定位，不得显示在面向用户的评论、草稿或
+执行流程表格中。
 `draft`开始时也会停用旧`active_comment_ids`，但不会删除历史草稿和终态；
 成功后才把本次候选设为新的活动批次。
+历史合并会保留全部旧条目：同ID终态不覆盖，同ID非终态可更新，未再次
+进入新批的旧条目仍保留，但由`active_comment_ids`隔离，不会误发。
+新批次必须依次完成prepare、写映射、draft、用户确认和send；但CLI依靠
+状态文件校验，已有合法活动批次可以稍后继续send，不能描述成命令在物理上
+绝对无法跳转。
 
 ### 4. 确认后发送
 
@@ -106,10 +122,14 @@ python3 main.py ai-reply --note-id <笔记ID> --action draft
 python3 main.py ai-reply \
   --note-id <笔记ID> \
   --action send \
-  --confirmed
+  --confirmed \
+  --batch-id <draft返回的batch_id> \
+  --preview-hash <draft返回的preview_hash>
 ```
 
-没有用户明确确认时禁止添加`--confirmed`。发送前程序会再次在线核验。
+没有用户明确确认时禁止添加`--confirmed`。禁止从当前文件重新推测或替换
+批次号和指纹；若返回`stale_preview`，必须重新展示新草稿并取得确认。
+发送前程序会再次在线核验。
 `prepare`会停用上一批草稿，`draft`写入`active_comment_ids`，`send`只发送
 本次活动批次。
 
@@ -125,33 +145,64 @@ python3 main.py ai-reply \
 ```
 
 必须复用这些文件，不为同一任务创建其他临时存档。
+通知中的`xsec_token`必须先安全写入权限为0600的`xsec_index.json`，再从
+`scan.json`输出中移除；这样后续`draft`和`send`既不泄露令牌，也不会退化
+为无令牌楼中楼请求。
 
 状态优先级：
 
 1. `drafts.send_status=sent`
 2. `drafts.send_status=failed`
 3. `drafts.send_status=archived`或存在于`skipped.json`
-4. 平台显示已回复或评论已删除
-5. 本次扫描候选（仅进入后续资格判断，不代表可以回复）
+4. `drafts.send_status=sending`：平台结果不确定，禁止自动重发
+5. 平台显示已回复或评论已删除
+6. 本次扫描候选（仅进入后续资格判断，不代表可以回复）
 
 `sent`、`failed`、`archived`均为默认终态，不得重新发送。
 `failed`重试需要用户明确授权，同时移出跳过列表并重置草稿中的失败终态；
 只运行`skipped --remove`不够。
+发送前在线排除只写本地`send_status=archived`；只有用户选择
+`action=archive`并确认send时，才写入全局`skipped.json`。
 
 ## 安全边界
 
+- 默认`prepare`调用`scan_via_notifications`；`--full-scan`调用
+  `scan_note`读取整篇笔记，不是通知扫描，也不调用
+  `verify_candidates_online`。
+- 统一称为“条件式多阶段在线核验”，不得概括成三个动作固定三次调用
+  `verify_candidates_online`。prepare结果中的`scan_method`和
+  `verification_mode`是本次实际执行方式。
 - 在线楼中楼数据不完整、需要验证码或网络核验失败时立即停止。
-- 补拉楼中楼后数量仍少于平台`sub_comment_count`时抛异常硬停止，不使用
-  部分数据继续判断。
-- 在线核验会展开本次查询返回的所有不完整楼层，因为内联数据不足时无法
-  预先定位候选或作者回复所在楼层；这不表示回复关系可以跨楼层。
+- `error_type=verification_required`表示需要用户操作，不是普通冷却重试：
+  AI必须停止自动重试。若错误同时包含`type=unknown`和`uuid=unknown`，
+  这是没有可见挑战信息的API接口风控，浏览器页面正常也可能发生；先重新
+  导入Firefox Cookie并重跑当前action，仍失败则等待风控解除。
+- 候选已定位时只严格补全候选所在楼层；该楼层补拉后数量仍少于平台
+  `sub_comment_count`时硬停止。
+- 候选尚未定位时才按需搜索其他不完整楼层。候选最终在完整楼层中找到后，
+  确定无关楼层的拉取失败不阻断整批；仍未找到且存在不完整数据时硬停止。
+- 通知中的`target_comment_id`会保留为内部楼层定位线索，不在用户表格显示。
+- 带令牌楼中楼helper普通故障时才回退原生`sub-comments`；验证码或
+  `verification_required`必须立即停止，不用第二种传输重复请求。严格核验
+  会保留真实错误，不再静默返回空列表。
 - 不得使用内联数据猜测回复状态。
 - `scan.json`候选不等于可回复，必须继续通过本地状态和在线复核。
 - 在线请求或完整性核验失败时硬停止且不归档；只有明确判定为平台已回复
   或不存在的候选，才在发送阶段标记`archived`。
+- “硬停止不归档”不等于完全不写本地状态：`prepare`和`draft`开始时仍会
+  清空旧`active_comment_ids`，防止误发旧预览。
+- 没有持续运行日志统计时，不得根据一两次执行声称某类错误“最常见”或
+  推断各种失败的发生比例。
 - 所有发送失败的评论自动加入排除列表。
+- 同一笔记的`ai-reply`动作由跨进程锁串行执行；`workflow_busy`表示已有
+  进程正在处理，必须等待，不能并行启动第二个命令。
+- 每条平台写请求前先保存`send_status=sending`。进程中断后程序先在线
+  对账；返回`uncertain_send_state`时必须交给用户处理，禁止自动重发。
+- `--confirmed`还必须与当前`batch_id`和`preview_hash`同时匹配，防止
+  其他AI在用户确认后替换草稿。
 - 不输出Cookie、`xsec_token`或其他登录凭据。
 - `.cache/xsec_index.json`是敏感令牌缓存，不是回复工作流状态。
+- 浏览器可正常使用、账号身份检查成功，不代表楼中楼API没有独立风控。
 - 发布文章和发送回复前都必须先预览并取得确认。
 - `articles`对平台是只读操作，但可能更新本地0600敏感`xsec_index.json`。
 - 传统`send --resume`只改变提示文案；终态和排除过滤无论是否添加该参数

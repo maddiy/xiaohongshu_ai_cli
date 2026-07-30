@@ -9,8 +9,10 @@ import stat
 from unittest.mock import MagicMock, patch
 
 import main
+from config import CACHE_DIR, PROJECT_ROOT
 from lib.replier import Replier
 from lib.scanner import CommentScanner
+from lib.state_io import file_lock, StateLockTimeout
 from lib.xhs_client import XHSClient
 from lib import cli_ai
 from lib.cli_parser import (
@@ -42,7 +44,10 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(payload["command_count"], 14)
         self.assertEqual(payload["commands"], list(COMMAND_NAMES))
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
-        self.assertEqual(payload["cli_name"], "小红书AI智能运营系统")
+        self.assertEqual(payload["system_name"], "小红书AI智能运营系统")
+        self.assertNotIn("cli_name", payload)
+        self.assertEqual(payload["app_version"], "4.0.0")
+        self.assertEqual(payload["schema_version"], "4")
         self.assertEqual(
             payload["output_contract"]["ai_reply"],
             "始终为单一紧凑JSON",
@@ -54,7 +59,13 @@ class CompactOutputTests(unittest.TestCase):
             payload["source_inventory"]["count"],
             len(payload["source_inventory"]["files"]),
         )
-        self.assertEqual(payload["project_inventory"]["count"], 19)
+        self.assertEqual(
+            payload["project_inventory"]["count"],
+            payload["project_inventory"]["production_python_count"]
+            + len(payload["project_inventory"]["tests"])
+            + len(payload["project_inventory"]["documentation"]),
+        )
+        self.assertIn("lib/state_io.py", payload["source_inventory"]["files"])
         self.assertEqual(
             payload["project_inventory"]["tests"],
             ["tests/test_compact_output.py"],
@@ -75,6 +86,10 @@ class CompactOutputTests(unittest.TestCase):
             payload["output_contract"],
         )
         self.assertIn(
+            "batch_id",
+            payload["output_contract"]["draft_confirmation"],
+        )
+        self.assertIn(
             "force_refresh=true",
             payload["online_verification_stages"]["prepare"],
         )
@@ -85,6 +100,66 @@ class CompactOutputTests(unittest.TestCase):
         self.assertIn(
             "sub_comment_count",
             payload["online_verification_stages"]["incomplete_sub_comments"],
+        )
+        self.assertIn(
+            "只严格展开候选所在楼层",
+            payload["online_verification_stages"]["expansion_scope"],
+        )
+        self.assertIn(
+            "automatic_retry=false",
+            payload["online_verification_stages"]["verification_required"],
+        )
+        self.assertIn(
+            "禁止用第二种传输重复请求",
+            payload["online_verification_stages"]["sub_comment_transport"],
+        )
+        self.assertIn(
+            "供后续draft/send接续",
+            payload["storage"]["notification_token_handoff"],
+        )
+        self.assertIn(
+            "scan_via_notifications",
+            payload["common_misunderstandings"]["notification_entrypoint"],
+        )
+        self.assertIn(
+            "只严格补全候选相关楼层",
+            payload["common_misunderstandings"]["expansion_scope"],
+        )
+        self.assertIn(
+            "完全不写状态",
+            payload["common_misunderstandings"]["hard_stop_state"],
+        )
+        self.assertIn(
+            "固定三次",
+            payload["common_misunderstandings"]["fixed_three_stages"],
+        )
+        self.assertIn(
+            "保留全部旧条目",
+            payload["common_misunderstandings"]["history_merge"],
+        )
+        self.assertIn(
+            "只校验本次scan候选",
+            payload["common_misunderstandings"]["mapping_validation_scope"],
+        )
+        self.assertIn(
+            "verification_mode",
+            payload["output_contract"]["prepare_metadata"],
+        )
+        self.assertIn(
+            "duplicate_send_mapping",
+            payload["output_contract"]["duplicate_send_error"],
+        )
+        self.assertIn(
+            "最多回复一次",
+            payload["reply_decision"]["duplicate_policy"],
+        )
+        self.assertIn(
+            "不得显示comment_id",
+            payload["reply_decision"]["user_visible_ids"],
+        )
+        self.assertIn(
+            "本次候选映射语义",
+            payload["online_verification_stages"]["draft"],
         )
         self.assertGreater(payload["test_inventory"]["count"], 0)
         self.assertIn(
@@ -132,67 +207,37 @@ class CompactOutputTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             main.cmd_ai_help(args)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["system_name"], "小红书AI智能运营系统")
-        self.assertEqual(payload["cli_name"], "小红书AI智能运营系统")
+        self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
+        self.assertEqual(payload["app_version"], "4.0.0")
+        self.assertEqual(payload["schema_version"], "4")
+        self.assertIn("--batch-id", payload["reply_workflow"]["send"])
+        self.assertIn("--preview-hash", payload["reply_workflow"]["send"])
         self.assertIn(
-            "全量prepare使用scan_note",
-            payload["canonical_facts"]["ai_reply"],
-        )
-        self.assertIn(
-            "之后仍强制在线核验",
-            payload["canonical_facts"]["unverified_scan"],
-        )
-        self.assertIn("不能称为只读", payload["canonical_facts"]["login"])
-        self.assertEqual(
-            payload["canonical_facts"]["failure_types"]["current"],
-            list(XHSClient.REPLY_ERROR_TYPES),
+            "workflow_busy",
+            payload["error_actions"],
         )
         self.assertIn(
-            "不等于可回复",
-            payload["canonical_facts"]["candidate_eligibility"],
+            "uncertain_send_state",
+            payload["error_actions"],
         )
         self.assertIn(
-            "硬停止且不归档",
-            payload["canonical_facts"]["online_outcomes"],
+            "batch_id",
+            payload["state"]["batch_fields"],
         )
-        self.assertIn(
-            "全部终态",
-            payload["canonical_facts"]["history_merge"],
-        )
-        self.assertIn(
-            "缺少映射时默认skip",
-            payload["canonical_facts"]["reply_map"],
-        )
-        self.assertIn(
-            "force_refresh=true",
-            payload["canonical_facts"]["full_prepare"],
-        )
-        self.assertIn(
-            "prepare和draft都会清空",
-            payload["canonical_facts"]["batch_reset"],
-        )
-        self.assertIn(
-            "--resume只改变",
-            payload["canonical_facts"]["traditional_send"],
-        )
-        self.assertIn(
-            "没有旧快照",
-            payload["canonical_facts"]["tests"],
-        )
-        self.assertIn(
-            "不能称为只读",
-            payload["canonical_facts"]["module_mutability"],
-        )
+        self.assertLess(len(output.getvalue().encode("utf-8")), 4000)
         self.assertNotIn("architecture", payload)
         self.assertEqual(
-            payload["exact_command_protocol"],
+            payload["entrypoints"]["command"],
             "python3 main.py ai-help --command <command>",
         )
         self.assertEqual(
-            payload["test_inventory"]["command"],
+            payload["entrypoints"]["tests"],
             "python3 main.py ai-help --tests",
         )
-        self.assertEqual(payload["full_protocol"], "python3 main.py ai-help")
+        self.assertEqual(
+            payload["entrypoints"]["full"],
+            "python3 main.py ai-help",
+        )
 
     def test_reply_map_validation_rejects_unsafe_send_entries(self):
         errors = cli_ai._validate_reply_map({
@@ -209,6 +254,36 @@ class CompactOutputTests(unittest.TestCase):
             "c2": {"reply": "", "action": "archive"},
         }, ["c1", "c2"])
         self.assertEqual(errors, [])
+
+    def test_workflow_error_marks_captcha_as_user_action(self):
+        payload = cli_ai._workflow_error(
+            "draft",
+            RuntimeError(
+                "verification_required: Captcha required. "
+                "Please complete verification."
+            ),
+            prefix="在线复核失败",
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error_type"], "verification_required")
+        self.assertFalse(payload["automatic_retry"])
+        self.assertTrue(payload["requires_user_action"])
+        self.assertIn("Firefox", payload["next"])
+        self.assertIn("重新运行当前 action", payload["next"])
+
+    def test_workflow_error_distinguishes_api_risk_control(self):
+        payload = cli_ai._workflow_error(
+            "draft",
+            RuntimeError(
+                "verification_required: Captcha required: "
+                "type=unknown, uuid=unknown"
+            ),
+        )
+        self.assertEqual(
+            payload["verification_context"], "api_risk_control"
+        )
+        self.assertIn("浏览器页面正常也可能发生", payload["next"])
+        self.assertIn("重新导入Firefox Cookie", payload["next"])
 
     def test_clear_active_batch_preserves_history(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -228,6 +303,139 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(updated["active_comment_ids"], [])
         self.assertEqual(updated["drafts"], original["drafts"])
 
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_draft_rejects_invalid_mapping_before_online_check(
+        self, scanner_class
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": [{
+                        "comment_id": "c1",
+                        "nickname": "用户",
+                        "content": "评论",
+                    }],
+                    "unreplied_subs": [],
+                }, file)
+            with open(
+                paths["reply_map"], "w", encoding="utf-8"
+            ) as file:
+                file.write('{"c1":{"reply":"未闭合}')
+            args = argparse.Namespace(note_id="n1", replies=None)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._draft(args, paths)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertIn("不是有效 JSON", payload["error"])
+        self.assertEqual(
+            payload["error_type"], "invalid_reply_map_json"
+        )
+        self.assertFalse(payload["automatic_retry"])
+        self.assertTrue(payload["requires_file_fix"])
+        self.assertIn("英文半角双引号", payload["next"])
+        scanner_class.assert_not_called()
+
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_draft_rejects_invalid_mapping_semantics_before_online_check(
+        self, scanner_class
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": [{
+                        "comment_id": "c1",
+                        "nickname": "用户",
+                        "content": "评论",
+                    }],
+                    "unreplied_subs": [],
+                }, file)
+            with open(
+                paths["reply_map"], "w", encoding="utf-8"
+            ) as file:
+                json.dump({
+                    "c1": {"reply": "", "action": "send"},
+                }, file)
+            args = argparse.Namespace(note_id="n1", replies=None)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._draft(args, paths)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["error_type"], "invalid_reply_map_mapping"
+        )
+        self.assertTrue(payload["requires_file_fix"])
+        self.assertIn("reply 不能为空", payload["details"][0])
+        scanner_class.assert_not_called()
+
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_draft_rejects_duplicate_send_mapping_before_online_check(
+        self, scanner_class
+    ):
+        candidates = [
+            {
+                "comment_id": "c1",
+                "nickname": "同一用户",
+                "content": "相同评论",
+            },
+            {
+                "comment_id": "c2",
+                "nickname": "同一用户",
+                "content": "相同评论",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": candidates,
+                    "unreplied_subs": [],
+                }, file)
+            with open(
+                paths["reply_map"], "w", encoding="utf-8"
+            ) as file:
+                json.dump({
+                    "c1": {"reply": "回复一", "action": "send"},
+                    "c2": {"reply": "回复二", "action": "send"},
+                }, file)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._draft(
+                    argparse.Namespace(note_id="n1", replies=None),
+                    paths,
+                )
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["error_type"], "duplicate_send_mapping"
+        )
+        self.assertIn("其余改为skip", payload["next"])
+        scanner_class.assert_not_called()
+
     def test_reply_error_markers_match_current_error_types(self):
         cases = {
             "评论已删除": "comment_deleted",
@@ -244,6 +452,28 @@ class CompactOutputTests(unittest.TestCase):
         self.assertNotIn(
             "-1",
             XHSClient.REPLY_ERROR_MARKERS["comment_deleted"],
+        )
+
+    def test_nested_api_error_preserves_deleted_message(self):
+        output = json.dumps({
+            "ok": False,
+            "error": {
+                "code": "api_error",
+                "message": (
+                    "API error: "
+                    + json.dumps({
+                        "success": False,
+                        "msg": "回复失败，评论已删除",
+                        "code": -9128,
+                    }, ensure_ascii=False)
+                ),
+            },
+        }, ensure_ascii=False)
+        message, _ = XHSClient._extract_error_from_output(output)
+        self.assertIn("评论已删除", message)
+        self.assertEqual(
+            XHSClient._classify_reply_error(message, output),
+            "comment_deleted",
         )
 
     def test_ai_pending_only_uses_active_batch(self):
@@ -374,14 +604,237 @@ class CompactOutputTests(unittest.TestCase):
         self.assertFalse(args.confirmed)
         self.assertFalse(args.full_scan)
         self.assertEqual(args.limit, 20)
+        self.assertIsNone(args.batch_id)
+        self.assertIsNone(args.preview_hash)
+
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_draft_creates_confirmation_bound_batch(
+        self, scanner_class
+    ):
+        candidate = {
+            "comment_id": "c1",
+            "nickname": "用户",
+            "content": "评论",
+        }
+        scanner_class.return_value.verify_candidates_online.return_value = (
+            [candidate],
+            [],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": [candidate],
+                    "unreplied_subs": [],
+                }, file)
+            with open(
+                paths["reply_map"], "w", encoding="utf-8"
+            ) as file:
+                json.dump({"c1": {"reply": "回复", "action": "send"}}, file)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._draft(
+                    argparse.Namespace(note_id="n1", replies=None),
+                    paths,
+                )
+            payload = json.loads(output.getvalue())
+            with open(paths["drafts"], encoding="utf-8") as file:
+                saved = json.load(file)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["batch_id"])
+        self.assertEqual(len(payload["preview_hash"]), 64)
+        self.assertEqual(
+            saved["active_batch"]["batch_id"], payload["batch_id"]
+        )
+        self.assertEqual(
+            saved["active_batch"]["preview_hash"],
+            payload["preview_hash"],
+        )
+        self.assertIn("--batch-id", payload["next"])
+        self.assertIn("--preview-hash", payload["next"])
+
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_send_rejects_confirmation_for_old_batch(
+        self, scanner_class
+    ):
+        item = {
+            "comment_id": "c1",
+            "nickname": "用户",
+            "content": "评论",
+            "reply": "回复",
+            "action": "send",
+        }
+        current_hash = cli_ai.preview_hash([item])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["drafts"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "active_comment_ids": ["c1"],
+                    "active_batch": {
+                        "batch_id": "new-batch",
+                        "preview_hash": current_hash,
+                        "status": "previewed",
+                    },
+                    "drafts": [item],
+                }, file)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._send(
+                    argparse.Namespace(
+                        note_id="n1",
+                        confirmed=True,
+                        batch_id="old-batch",
+                        preview_hash=current_hash,
+                    ),
+                    paths,
+                )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["error_type"], "stale_preview")
+        scanner_class.assert_not_called()
+
+    @patch("lib.replier.time.sleep")
+    @patch("lib.replier.XHSClient.is_skipped", return_value=False)
+    @patch(
+        "lib.replier.XHSClient.reply",
+        return_value=(True, "", ""),
+    )
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_send_accepts_exact_preview_binding(
+        self, scanner_class, _reply, _is_skipped, _sleep
+    ):
+        item = {
+            "comment_id": "c1",
+            "nickname": "用户",
+            "content": "评论",
+            "reply": "回复",
+            "action": "send",
+        }
+        current_hash = cli_ai.preview_hash([item])
+        scanner_class.return_value.verify_candidates_online.return_value = (
+            [item.copy()],
+            [],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["drafts"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "active_comment_ids": ["c1"],
+                    "active_batch": {
+                        "batch_id": "batch-1",
+                        "preview_hash": current_hash,
+                        "status": "previewed",
+                    },
+                    "drafts": [item],
+                }, file)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._send(
+                    argparse.Namespace(
+                        note_id="n1",
+                        confirmed=True,
+                        batch_id="batch-1",
+                        preview_hash=current_hash,
+                    ),
+                    paths,
+                )
+            payload = json.loads(output.getvalue())
+            with open(paths["drafts"], encoding="utf-8") as file:
+                saved = json.load(file)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["sent"], 1)
+        self.assertEqual(
+            saved["active_batch"]["status"], "completed"
+        )
+        self.assertEqual(saved["drafts"][0]["send_status"], "sent")
+
+    @patch("lib.cli_ai.Replier")
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_send_never_retries_uncertain_inflight_item(
+        self, scanner_class, replier_class
+    ):
+        item = {
+            "comment_id": "c1",
+            "nickname": "用户",
+            "content": "评论",
+            "reply": "回复",
+            "action": "send",
+            "send_status": "sending",
+        }
+        current_hash = cli_ai.preview_hash([item])
+        scanner_class.return_value.verify_candidates_online.return_value = (
+            [item.copy()],
+            [],
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["drafts"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "active_comment_ids": ["c1"],
+                    "active_batch": {
+                        "batch_id": "batch-1",
+                        "preview_hash": current_hash,
+                        "status": "sending",
+                    },
+                    "drafts": [item],
+                }, file)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._send(
+                    argparse.Namespace(
+                        note_id="n1",
+                        confirmed=True,
+                        batch_id="batch-1",
+                        preview_hash=current_hash,
+                    ),
+                    paths,
+                )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            payload["error_type"], "uncertain_send_state"
+        )
+        self.assertFalse(payload["automatic_retry"])
+        replier_class.assert_not_called()
 
     def test_ai_reply_send_requires_user_confirmation(self):
-        args = argparse.Namespace(
-            note_id="n1", action="send", replies=None, confirmed=False
-        )
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            cli_ai.cmd_ai_reply(args)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            args = argparse.Namespace(
+                note_id="n1", action="send", replies=None, confirmed=False
+            )
+            output = io.StringIO()
+            with patch("lib.cli_ai.workflow_paths", return_value=paths):
+                with contextlib.redirect_stdout(output):
+                    cli_ai.cmd_ai_reply(args)
         payload = json.loads(output.getvalue())
         self.assertFalse(payload["ok"])
         self.assertIn("--confirmed", payload["error"])
@@ -418,6 +871,12 @@ class CompactOutputTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["scope"], "latest")
+        self.assertEqual(
+            payload["scan_method"], "scan_via_notifications"
+        )
+        self.assertEqual(
+            payload["verification_mode"], "candidate_online_recheck"
+        )
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["candidates"][0]["comment_id"], "c1")
         scanner_class.return_value.scan_note.assert_not_called()
@@ -450,6 +909,8 @@ class CompactOutputTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["scope"], "full")
+        self.assertEqual(payload["scan_method"], "scan_note")
+        self.assertEqual(payload["verification_mode"], "full_tree_scan")
         kwargs = scanner_class.return_value.scan_note.call_args.kwargs
         self.assertTrue(kwargs["include_sub_comments"])
         self.assertTrue(kwargs["force_refresh"])
@@ -500,6 +961,7 @@ class CompactOutputTests(unittest.TestCase):
                 "comment_id": "c1",
                 "nickname": "用户",
                 "content": "评论",
+                "target_comment_id": "root1",
                 "deleted": False,
             }],
         }]
@@ -514,6 +976,10 @@ class CompactOutputTests(unittest.TestCase):
         )
         self.assertTrue(result["reply_status_verified"])
         self.assertEqual(result["unreplied_level1"][0]["comment_id"], "c1")
+        self.assertEqual(
+            result["unreplied_level1"][0]["target_comment_id"],
+            "root1",
+        )
 
     def test_notification_scan_filters_deleted_before_online_check(self):
         client = MagicMock()
@@ -562,6 +1028,7 @@ class CompactOutputTests(unittest.TestCase):
             "comment_info": {
                 "id": "c1",
                 "content": "评论",
+                "target_comment": {"id": "root1"},
                 "illegal_info": {"illegal_status": "NORMAL"},
             },
             "user_info": {"nickname": "用户"},
@@ -571,6 +1038,61 @@ class CompactOutputTests(unittest.TestCase):
         result = XHSClient.get_new_comment_notifications(num=20)
         self.assertEqual(len(result[0]["new_comments"]), 1)
         self.assertEqual(result[0]["new_comments"][0]["comment_id"], "c1")
+        self.assertEqual(
+            result[0]["new_comments"][0]["target_comment_id"],
+            "root1",
+        )
+
+    @patch("lib.xhs_client.XHSClient._merge_xsec_index")
+    @patch("lib.xhs_client.XHSClient.get_notifications")
+    def test_comment_notifications_persist_token_for_later_steps(
+        self, notifications, merge_index
+    ):
+        notifications.return_value = [{
+            "type": "comment",
+            "item_info": {
+                "id": "n1",
+                "content": "文章",
+                "xsec_token": "secret-token",
+            },
+            "comment_info": {
+                "id": "c1",
+                "content": "评论",
+                "illegal_info": {"illegal_status": "NORMAL"},
+            },
+            "user_info": {"nickname": "用户"},
+        }]
+        result = XHSClient.get_new_comment_notifications(num=20)
+        self.assertEqual(
+            result[0]["note_xsec_token"], "secret-token"
+        )
+        merge_index.assert_called_once_with({"n1": "secret-token"})
+
+    @patch("lib.xhs_client.time.sleep")
+    @patch("lib.xhs_client.XHSClient._run_xhs")
+    def test_comment_lookup_stops_when_candidate_context_is_found(
+        self, run_xhs, _sleep
+    ):
+        run_xhs.return_value = {
+            "ok": True,
+            "data": {
+                "comments": [{
+                    "id": "root1",
+                    "sub_comments": [],
+                }],
+                "has_more": True,
+                "cursor": "next",
+            },
+        }
+        comments, complete = XHSClient.get_comments_until_ids(
+            "note",
+            {"candidate", "root1"},
+            with_status=True,
+            target_groups=[{"candidate", "root1"}],
+        )
+        self.assertTrue(complete)
+        self.assertEqual(comments[0]["id"], "root1")
+        run_xhs.assert_called_once()
 
     def test_xsec_index_is_atomic_and_private(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -604,6 +1126,90 @@ class CompactOutputTests(unittest.TestCase):
         self.assertTrue(command[1].endswith("xhs_subcomments_helper.py"))
         self.assertEqual(command[2:4], ["note", "root"])
         self.assertIn("secret-token", command)
+
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    @patch("lib.xhs_client.XHSClient._run_xhs")
+    def test_sub_comments_fall_back_to_native_after_helper_failure(
+        self, run_xhs, _tool_python
+    ):
+        run_xhs.side_effect = [
+            RuntimeError("helper failed"),
+            {
+                "ok": True,
+                "data": {
+                    "comments": [{"id": "sub"}],
+                    "cursor": "",
+                },
+            },
+        ]
+        result = XHSClient.get_sub_comments(
+            "note", "root", xsec_token="token", strict=True
+        )
+        self.assertEqual(result, [{"id": "sub"}])
+        self.assertEqual(run_xhs.call_count, 2)
+        self.assertEqual(run_xhs.call_args_list[1].args[0][0], "xhs")
+
+    @patch("lib.xhs_client.subprocess.run")
+    def test_run_xhs_preserves_structured_verification_error(
+        self, run
+    ):
+        run.return_value = MagicMock(
+            returncode=1,
+            stdout=json.dumps({
+                "ok": False,
+                "error": {
+                    "code": "verification_required",
+                    "message": "Captcha required.",
+                },
+            }),
+            stderr="WARNING: captcha cooling down",
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "verification_required: Captcha required",
+        ):
+            XHSClient._run_xhs(["xhs", "sub-comments"])
+
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    @patch(
+        "lib.xhs_client.XHSClient._run_xhs",
+        side_effect=RuntimeError("verification_required"),
+    )
+    def test_sub_comments_strict_mode_preserves_failure(
+        self, run_xhs, _tool_python
+    ):
+        with self.assertRaisesRegex(RuntimeError, "verification_required"):
+            XHSClient.get_sub_comments(
+                "note", "root", xsec_token="token", strict=True
+            )
+        run_xhs.assert_called_once()
+
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    @patch("lib.xhs_client.XHSClient._run_xhs")
+    def test_sub_comments_does_not_fallback_on_structured_verification(
+        self, run_xhs, _tool_python
+    ):
+        run_xhs.return_value = {
+            "ok": False,
+            "error": {
+                "code": "verification_required",
+                "message": "Captcha required: type=unknown, uuid=unknown",
+            },
+        }
+        with self.assertRaisesRegex(RuntimeError, "verification_required"):
+            XHSClient.get_sub_comments(
+                "note", "root", xsec_token="token", strict=True
+            )
+        run_xhs.assert_called_once()
 
     def test_online_reply_index_tracks_direct_nested_reply(self):
         comments = [{
@@ -707,6 +1313,119 @@ class CompactOutputTests(unittest.TestCase):
             "user_info": {"user_id": "other"},
         }]
         with self.assertRaisesRegex(RuntimeError, "楼中楼在线数据不完整"):
+            CommentScanner(client).verify_candidates_online(
+                "note", [{"comment_id": "candidate"}]
+            )
+
+    def test_online_verification_ignores_unrelated_incomplete_thread(self):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = ([{
+            "id": "unrelated",
+            "sub_comment_count": "2",
+            "sub_comments": [],
+        }, {
+            "id": "candidate",
+            "sub_comment_count": "0",
+            "sub_comments": [],
+        }], True)
+        eligible, excluded = CommentScanner(
+            client
+        ).verify_candidates_online(
+            "note", [{"comment_id": "candidate"}]
+        )
+        self.assertEqual(eligible, [{"comment_id": "candidate"}])
+        self.assertEqual(excluded, [])
+        client.get_sub_comments.assert_not_called()
+
+    def test_online_verification_defers_unrelated_failure_until_located(self):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = ([{
+            "id": "unrelated",
+            "sub_comment_count": "2",
+            "sub_comments": [],
+        }, {
+            "id": "candidate-thread",
+            "sub_comment_count": "1",
+            "sub_comments": [],
+        }], True)
+
+        def get_sub_comments(
+            _note_id, comment_id, _xsec_token, strict=False
+        ):
+            if comment_id == "unrelated":
+                return []
+            return [{
+                "id": "candidate",
+                "user_info": {"user_id": "other"},
+            }]
+
+        client.get_sub_comments.side_effect = get_sub_comments
+        eligible, excluded = CommentScanner(
+            client
+        ).verify_candidates_online(
+            "note", [{"comment_id": "candidate"}]
+        )
+        self.assertEqual(eligible, [{"comment_id": "candidate"}])
+        self.assertEqual(excluded, [])
+        self.assertEqual(client.get_sub_comments.call_count, 2)
+
+    def test_online_verification_uses_target_hint_before_unrelated_thread(
+        self
+    ):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = ([{
+            "id": "unrelated",
+            "sub_comment_count": "2",
+            "sub_comments": [],
+        }, {
+            "id": "root1",
+            "sub_comment_count": "2",
+            "sub_comments": [{
+                "id": "target1",
+                "user_info": {"user_id": "other"},
+            }],
+        }], True)
+        client.get_sub_comments.return_value = [{
+            "id": "target1",
+            "user_info": {"user_id": "other"},
+        }, {
+            "id": "candidate",
+            "user_info": {"user_id": "other"},
+        }]
+        eligible, excluded = CommentScanner(
+            client
+        ).verify_candidates_online(
+            "note",
+            [{
+                "comment_id": "candidate",
+                "target_comment_id": "target1",
+            }],
+        )
+        self.assertEqual(
+            eligible,
+            [{
+                "comment_id": "candidate",
+                "target_comment_id": "target1",
+            }],
+        )
+        self.assertEqual(excluded, [])
+        client.get_sub_comments.assert_called_once_with(
+            "note", "root1", "", strict=True
+        )
+
+    def test_online_verification_stops_if_unresolved_may_be_in_failed_thread(
+        self
+    ):
+        client = MagicMock()
+        client.get_comments_until_ids.return_value = ([{
+            "id": "unknown-thread",
+            "sub_comment_count": "2",
+            "sub_comments": [],
+        }], True)
+        client.get_sub_comments.return_value = []
+        with self.assertRaisesRegex(
+            RuntimeError, "候选评论尚未定位"
+        ):
             CommentScanner(client).verify_candidates_online(
                 "note", [{"comment_id": "candidate"}]
             )
@@ -842,6 +1561,7 @@ class CompactOutputTests(unittest.TestCase):
             "nickname": "用户",
             "content": "内容",
             "likes": 2,
+            "target_comment_id": "root1",
             "inline_subs": [{"id": "internal"}],
             "inline_subs_count": 1,
             "_replied": False,
@@ -853,6 +1573,7 @@ class CompactOutputTests(unittest.TestCase):
                 "nickname": "用户",
                 "content": "内容",
                 "likes": 2,
+                "target_comment_id": "root1",
             },
         )
 
@@ -973,9 +1694,44 @@ class CompactOutputTests(unittest.TestCase):
         first = main.workflow_paths("note-1")
         second = main.workflow_paths("note-1")
         self.assertEqual(first, second)
+        self.assertTrue(os.path.isabs(CACHE_DIR))
+        self.assertTrue(CACHE_DIR.startswith(PROJECT_ROOT))
         self.assertTrue(first["scan"].endswith(
             ".cache/workflows/note-1/scan.json"
         ))
+
+    def test_paths_reports_legacy_batch_that_requires_redraft(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["drafts"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "active_comment_ids": ["c1"],
+                    "drafts": [],
+                }, file)
+            output = io.StringIO()
+            with patch(
+                "lib.cli_admin.workflow_paths", return_value=paths
+            ):
+                with contextlib.redirect_stdout(output):
+                    main.cmd_paths(argparse.Namespace(note_id="n1"))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["workflow_state"]["active_count"], 1)
+        self.assertTrue(
+            payload["workflow_state"]["legacy_requires_redraft"]
+        )
+
+    def test_file_lock_rejects_second_writer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = os.path.join(temp_dir, "state.lock")
+            with file_lock(lock_path, timeout=0):
+                with self.assertRaises(StateLockTimeout):
+                    with file_lock(lock_path, timeout=0):
+                        pass
 
     def test_drafts_reject_unverified_scan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1022,6 +1778,51 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(merged["drafts"][0]["reply"], "已发送回复")
         self.assertEqual(merged["drafts"][1]["comment_id"], "c2")
 
+    def test_merge_drafts_keeps_old_items_outside_new_batch(self):
+        existing = {
+            "drafts": [{
+                "comment_id": "old-pending",
+                "reply": "旧草稿",
+                "action": "send",
+            }],
+        }
+        new = {
+            "note_id": "n1",
+            "active_comment_ids": ["new"],
+            "drafts": [{
+                "comment_id": "new",
+                "reply": "新草稿",
+                "action": "send",
+            }],
+        }
+        merged = main.merge_draft_history(existing, new)
+        self.assertEqual(
+            [item["comment_id"] for item in merged["drafts"]],
+            ["old-pending", "new"],
+        )
+        self.assertEqual(merged["active_comment_ids"], ["new"])
+
+    def test_merge_drafts_never_overwrites_uncertain_inflight_item(self):
+        existing = {
+            "drafts": [{
+                "comment_id": "c1",
+                "reply": "可能已发送",
+                "action": "send",
+                "send_status": "sending",
+            }],
+        }
+        new = {
+            "active_comment_ids": ["c1"],
+            "drafts": [{
+                "comment_id": "c1",
+                "reply": "不应覆盖",
+                "action": "send",
+            }],
+        }
+        merged = main.merge_draft_history(existing, new)
+        self.assertEqual(merged["drafts"][0]["reply"], "可能已发送")
+        self.assertEqual(merged["drafts"][0]["send_status"], "sending")
+
     @patch("lib.replier.time.sleep")
     def test_send_state_is_persisted_and_not_resent(self, _sleep):
         client = MagicMock()
@@ -1048,6 +1849,53 @@ class CompactOutputTests(unittest.TestCase):
             second = Replier(client)
             second.send_drafts(saved, state_file=state_file)
             self.assertEqual(client.reply.call_count, 1)
+
+    @patch("lib.replier.time.sleep")
+    def test_send_writes_inflight_state_before_platform_request(self, _sleep):
+        client = MagicMock()
+        client.is_skipped.return_value = False
+        drafts = {
+            "note_id": "n1",
+            "drafts": [{
+                "comment_id": "c1",
+                "nickname": "用户",
+                "content": "评论",
+                "reply": "回复",
+                "action": "send",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "drafts.json")
+
+            def reply(*_args):
+                with open(state_file, encoding="utf-8") as file:
+                    during_request = json.load(file)
+                self.assertEqual(
+                    during_request["drafts"][0]["send_status"],
+                    "sending",
+                )
+                return True, "", ""
+
+            client.reply.side_effect = reply
+            Replier(client).send_drafts(drafts, state_file=state_file)
+        self.assertEqual(drafts["drafts"][0]["send_status"], "sent")
+
+    def test_inflight_item_is_never_automatically_resent(self):
+        client = MagicMock()
+        client.is_skipped.return_value = False
+        drafts = {
+            "note_id": "n1",
+            "drafts": [{
+                "comment_id": "c1",
+                "nickname": "用户",
+                "content": "评论",
+                "reply": "回复",
+                "action": "send",
+                "send_status": "sending",
+            }],
+        }
+        Replier(client).send_drafts(drafts)
+        client.reply.assert_not_called()
 
     @patch("lib.replier.time.sleep")
     def test_all_failed_replies_are_added_to_skipped_list(self, _sleep):

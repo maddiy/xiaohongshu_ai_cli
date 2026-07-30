@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 小红书AI智能运营系统
-命令行程序：小红书AI智能运营系统
 
 准确命令清单和 AI 调用协议请运行：python3 main.py ai-help
 依赖 xiaohongshu-cli；账号与浏览器配置位于 config.py。
@@ -22,9 +21,9 @@ from lib.cli_support import (
     filter_scan_local_state,
     load_local_comment_states,
     merge_draft_history,
+    NON_RESEND_STATUSES,
     print_json,
     scan_summary,
-    TERMINAL_SEND_STATUSES,
     workflow_paths,
     write_json,
 )
@@ -375,7 +374,7 @@ def cmd_send(args):
     to_send = [
         d for d in items
         if d.get("action") == "send"
-        and d.get("send_status") not in TERMINAL_SEND_STATUSES
+        and d.get("send_status") not in NON_RESEND_STATUSES
     ]
     sent = [d for d in items if d.get("send_status") == "sent"]
     to_skip = [d for d in items if d.get("action") == "skip"]

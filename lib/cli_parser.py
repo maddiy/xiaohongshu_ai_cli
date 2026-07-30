@@ -1,7 +1,7 @@
 """命令行参数定义；与业务命令解耦，便于单独测试和扩展。"""
 
 import argparse
-from config import APP_VERSION, CLI_NAME, SYSTEM_NAME
+from config import APP_VERSION, SYSTEM_NAME
 
 
 COMMAND_NAMES = (
@@ -93,8 +93,8 @@ COMMAND_EFFECTS = {
     "ai-reply": {
         "platform": "prepare/draft 读取并核验；send 发送回复",
         "local": (
-            "读写固定工作流文件；失败时更新 skipped.json；"
-            "在线核验可能更新敏感令牌索引"
+            "持有同笔记跨进程锁，读写带批次指纹的固定工作流文件；"
+            "失败时更新 skipped.json；在线核验可能更新敏感令牌索引"
         ),
         "output": "始终为单一紧凑 JSON",
     },
@@ -124,8 +124,7 @@ def add_limit_args(parser):
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            f"{SYSTEM_NAME}｜命令行程序：{CLI_NAME}｜"
-            "面向中文用户与AI助手的发布、评论管理工具"
+            f"{SYSTEM_NAME}｜面向中文用户与AI助手的发布、评论管理工具"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -144,7 +143,7 @@ def build_parser():
     )
     parser.add_argument(
         "--version", action="version",
-        version=f"{CLI_NAME} {APP_VERSION}",
+        version=f"{SYSTEM_NAME} {APP_VERSION}",
     )
     subparsers = parser.add_subparsers(dest="command", help="子命令")
 
@@ -286,6 +285,14 @@ def build_parser():
     ai_reply.add_argument(
         "--confirmed", action="store_true",
         help="确认用户已审核预览，仅 send 动作使用",
+    )
+    ai_reply.add_argument(
+        "--batch-id",
+        help="draft返回的批次编号；send必须原样提交",
+    )
+    ai_reply.add_argument(
+        "--preview-hash",
+        help="draft返回的预览指纹；send必须原样提交",
     )
     ai_reply.add_argument(
         "--limit", type=int, default=20,

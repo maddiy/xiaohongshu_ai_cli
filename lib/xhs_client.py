@@ -7,11 +7,11 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Optional
 
 from config import CACHE_DIR, CACHE_TTL_MINUTES, LOGIN_COOKIE_SOURCE
+from .state_io import atomic_write_json, file_lock
 
 
 class XHSClient:
@@ -57,12 +57,34 @@ class XHSClient:
         )
 
     @staticmethod
+    def _cli_error_message(result) -> str:
+        """优先保留 CLI stdout 中的结构化错误码和消息。"""
+        stdout = (result.stdout or "").strip()
+        if stdout:
+            try:
+                payload = json.loads(stdout)
+            except (TypeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    code = str(error.get("code", "") or "").strip()
+                    message = str(error.get("message", "") or "").strip()
+                    if code and message:
+                        return f"{code}: {message}"
+                    if code or message:
+                        return code or message
+        return (result.stderr or "").strip() or stdout[:200] or "无错误详情"
+
+    @staticmethod
     def _run_xhs(cmd: list, timeout: int = 30) -> dict:
         """执行 xhs CLI 命令并检查返回码，返回解析后的 JSON"""
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
-            stderr = result.stderr.strip() or result.stdout.strip()[:200]
-            raise RuntimeError(f"xhs 命令失败 (exit={result.returncode}): {stderr}")
+            detail = XHSClient._cli_error_message(result)
+            raise RuntimeError(
+                f"xhs 命令失败 (exit={result.returncode}): {detail}"
+            )
         data = json.loads(result.stdout)
         if not data.get("ok"):
             return data  # 非 ok 但命令本身成功（如无更多数据）
@@ -234,34 +256,16 @@ class XHSClient:
     def _merge_xsec_index(new_entries: dict):
         """原子合并令牌索引，并将文件权限限制为当前用户可读写。"""
         path = XHSClient._xsec_index_path()
-        existing = {}
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    existing = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                pass
-        existing.update(new_entries)
-        XHSClient._ensure_cache_dir()
-        temp_path = ""
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=os.path.dirname(os.path.abspath(path)),
-                prefix=".xsec_index.",
-                suffix=".tmp",
-                delete=False,
-            ) as file:
-                temp_path = file.name
-                json.dump(existing, file, ensure_ascii=False)
-                file.flush()
-                os.fsync(file.fileno())
-            os.chmod(temp_path, 0o600)
-            os.replace(temp_path, path)
-        finally:
-            if temp_path and os.path.exists(temp_path):
-                os.unlink(temp_path)
+        with file_lock(f"{path}.lock"):
+            existing = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as file:
+                        existing = json.load(file)
+                except (json.JSONDecodeError, IOError):
+                    pass
+            existing.update(new_entries)
+            atomic_write_json(existing, path, mode=0o600)
 
     # ---------- 通知 ----------
     @staticmethod
@@ -320,6 +324,7 @@ class XHSClient:
         # 按 note_id 聚合
         by_note = {}  # note_id -> {note_title, note_xsec_token, new_comments: []}
         seen_comment_ids = {}
+        xsec_entries = {}
         for n in notifications:
             ntype = n.get("type", "")
             # 只处理"评论了你的笔记"类型的通知
@@ -330,6 +335,9 @@ class XHSClient:
             note_id = item_info.get("id", "")
             if not note_id:
                 continue
+            note_xsec_token = item_info.get("xsec_token", "")
+            if note_xsec_token:
+                xsec_entries[note_id] = note_xsec_token
 
             comment_info = n.get("comment_info", {})
             comment_content = comment_info.get("content", "")
@@ -346,10 +354,15 @@ class XHSClient:
                 by_note[note_id] = {
                     "note_id": note_id,
                     "note_title": item_info.get("content", ""),
-                    "note_xsec_token": item_info.get("xsec_token", ""),
+                    "note_xsec_token": note_xsec_token,
                     "new_comments": [],
                 }
                 seen_comment_ids[note_id] = set()
+            elif (
+                note_xsec_token
+                and not by_note[note_id].get("note_xsec_token")
+            ):
+                by_note[note_id]["note_xsec_token"] = note_xsec_token
 
             # 同一通知可能因分页或平台重复投递出现多次；禁止形成重复草稿。
             if not comment_id or comment_id in seen_comment_ids[note_id]:
@@ -361,11 +374,17 @@ class XHSClient:
                 "nickname": n.get("user_info", {}).get("nickname", "?"),
                 "content": comment_content,
                 "time": n.get("time", 0),
+                "target_comment_id": (
+                    comment_info.get("target_comment", {}).get("id", "")
+                ),
                 "deleted": comment_info.get("illegal_info", {}).get(
                     "illegal_status", "NORMAL"
                 ) not in ("", "NORMAL"),
             })
 
+        # scan.json会主动移除敏感令牌；写入0600索引供draft/send安全接续。
+        if xsec_entries:
+            XHSClient._merge_xsec_index(xsec_entries)
         return list(by_note.values())
 
     # ---------- 评论 ----------
@@ -407,15 +426,22 @@ class XHSClient:
 
     @staticmethod
     def get_comments_until_ids(note_id, target_ids, xsec_token="",
-                               max_pages=50, with_status=False):
+                               max_pages=50, with_status=False,
+                               target_groups=None):
         """逐页读取，找到全部目标评论后立即停止，减少在线核验耗时。
 
         max_pages 为安全上限：每页约 10 条，50 页可覆盖约 500 条评论，
         足以覆盖绝大多数笔记；找到全部目标 ID 或无更多页时立即返回。
+        target_groups 可表示候选定位的替代条件，例如候选ID或其目标评论ID
+        任一出现即认为该候选的楼层上下文已定位。
         """
         from config import REQUEST_DELAY
 
         target_ids = set(target_ids)
+        groups = [
+            set(group) for group in (target_groups or [])
+            if set(group)
+        ]
         comments = []
         found_ids = set()
         cursor = ""
@@ -441,7 +467,11 @@ class XHSClient:
                     sub_id = sub.get("id", "")
                     if sub_id in target_ids:
                         found_ids.add(sub_id)
-            if found_ids == target_ids:
+            contexts_found = (
+                all(group & found_ids for group in groups)
+                if groups else found_ids == target_ids
+            )
+            if contexts_found:
                 return (comments, True) if with_status else comments
             next_cursor = str(page.get("cursor", "") or "")
             if (
@@ -458,25 +488,26 @@ class XHSClient:
         return (comments, False) if with_status else comments
 
     @staticmethod
-    def get_sub_comments(note_id, comment_id, xsec_token=""):
+    def get_sub_comments(note_id, comment_id, xsec_token="", strict=False):
         """
-        获取某条评论下的所有楼中楼（自动翻页，容错返回）
+        获取某条评论下的所有楼中楼（自动翻页）。
 
-        注意: xhs sub-comments 不支持 --xsec-token 参数，
-        对需要 xsec_token 的笔记可能获取不全。
-        一级评论内联的 sub_comments 数据更可靠，优先使用。
+        有令牌时优先使用兼容helper；普通helper故障才回退原生CLI。
+        strict=True时验证码/verification_required立即停止，其他路径全部失败
+        也会抛异常，供回复核验保留真实失败原因。
         """
         from config import REQUEST_DELAY
         all_subs = []
         cursor = None
-        page = 0
+        seen_cursors = set()
         while True:
             tool_python = XHSClient._find_xhs_tool_python()
+            commands = []
             if xsec_token and tool_python:
                 helper = os.path.join(
                     os.path.dirname(__file__), "xhs_subcomments_helper.py"
                 )
-                cmd = [
+                commands.append([
                     tool_python,
                     helper,
                     note_id,
@@ -484,28 +515,84 @@ class XHSClient:
                     cursor or "",
                     xsec_token,
                     LOGIN_COOKIE_SOURCE,
-                ]
-            else:
-                cmd = ["xhs", "sub-comments", note_id, comment_id, "--json"]
-                if cursor:
-                    cmd += ["--cursor", cursor]
-            try:
-                data = XHSClient._run_xhs(cmd)
-            except (RuntimeError, json.JSONDecodeError):
-                # 命令失败或 stdout 为空（参数错误等）
+                ])
+            native_cmd = [
+                "xhs", "sub-comments", note_id, comment_id, "--json",
+            ]
+            if cursor:
+                native_cmd += ["--cursor", cursor]
+            commands.append(native_cmd)
+
+            data = None
+            errors = []
+            for command in commands:
+                try:
+                    candidate_data = XHSClient._run_xhs(command)
+                except (RuntimeError, json.JSONDecodeError) as error:
+                    message = str(error)
+                    errors.append(message)
+                    if (
+                        strict
+                        and (
+                            "verification_required" in message.casefold()
+                            or "captcha" in message.casefold()
+                            or "验证码" in message
+                        )
+                    ):
+                        # 验证码是会话/接口风控；换另一传输立即重试只会重复
+                        # 同一平台请求，不能提高成功率，还可能加重风控。
+                        raise RuntimeError(
+                            f"获取楼中楼失败: {message}"
+                        ) from error
+                    continue
+                if candidate_data.get("ok"):
+                    data = candidate_data
+                    break
+                error_info = candidate_data.get("error", {})
+                if isinstance(error_info, dict):
+                    code = str(error_info.get("code", "") or "").strip()
+                    message = str(
+                        error_info.get("message", "") or ""
+                    ).strip()
+                    detail = (
+                        f"{code}: {message}".strip(": ")
+                        or str(candidate_data)
+                    )
+                    errors.append(detail)
+                    normalized = detail.casefold()
+                    if (
+                        strict
+                        and (
+                            "verification_required" in normalized
+                            or "captcha" in normalized
+                            or "验证码" in detail
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"获取楼中楼失败: {detail}"
+                        )
+                else:
+                    errors.append(str(candidate_data))
+            if data is None:
+                message = "；".join(errors[-2:]) or "未知错误"
+                if strict:
+                    raise RuntimeError(f"获取楼中楼失败: {message}")
+                if any("verification" in error for error in errors):
+                    print("    ⚠️ 楼中楼需要验证，返回已获取的数据")
                 break
-            if not data.get("ok"):
-                err_code = data.get("error", {}).get("code", "")
-                if "verification" in err_code:
-                    print(f"    ⚠️ 楼中楼需要验证，返回已获取的数据")
-                break
+
             page_comments = data.get("data", {}).get("comments", [])
             if page_comments:
                 all_subs.extend(page_comments)
-            cursor = data.get("data", {}).get("cursor", "")
-            page += 1
-            if not cursor or not page_comments:
+            next_cursor = str(data.get("data", {}).get("cursor", "") or "")
+            if not next_cursor or not page_comments:
                 break
+            if next_cursor in seen_cursors:
+                if strict:
+                    raise RuntimeError("获取楼中楼失败: 平台返回了重复游标")
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
             time.sleep(REQUEST_DELAY * 0.3)
         return all_subs
 
@@ -543,6 +630,23 @@ class XHSClient:
         err_msg = ""
         error_str = ""
 
+        def unwrap_api_error(message):
+            """提取“API error: {json}”内真正的中文msg和错误码。"""
+            if "API error:" not in message:
+                return message
+            api_part = message.split("API error:", 1)[1].strip()
+            try:
+                api_data = json.loads(api_part)
+            except json.JSONDecodeError:
+                return message
+            if not isinstance(api_data, dict):
+                return message
+            inner_message = str(api_data.get("msg", "") or "").strip()
+            inner_code = str(api_data.get("code", "") or "").strip()
+            if inner_message and inner_code:
+                return f"{inner_message} ({inner_code})"
+            return inner_message or message
+
         # 尝试1: JSON 格式解析
         try:
             err_data = json.loads(output.strip())
@@ -550,7 +654,7 @@ class XHSClient:
                 err_msg = err_data.get("error", {}).get("message", "")
                 error_str = json.dumps(err_data, ensure_ascii=False)[:200]
                 if err_msg:
-                    return err_msg, error_str
+                    return unwrap_api_error(err_msg), error_str
         except (json.JSONDecodeError, AttributeError):
             pass
 
@@ -569,13 +673,7 @@ class XHSClient:
                     else:
                         err_msg = val
                     # 如果 msg 中包含 'API error: {...}', 提取真正的 msg
-                    if "API error:" in err_msg:
-                        api_part = err_msg.split("API error:", 1)[1].strip()
-                        try:
-                            api_data = json.loads(api_part)
-                            err_msg = api_data.get("msg", err_msg)
-                        except json.JSONDecodeError:
-                            pass
+                    err_msg = unwrap_api_error(err_msg)
                     error_str = output[:200]
                     break
         except Exception:
@@ -746,6 +844,10 @@ class XHSClient:
             XHSClient._skipped_cache = {}
             XHSClient._skipped_mtime = 0
             return {}
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
         # 检查文件是否被外部修改过
         try:
@@ -772,41 +874,56 @@ class XHSClient:
         """将内存缓存写回磁盘并记录 mtime"""
         if XHSClient._skipped_cache is None:
             return
-        XHSClient._ensure_cache_dir()
         path = XHSClient._skipped_path()
-        with open(path, "w") as f:
-            json.dump(XHSClient._skipped_cache, f, ensure_ascii=False, indent=2)
+        with file_lock(f"{path}.lock"):
+            XHSClient._write_skipped_unlocked(path)
+
+    @staticmethod
+    def _write_skipped_unlocked(path=None):
+        """调用方已持有锁时写入跳过列表。"""
+        if XHSClient._skipped_cache is None:
+            return
+        path = path or XHSClient._skipped_path()
+        atomic_write_json(
+            XHSClient._skipped_cache, path, mode=0o600, indent=2
+        )
         XHSClient._skipped_mtime = os.path.getmtime(path)
 
     @staticmethod
     def save_skipped(skipped: dict):
         """保存跳过列表（直接写入磁盘，用于外部导入场景）"""
-        XHSClient._skipped_cache = skipped
-        XHSClient._write_skipped()
+        path = XHSClient._skipped_path()
+        with file_lock(f"{path}.lock"):
+            XHSClient._skipped_cache = skipped
+            XHSClient._write_skipped_unlocked(path)
 
     @staticmethod
     def add_skipped(comment_id: str, nickname: str = "", content: str = "",
                     reason: str = "manual", note_id: str = ""):
         """将一条评论加入跳过列表（先更新内存缓存，再写盘）"""
-        skipped = XHSClient.load_skipped()  # 确保缓存已加载
-        skipped[comment_id] = {
-            "nickname": nickname,
-            "content": content[:80],
-            "reason": reason,
-            "skipped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "note_id": note_id,
-        }
-        XHSClient._write_skipped()
+        path = XHSClient._skipped_path()
+        with file_lock(f"{path}.lock"):
+            skipped = XHSClient.load_skipped(force_reload=True)
+            skipped[comment_id] = {
+                "nickname": nickname,
+                "content": content[:80],
+                "reason": reason,
+                "skipped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "note_id": note_id,
+            }
+            XHSClient._write_skipped_unlocked(path)
 
     @staticmethod
     def remove_skipped(comment_id: str) -> bool:
         """从跳过列表中移除"""
-        skipped = XHSClient.load_skipped()
-        if comment_id in skipped:
-            del skipped[comment_id]
-            XHSClient._write_skipped()
-            return True
-        return False
+        path = XHSClient._skipped_path()
+        with file_lock(f"{path}.lock"):
+            skipped = XHSClient.load_skipped(force_reload=True)
+            if comment_id in skipped:
+                del skipped[comment_id]
+                XHSClient._write_skipped_unlocked(path)
+                return True
+            return False
 
     @staticmethod
     def is_skipped(comment_id: str) -> bool:
