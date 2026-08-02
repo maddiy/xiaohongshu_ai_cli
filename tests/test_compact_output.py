@@ -76,8 +76,8 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
         self.assertEqual(payload["system_name"], "小红书AI智能运营系统")
         self.assertNotIn("cli_name", payload)
-        self.assertEqual(payload["app_version"], "4.1.0")
-        self.assertEqual(payload["schema_version"], "5")
+        self.assertEqual(payload["app_version"], "4.3.0")
+        self.assertEqual(payload["schema_version"], "7")
         self.assertEqual(
             payload["output_contract"]["ai_reply"],
             "始终为单一紧凑JSON",
@@ -273,8 +273,8 @@ class CompactOutputTests(unittest.TestCase):
             main.cmd_ai_help(args)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
-        self.assertEqual(payload["app_version"], "4.1.0")
-        self.assertEqual(payload["schema_version"], "5")
+        self.assertEqual(payload["app_version"], "4.3.0")
+        self.assertEqual(payload["schema_version"], "7")
         self.assertIn("--batch-id", payload["reply_workflow"]["send"])
         self.assertIn("--preview-hash", payload["reply_workflow"]["send"])
         self.assertIn(
@@ -448,7 +448,10 @@ class CompactOutputTests(unittest.TestCase):
             with open(
                 paths["reply_map"], "w", encoding="utf-8"
             ) as file:
-                file.write('{"c1":{"reply":"未闭合}')
+                file.write(
+                    '{"c1":{"reply":"他说"在美华人也存钱"",'
+                    '"action":"send"}}'
+                )
             args = argparse.Namespace(note_id="n1", replies=None)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -462,6 +465,16 @@ class CompactOutputTests(unittest.TestCase):
         self.assertFalse(payload["automatic_retry"])
         self.assertTrue(payload["requires_file_fix"])
         self.assertIn("英文半角双引号", payload["next"])
+        self.assertEqual(payload["error_location"]["line"], 1)
+        self.assertGreater(payload["error_location"]["column"], 1)
+        self.assertIn("中文引号", payload["quote_policy"]["text_values"])
+        self.assertIn("必须保留", payload["quote_policy"]["json_structure"])
+        self.assertIn("禁止全文件", payload["quote_policy"]["forbidden"])
+        audited = cli_ai._audit_result(payload)
+        self.assertEqual(
+            audited["error_location"], payload["error_location"]
+        )
+        self.assertIn("quote_policy", audited)
         scanner_class.assert_not_called()
 
     @patch("lib.cli_ai.CommentScanner")
@@ -504,6 +517,77 @@ class CompactOutputTests(unittest.TestCase):
         self.assertTrue(payload["requires_file_fix"])
         self.assertIn("reply 不能为空", payload["details"][0])
         scanner_class.assert_not_called()
+
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_draft_repairs_unescaped_quotes_in_ai_text_only(
+        self, scanner_class
+    ):
+        candidate = {
+            "comment_id": "c1",
+            "nickname": "用户",
+            "content": "评论原文保持不变",
+        }
+        scanner_class.return_value.verify_candidates_online.return_value = (
+            [candidate.copy()], []
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": [candidate],
+                    "unreplied_subs": [],
+                }, file)
+            with open(
+                paths["reply_map"], "w", encoding="utf-8"
+            ) as file:
+                file.write(
+                    '{\n'
+                    '  "c1": {\n'
+                    '    "reply": "他说"在美华人也存钱"。",\n'
+                    '    "action": "send",\n'
+                    '    "review": {\n'
+                    '      "logic": {\n'
+                    '        "verdict": "partly_sound",\n'
+                    '        "reason": "用"单一例子"推导整体，论据不足"\n'
+                    '      },\n'
+                    '      "fact_check": {\n'
+                    '        "verdict": "unverifiable",\n'
+                    '        "reason": "缺少独立数据",\n'
+                    '        "sources": []\n'
+                    '      },\n'
+                    '      "boast_check": {\n'
+                    '        "verdict": "none",\n'
+                    '        "reason": "没有自我夸大"\n'
+                    '      }\n'
+                    '    }\n'
+                    '  }\n'
+                    '}\n'
+                )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._draft(
+                    argparse.Namespace(note_id="n1", replies=None), paths
+                )
+            payload = json.loads(output.getvalue())
+            with open(paths["reply_map"], encoding="utf-8") as file:
+                repaired = json.load(file)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["reply_map_repaired"])
+        self.assertEqual(payload["quote_replacements"], 4)
+        self.assertEqual(
+            repaired["c1"]["reply"], "他说“在美华人也存钱”。"
+        )
+        self.assertIn(
+            "“单一例子”", repaired["c1"]["review"]["logic"]["reason"]
+        )
+        self.assertEqual(candidate["content"], "评论原文保持不变")
 
     @patch("lib.cli_ai.CommentScanner")
     def test_ai_draft_rejects_duplicate_send_mapping_before_online_check(
@@ -853,8 +937,82 @@ class CompactOutputTests(unittest.TestCase):
                     ),
                     paths,
                 )
+            with open(paths["drafts"], encoding="utf-8") as file:
+                saved = json.load(file)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["error_type"], "stale_preview")
+        self.assertEqual(payload["mismatch"], {
+            "batch_id": True,
+            "preview_hash": False,
+        })
+        self.assertTrue(payload["requires_user_confirmation"])
+        self.assertNotIn("preview_hash", payload)
+        self.assertNotIn("batch_id", payload)
+        self.assertEqual(
+            saved["send_attempts"][-1]["attempt_id"],
+            payload["attempt_id"],
+        )
+        self.assertEqual(
+            saved["send_attempts"][-1]["error_type"],
+            "stale_preview",
+        )
+        scanner_class.assert_not_called()
+
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_send_reports_preview_hash_mismatch_without_new_binding(
+        self, scanner_class
+    ):
+        item = {
+            "comment_id": "c1",
+            "nickname": "用户",
+            "content": "评论",
+            "reply": "回复",
+            "action": "send",
+        }
+        current_hash = cli_ai.preview_hash([item])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["drafts"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "active_comment_ids": ["c1"],
+                    "active_batch": {
+                        "batch_id": "batch-1",
+                        "revision": 3,
+                        "preview_hash": current_hash,
+                        "status": "previewed",
+                    },
+                    "drafts": [item],
+                }, file)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._send(
+                    argparse.Namespace(
+                        note_id="n1",
+                        confirmed=True,
+                        batch_id="batch-1",
+                        preview_hash="old-hash",
+                    ),
+                    paths,
+                )
+            with open(paths["drafts"], encoding="utf-8") as file:
+                saved = json.load(file)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["mismatch"], {
+            "batch_id": False,
+            "preview_hash": True,
+        })
+        self.assertEqual(payload["current_revision"], 3)
+        self.assertNotIn("expected_preview_hash", payload)
+        self.assertEqual(
+            saved["send_attempts"][-1]["mismatch"],
+            {"batch_id": False, "preview_hash": True},
+        )
         scanner_class.assert_not_called()
 
     @patch("lib.replier.time.sleep")
@@ -2344,6 +2502,123 @@ class CompactOutputTests(unittest.TestCase):
         self.assertTrue(first["scan"].endswith(
             ".cache/workflows/note-1/scan.json"
         ))
+        self.assertTrue(first["audit"].endswith(
+            ".cache/workflows/note-1/audit.json"
+        ))
+
+    def test_ai_reply_records_started_and_failed_events_without_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+                "audit": os.path.join(temp_dir, "audit.json"),
+            }
+            args = argparse.Namespace(
+                note_id="n1", action="send", replies=None,
+                confirmed=False, batch_id="", preview_hash="",
+            )
+            output = io.StringIO()
+            with patch("lib.cli_ai.workflow_paths", return_value=paths):
+                with contextlib.redirect_stdout(output):
+                    cli_ai.cmd_ai_reply(args)
+            payload = json.loads(output.getvalue())
+            with open(paths["audit"], encoding="utf-8") as file:
+                audit = json.load(file)
+            mode = stat.S_IMODE(os.stat(paths["audit"]).st_mode)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["audit"]["recorded"])
+        self.assertEqual(audit["schema_version"], 2)
+        self.assertEqual(
+            [event["phase"] for event in audit["events"]],
+            ["started", "failed"],
+        )
+        self.assertEqual(
+            audit["events"][0]["command_id"],
+            audit["events"][1]["command_id"],
+        )
+        self.assertEqual(
+            audit["events"][0]["workflow_id"],
+            audit["events"][1]["workflow_id"],
+        )
+        self.assertEqual(
+            payload["audit"]["workflow_id"],
+            audit["current_workflow_id"],
+        )
+        self.assertNotIn("comment_id", json.dumps(audit, ensure_ascii=False))
+        self.assertEqual(mode, 0o600)
+
+    def test_audit_workflow_id_groups_retries_until_next_prepare(self):
+        def successful_handler(args, paths):
+            cli_ai.print_json({"ok": True, "action": args.action})
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+                "audit": os.path.join(temp_dir, "audit.json"),
+            }
+            actions = ("prepare", "draft", "draft", "send", "prepare")
+            for action in actions:
+                args = argparse.Namespace(
+                    note_id="n1", action=action, full_scan=False, limit=20,
+                    replies=None, confirmed=True, batch_id="b",
+                    preview_hash="h",
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cli_ai._run_audited_action(
+                        successful_handler, args, paths
+                    )
+            with open(paths["audit"], encoding="utf-8") as file:
+                audit = json.load(file)
+        starts = [
+            event for event in audit["events"]
+            if event["phase"] == "started"
+        ]
+        first_workflow = starts[0]["workflow_id"]
+        self.assertTrue(all(
+            event["workflow_id"] == first_workflow
+            for event in starts[:4]
+        ))
+        self.assertNotEqual(starts[4]["workflow_id"], first_workflow)
+        self.assertEqual(
+            audit["current_workflow_id"], starts[4]["workflow_id"]
+        )
+
+    def test_paths_returns_recent_workflow_audit_events(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+                "audit": os.path.join(temp_dir, "audit.json"),
+            }
+            with open(paths["audit"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "schema_version": 1,
+                    "retained_limit": 500,
+                    "events": [{
+                        "event_id": "e1", "command_id": "c1",
+                        "action": "send", "phase": "failed",
+                    }],
+                }, file)
+            output = io.StringIO()
+            with patch(
+                "lib.cli_admin.workflow_paths", return_value=paths
+            ):
+                with contextlib.redirect_stdout(output):
+                    main.cmd_paths(argparse.Namespace(
+                        note_id="n1", audit_limit=20
+                    ))
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["workflow_audit"]["events_total"], 1)
+        self.assertEqual(
+            payload["workflow_audit"]["events"][0]["event_id"], "e1"
+        )
 
     def test_paths_reports_legacy_batch_that_requires_redraft(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2405,6 +2680,7 @@ class CompactOutputTests(unittest.TestCase):
 
     def test_merge_drafts_preserves_sent_history(self):
         existing = {
+            "send_attempts": [{"attempt_id": "attempt-1"}],
             "drafts": [{
                 "comment_id": "c1",
                 "reply": "已发送回复",
@@ -2422,6 +2698,9 @@ class CompactOutputTests(unittest.TestCase):
         merged = main.merge_draft_history(existing, new)
         self.assertEqual(merged["drafts"][0]["reply"], "已发送回复")
         self.assertEqual(merged["drafts"][1]["comment_id"], "c2")
+        self.assertEqual(
+            merged["send_attempts"], [{"attempt_id": "attempt-1"}]
+        )
 
     def test_merge_drafts_keeps_old_items_outside_new_batch(self):
         existing = {

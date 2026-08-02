@@ -19,6 +19,7 @@ from .xhs_client import XHSClient
 TERMINAL_SEND_STATUSES = ("sent", "failed", "archived")
 INFLIGHT_SEND_STATUSES = ("sending",)
 NON_RESEND_STATUSES = TERMINAL_SEND_STATUSES + INFLIGHT_SEND_STATUSES
+WORKFLOW_AUDIT_LIMIT = 500
 
 
 # comments --json 的统一界面协议。<wbr>只提供软换行机会，
@@ -212,9 +213,9 @@ def print_json(data):
     print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
 
 
-def write_json(data, path):
+def write_json(data, path, indent=None):
     """原子写入 JSON，避免程序中断时留下半个状态文件。"""
-    return atomic_write_json(data, path)
+    return atomic_write_json(data, path, indent=indent)
 
 
 def workflow_paths(note_id):
@@ -229,7 +230,61 @@ def workflow_paths(note_id):
         "scan": os.path.join(directory, "scan.json"),
         "reply_map": os.path.join(directory, "reply_map.json"),
         "drafts": os.path.join(directory, "drafts.json"),
+        "audit": os.path.join(directory, "audit.json"),
     }
+
+
+def current_workflow_audit_id(path):
+    """读取当前审计工作流编号；旧审计没有该字段时返回空字符串。"""
+    if not os.path.exists(path):
+        return ""
+    with open(path, encoding="utf-8") as file:
+        audit = json.load(file)
+    if not isinstance(audit, dict):
+        raise RuntimeError("工作流审计文件结构无效")
+    return str(audit.get("current_workflow_id", "") or "")
+
+
+def append_workflow_audit(
+    path, note_id, event, current_workflow_id="",
+):
+    """以0600权限原子追加有界工作流审计；损坏时拒绝覆盖旧证据。"""
+    path = os.path.abspath(path)
+    lock_path = f"{path}.lock"
+    with file_lock(lock_path, timeout=3.0):
+        audit = {
+            "schema_version": 2,
+            "note_id": str(note_id or ""),
+            "retained_limit": WORKFLOW_AUDIT_LIMIT,
+            "events": [],
+        }
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as file:
+                    existing = json.load(file)
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    f"工作流审计文件无法解析，已保留原文件: {error}"
+                ) from error
+            if not isinstance(existing, dict) or not isinstance(
+                existing.get("events", []), list
+            ):
+                raise RuntimeError(
+                    "工作流审计文件结构无效，已保留原文件"
+                )
+            audit.update(existing)
+        events = list(audit.get("events", []))
+        events.append(dict(event))
+        audit.update({
+            "schema_version": 2,
+            "note_id": str(note_id or ""),
+            "retained_limit": WORKFLOW_AUDIT_LIMIT,
+            "events": events[-WORKFLOW_AUDIT_LIMIT:],
+        })
+        if current_workflow_id:
+            audit["current_workflow_id"] = str(current_workflow_id)
+        atomic_write_json(audit, path, mode=0o600)
+    return path
 
 
 def load_local_comment_states(note_id):
@@ -583,4 +638,9 @@ def merge_draft_history(existing, new):
         if comment_id not in order:
             order.append(comment_id)
     merged["drafts"] = [by_id[comment_id] for comment_id in order]
+    # 发送尝试是独立于活动草稿的审计历史；新draft不能把它抹掉。
+    if isinstance(existing, dict) and isinstance(
+        existing.get("send_attempts"), list
+    ):
+        merged["send_attempts"] = list(existing["send_attempts"])
     return merged

@@ -141,9 +141,16 @@ AI流程要求本次每条候选都有对象映射和`review`；不再接受字�
 `skip`只跳过本批；`archive`要在用户确认并执行`send`动作后才写入
 `skipped.json`。二者都不会向平台回复。
 `draft`会在联网前先检查映射文件是否存在、JSON语法和顶层对象类型；
-同时校验本次候选的映射语义。其他AI仍应使用合法JSON写入，中文引号可
-直接使用，英文双引号必须转义。文件中的其他批次旧键允许保留，不参与
-本次校验或发送。
+同时校验本次候选的映射语义。其他AI仍应使用合法JSON写入：生成的`reply`
+和`review`正文默认使用中文引号`“”`或`「」`；必须保留JSON键名、字符串
+边界等结构所需的英文半角双引号，禁止全文件替换。确需在正文中保留英文
+双引号时必须写成`\"`，优先让标准JSON写入器自动转义。不得为此修改扫描
+候选或`.cache/comments.json`中的平台评论原文。文件中的其他批次旧键允许
+保留，不参与本次校验或发送。
+`draft`发现独立成行的`reply`或`reason`文本含成对、未转义的英文引号时，
+只有在替换为中文引号后整份文件能通过标准JSON解析，才原子修复并继续，
+返回`reply_map_repaired=true`和`quote_replacements`；其他语法错误仍停止并
+返回`error_location`、`quote_policy`，不得猜测修改。
 
 逐条审查规则：
 
@@ -203,6 +210,9 @@ python3 main.py ai-reply \
 
 没有用户明确确认时禁止添加`--confirmed`。禁止从当前文件重新推测或替换
 批次号和指纹；若返回`stale_preview`，必须重新展示新草稿并取得确认。
+`stale_preview.mismatch`会分别指出`batch_id`和`preview_hash`是否不匹配，
+并返回当前修订号与批次状态用于诊断，但不会返回新的有效确认值。该错误只能
+证明提交值已过期或混用，不能单凭它断言草稿一定被其他AI修改。
 发送前程序会再次在线核验。
 `prepare`会停用上一批草稿，`draft`写入`active_comment_ids`，`send`只发送
 本次活动批次。
@@ -213,13 +223,23 @@ python3 main.py ai-reply \
 .cache/workflows/<笔记ID>/
 ├── scan.json
 ├── reply_map.json
-└── drafts.json
+├── drafts.json
+└── audit.json
 .cache/comments.json
 .cache/skipped.json
 .cache/xsec_index.json
 ```
 
 必须复用这些文件，不为同一任务创建其他临时存档。
+`audit.json`为0600权限的有界命令审计，记录每次`ai-reply`的started及
+completed/failed事件、参数摘要、结果和错误，不保存评论正文、回复正文或
+认证凭据。使用`paths --note-id <ID> --audit-limit 20`读取最近20条；超过20条
+时读取`workflow_audit.path`。普通`paths`默认不内联事件，避免浪费token。
+先按`workflow_id`筛选同一轮prepare、draft重试和send，再以相同`command_id`
+配对started与completed/failed；新prepare生成新`workflow_id`。旧版事件没有
+该字段时不得跨越其他prepare拼接。没有历史审计记录时只能说明当前状态，
+不得从文件修改时间或最终草稿反推曾经执行的命令和报错。审计启用前的动作
+不会追溯补写。
 `.cache/comments.json`为0600权限的累计评论归档，保存通知接口已返回且
 程序未截断的原始正文；它不代表未读取的全部历史通知，也不代表已经
 用平台完整评论树进行二次核对。
@@ -274,6 +294,11 @@ python3 main.py ai-reply \
 - 没有持续运行日志统计时，不得根据一两次执行声称某类错误“最常见”或
   推断各种失败的发生比例。
 - 所有发送失败的评论自动加入排除列表。
+- `ai-reply`在业务动作前必须成功写入审计开始事件，否则返回
+  `audit_unavailable`且不执行；结束事件写入失败时以响应中的
+  `audit.recorded=false`明确提示，不得谎称已有完整日志。
+- `drafts.send_attempts`保存能够读取草稿后的发送尝试，且新draft不得清除；
+  完整命令过程仍以`audit.json`为准。
 - 同一笔记的`ai-reply`动作由跨进程锁串行执行；`workflow_busy`表示已有
   进程正在处理，必须等待，不能并行启动第二个命令。
 - 每条平台写请求前先保存`send_status=sending`。进程中断后程序先在线

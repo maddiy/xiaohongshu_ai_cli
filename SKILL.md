@@ -49,7 +49,8 @@ description: >
 .cache/workflows/<笔记ID>/
 ├── scan.json
 ├── reply_map.json
-└── drafts.json
+├── drafts.json
+└── audit.json
 .cache/comments.json
 ```
 
@@ -70,12 +71,19 @@ python3 main.py paths --note-id <note_id>
 - `scan.json` 保存最近一次扫描结果。
 - `reply_map.json` 保存 AI 生成并可继续修改的回复映射。
 - `drafts.json` 保存已组装、待预览或待发送的草稿。
+- `audit.json`以0600权限保存`ai-reply`命令的开始、结束、参数摘要、结果和
+  错误，不保存评论正文、回复正文或凭据；最多保留500条事件。
 - `.cache/comments.json`以0600权限累计保存通知接口已返回且程序未截断的
   原始评论正文，不替换引号；这不代表已核对平台完整评论树。
 - 文件存在时先读取并复用，不重复扫描或另存为带时间戳、批次号的副本。
 - 只有用户要求保留多个版本时，才创建额外文件。
 - `.cache` 已被 Git 忽略，不提交账号工作数据。
 - 发送状态会逐条写回 `drafts.json`；先读取 `send_status`，不得重复发送已标记为 `sent` 的项目。
+- 打印执行流程时先运行`paths --note-id <ID> --audit-limit 20`，先按
+  `workflow_id`选择同一轮prepare、draft重试和send，再按相同`command_id`
+  配对审计事件。新prepare生成新编号；旧事件无编号时不得跨prepare拼接。
+  普通`paths`默认不内联事件。没有事件
+  只能报告当前状态，不得根据最终草稿倒推出不存在的失败批次或执行时间。
 - 通知中的`xsec_token`先写入权限为0600的`.cache/xsec_index.json`，再从
   `scan.json`移除；后续步骤复用索引，不得因脱敏而退回无令牌请求。
 
@@ -292,8 +300,12 @@ python3 main.py scan --note-id <note_id> \
 AI流程要求本次每条候选都有对象映射和`review`；字符串简写和缺少映射都会
 被拒绝，不得由AI自动补写通用回复。
 `draft`在联网前先验证映射文件的JSON语法、顶层对象类型和本次候选的
-`action`、`reply`、`review`语义。写回复正文时优先使用中文引号；JSON字符串中的
-英文双引号必须转义。
+`action`、`reply`、`review`语义。AI生成的回复和审查正文默认使用中文引号
+`“”`或`「」`；JSON结构所需的英文双引号必须保留，禁止全文件替换。正文
+确需英文双引号时必须转义，优先由标准JSON写入器完成。不得修改评论原文。
+程序只会自动修复独立`reply/reason`文本行中成对、未转义的英文引号，且
+修复后必须整文件解析成功；成功返回`reply_map_repaired`与替换数量。其他
+JSON错误按`error_location`人工修复，不得全局替换或猜测结构。
 只校验本次scan候选对应的映射；其他批次旧键允许保留，不参与本次发送。
 同一用户、相同正文的多条候选最多一条可设为`send`；否则`draft`返回
 `duplicate_send_mapping`，其余重复项改为`skip`后重试。
@@ -468,8 +480,12 @@ python3 main.py skipped --clear
 - `permission_denied`：对方设置不允许评论，加入排除列表且不重试。
 - `unknown_error`：保留错误信息并向用户准确汇报。
 - `workflow_busy`：同一笔记已有AI工作流运行，等待后重试，不启动并行进程。
+- `audit_unavailable`：审计开始事件无法安全落盘，业务动作尚未执行；先修复
+  `audit.json`或目录权限，禁止绕过审计直接发送。
 - `stale_preview`或`preview_content_changed`：重新运行draft、展示新预览并
   取得确认，禁止沿用旧批次号或旧指纹。
+  `stale_preview.mismatch`分别标明批次号和预览指纹是否不一致，并提供当前
+  修订号与状态；它不返回新的有效确认值，也不能单独证明是其他AI修改。
 - `uncertain_send_state`：平台写结果不确定，先由用户在线核对，禁止自动重发。
 - 登录错误：重新运行 `login`，确认配置的浏览器已登录小红书。
 - 验证码或平台验证：`ai-reply`返回

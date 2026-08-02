@@ -4,7 +4,7 @@
 
 AI首次进入项目时优先读取根目录`AGENTS.md`，无需通读本文档。
 
-当前应用版本为 `4.1.0`，AI协议版本为`5`，共有14个子命令，不提供快捷别名：
+当前应用版本为 `4.3.0`，AI协议版本为`7`，共有14个子命令，不提供快捷别名：
 
 ```bash
 python3 main.py --version
@@ -18,7 +18,8 @@ python3 main.py --version
 .cache/workflows/<笔记ID>/
 ├── scan.json
 ├── reply_map.json
-└── drafts.json
+├── drafts.json
+└── audit.json
 .cache/comments.json
 ```
 
@@ -27,6 +28,15 @@ python3 main.py --version
 ```bash
 python3 main.py paths --note-id <笔记ID>
 ```
+
+`paths`默认只返回审计数量和路径，减少token。打印流程时添加
+`--audit-limit 20`，先按`workflow_id`选择同一轮回复，再按`command_id`配对
+`started`和`completed/failed`即可打印实际执行过程；若
+`events_truncated=true`，读取`workflow_audit.path`中的完整保留窗口。
+`audit.json`权限为0600、最多保留500条事件，不含评论正文、回复正文或凭据。
+没有审计事件时不得把当前`scan.json`或`drafts.json`反推为历史命令日志。
+新prepare生成新`workflow_id`，随后的draft重试和send复用该编号；旧版事件
+没有该字段时，不得跨越其他prepare拼成一条所谓完整流程。
 
 发布笔记统一使用：
 
@@ -382,6 +392,18 @@ AI流程要求本次每条候选都有对象映射和`review`；字符串简写�
 `sent`、`failed`、`archived` 记录仍然保留，但不会混入本次发送。
 `drafts.json.active_batch`保存`batch_id、revision、preview_hash`。send必须
 原样提交draft返回的批次号和指纹；不匹配时返回`stale_preview`，禁止发送。
+`stale_preview`还返回`mismatch.batch_id`、`mismatch.preview_hash`、
+`current_revision`和`current_batch_status`用于诊断，但不返回新的有效确认值；
+错误本身不能证明一定发生了并发修改，也可能是旧参数或参数混用。
+所有`ai-reply`动作都会先写审计开始事件，完成或失败后再写结果事件；开始
+事件无法写入时返回`audit_unavailable`且业务动作不执行。能够读取草稿后的
+发送尝试还保存在`drafts.send_attempts`，并在后续draft历史合并时保留。
+`invalid_reply_map_json`返回`error_location`以及`quote_policy`。生成的
+`reply/review`正文默认使用中文引号；JSON键名和字符串边界仍使用英文半角
+双引号，禁止全文件替换。正文确需英文双引号时必须转义，平台评论原文不改。
+独立成行的`reply/reason`出现成对未转义引号时，程序会尝试只替换这些正文
+引号；仅当修复后的整份JSON有效时才原子写回，并返回
+`reply_map_repaired=true`与`quote_replacements`。其他错误不自动修改。
 `draft`开始时也会先停用旧活动批次；它保留历史草稿和终态，只在成功后
 写入新的`active_comment_ids`。
 历史合并会保留全部旧条目：同ID终态不覆盖，同ID非终态可更新，未进入

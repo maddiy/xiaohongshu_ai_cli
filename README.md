@@ -1,4 +1,4 @@
-# 小红书AI智能运营系统 v4.1.0
+# 小红书AI智能运营系统 v4.3.0
 
 - 系统名称：`小红书AI智能运营系统`
 
@@ -135,7 +135,8 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 ├── <笔记ID>/
 │   ├── scan.json
 │   ├── reply_map.json
-│   └── drafts.json
+│   ├── drafts.json
+│   └── audit.json
 └── post/
     └── note.json
 .cache/comments.json
@@ -148,6 +149,7 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 | `scan.json` | 最近一次评论扫描结果 |
 | `reply_map.json` | AI 生成并可继续修改的回复映射 |
 | `drafts.json` | 已组装、待预览或待发送的回复草稿 |
+| `audit.json` | `ai-reply`命令级审计：起止时间、参数摘要、结果和错误，不保存评论/回复正文或凭据 |
 | `post/note.json` | 待预览或待发布的笔记 |
 | `.cache/comments.json` | 累计保存`comments`已读取的完整评论正文 |
 
@@ -164,6 +166,13 @@ python3 main.py paths --note-id <笔记ID>
 - 只有用户明确要求保留多个版本时才创建额外文件。
 - `.cache/` 已被 Git 忽略，不会提交账号工作数据。
 - 每条发送结果会立即写回 `drafts.json`；其他 AI 读取 `send_status` 后不会重复发送。
+- 每次`ai-reply`执行前后都以0600权限写入`audit.json`。没有对应审计事件时，
+  只能报告当前状态，禁止反推或编造曾经执行的命令、时间和错误。
+- 需要打印流程时运行`paths --note-id <ID> --audit-limit 20`内联最近20条；
+  超过20条时读取`workflow_audit.path`，
+  先按`workflow_id`选择同一轮回复，再按相同`command_id`配对
+  `started`与`completed/failed`事件。新prepare会生成新工作流编号；旧版
+  事件没有该字段时，禁止跨越其他prepare拼接流程。
 - `ai-reply` 会在 `drafts.json` 中保存 `active_comment_ids`；发送动作只处理
   本次活动批次，不会把历史未完成草稿混入本次发送。
 - `active_batch`还保存`batch_id、revision、preview_hash`；用户确认必须
@@ -466,6 +475,12 @@ python3 main.py ai-reply \
 草稿或终态；`draft`成功后写入本次新的活动批次，并返回`batch_id`、
 `revision`和`preview_hash`。发送必须原样提交批次号和指纹；草稿被其他AI
 修改后旧确认立即失效。
+若返回`stale_preview`，`mismatch.batch_id`和`mismatch.preview_hash`会分别
+标明不匹配项，`current_revision`与`current_batch_status`用于排查；响应不会
+返回新的有效确认值。仅凭该错误不能区分新draft覆盖、复制旧参数或参数混用。
+每次send（包括前置校验失败、`stale_preview`、在线复核失败和发送完成）都会
+进入`audit.json`；能够读取草稿时还会把发送尝试保存在`drafts.send_attempts`。
+后续draft会保留该发送尝试历史。审计功能启用前发生的动作不会被追溯补写。
 默认`prepare`调用`scan_via_notifications`读取最新20条评论通知；使用
 `--full-scan`时改为调用`scan_note`读取整篇笔记、绕过评论缓存并拉取完整
 楼中楼。全量模式不是通知扫描，也不调用`verify_candidates_online`。
@@ -484,7 +499,14 @@ prepare结果通过`scan_method`和`verification_mode`明确本次执行方式�
 同一用户、标准化后正文相同的多条候选最多保留一条`send`，否则`draft`
 返回`duplicate_send_mapping`；其余重复项应改为`skip`后再运行。
 如果返回`error_type=invalid_reply_map_json`，应先修复文件再重跑`draft`；
-JSON字符串中的英文半角双引号必须写成`\"`，也可改用中文引号`“”`或`「」`。
+响应中的`error_location`给出行、列和字符位置。AI生成的`reply`和`review`
+正文默认把成对英文引号写成中文引号`“”`或`「」`；JSON键名及字符串边界
+仍必须使用英文半角双引号，禁止全文件替换。确需保留正文英文双引号时写成
+`\"`，优先使用标准JSON写入器自动转义。不得修改平台评论原文。
+对于独立成行的`reply`或`reason`，程序会保守识别成对的未转义英文引号；
+仅当替换为中文引号后整份文件能被标准解析器接受时，才原子写回并继续
+生成草稿。响应以`reply_map_repaired=true`和`quote_replacements`说明修复；
+缺逗号、缺括号、单个引号或布局有歧义时仍然停止，不做猜测性修改。
 `comment_id`是机器内部主键，允许存在于JSON和映射文件，但不得显示在
 面向用户的评论、草稿或流程追踪表格中。纯辱骂或贴标签且没有实质观点的
 评论默认`skip`；回复不得编造数据、来源或绝对化结论。
@@ -806,7 +828,7 @@ python3 main.py skipped --clear
 - 扫描文件移除 `inline_subs` 等内部重复结构。
 - `analyze --json` 默认只输出统计、热门评论和活跃用户。
 - 只有确实需要全部分析明细时才使用 `analyze --json --details`。
-- AI 应复用固定的 `scan.json`、`reply_map.json` 和 `drafts.json`，不要重复扫描、存档或粘贴完整 JSON。
+- AI 应复用固定的 `scan.json`、`reply_map.json`、`drafts.json` 和`audit.json`，不要重复扫描、存档或粘贴完整 JSON。
 
 ## 项目结构
 

@@ -1,13 +1,18 @@
 """面向 AI 的低往返、紧凑 JSON 回复工作流。"""
 
+import contextlib
 import datetime
+import io
 import json
 import os
+import re
 
 from .cli_support import (
+    append_workflow_audit,
     call_for_output,
     compact_comment,
     compact_scan_result,
+    current_workflow_audit_id,
     filter_scan_local_state,
     load_local_comment_states,
     merge_draft_history,
@@ -35,6 +40,22 @@ REVIEW_COLUMN_FIELDS = {
 }
 RESULT_COLUMNS = ["序号", "用户", "回复摘要", "结果", "失败原因"]
 INLINE_ROW_LIMIT = 20
+SEND_ATTEMPT_LIMIT = 100
+AUDIT_RESULT_FIELDS = (
+    "ok", "action", "error", "error_type", "automatic_retry",
+    "requires_user_action", "requires_user_confirmation",
+    "requires_file_fix", "error_location", "quote_policy", "scope",
+    "scan_method", "verification_mode", "count", "deferred_count",
+    "excluded_online", "send_count", "skip_count", "archive_count",
+    "batch_id", "revision", "preview_hash", "sent", "failed", "skipped",
+    "paused", "pause_reason", "remaining", "attempt_id", "mismatch",
+    "current_revision", "current_batch_status", "diagnostic", "next",
+    "reply_map_repaired", "quote_replacements",
+)
+
+AI_TEXT_VALUE_LINE = re.compile(
+    r'^(\s*"(?:reply|reason)"\s*:\s*")(.*)("\s*,?\s*)(\r?\n)?$'
+)
 
 LOGIC_VERDICTS = {
     "sound", "partly_sound", "weak", "fallacious",
@@ -117,6 +138,243 @@ def _workflow_error(action, error, prefix="", paths=None):
 def _load_json(path):
     with open(path, encoding="utf-8") as file:
         return json.load(file)
+
+
+def _unescaped_quote_positions(value):
+    positions = []
+    for index, char in enumerate(value):
+        if char != '"':
+            continue
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and value[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            positions.append(index)
+    return positions
+
+
+def _repair_reply_map_text_quotes(path):
+    """只修复独立reply/reason文本行中成对的未转义引号；歧义时不改文件。"""
+    with open(path, encoding="utf-8") as file:
+        source = file.read()
+    replacements = 0
+    repaired_lines = []
+    for line in source.splitlines(keepends=True):
+        match = AI_TEXT_VALUE_LINE.match(line)
+        if not match:
+            repaired_lines.append(line)
+            continue
+        prefix, value, suffix, newline = match.groups()
+        positions = _unescaped_quote_positions(value)
+        if not positions or len(positions) % 2:
+            repaired_lines.append(line)
+            continue
+        position_set = set(positions)
+        pair_index = 0
+        output = []
+        for index, char in enumerate(value):
+            if index in position_set:
+                output.append("“" if pair_index % 2 == 0 else "”")
+                pair_index += 1
+                replacements += 1
+            else:
+                output.append(char)
+        repaired_lines.append(
+            prefix + "".join(output) + suffix + (newline or "")
+        )
+    if not replacements:
+        return None, 0
+    repaired_source = "".join(repaired_lines)
+    try:
+        repaired = json.loads(repaired_source)
+    except json.JSONDecodeError:
+        return None, 0
+    if not isinstance(repaired, dict):
+        return None, 0
+    # 通过标准写入器原子替换，保证修复后的文件不再含有半截JSON。
+    write_json(repaired, path, indent=2)
+    return repaired, replacements
+
+
+def _audit_timestamp():
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _audit_text(value):
+    """审计保留可诊断文本，但发现凭据字段名时不落盘原始字符串。"""
+    text = str(value)
+    normalized = text.casefold()
+    if any(marker in normalized for marker in (
+        "xsec_token", "cookie", "authorization", "set-cookie",
+    )):
+        return "[包含敏感凭据字段，审计已隐藏原文]"
+    return text[:4000]
+
+
+def _audit_value(value):
+    if isinstance(value, str):
+        return _audit_text(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _audit_value(item)
+            for key, item in value.items()
+            if not any(marker in str(key).casefold() for marker in (
+                "xsec", "cookie", "authorization",
+            ))
+        }
+    if isinstance(value, list):
+        return [_audit_value(item) for item in value[:50]]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _audit_text(value)
+
+
+def _audit_inputs(args, paths):
+    """只记录复现命令所需参数，不记录评论、回复或认证数据。"""
+    action = getattr(args, "action", "")
+    if action == "prepare":
+        return {
+            "full_scan": bool(getattr(args, "full_scan", False)),
+            "limit": int(getattr(args, "limit", 20) or 20),
+        }
+    if action == "draft":
+        reply_path = os.path.abspath(
+            getattr(args, "replies", None) or paths["reply_map"]
+        )
+        evidence = {"path": reply_path, "exists": os.path.exists(reply_path)}
+        if evidence["exists"]:
+            try:
+                stat = os.stat(reply_path)
+                evidence.update({
+                    "size": stat.st_size,
+                    "modified_at": datetime.datetime.fromtimestamp(
+                        stat.st_mtime
+                    ).astimezone().isoformat(timespec="seconds"),
+                })
+            except OSError:
+                pass
+        return {"reply_map": evidence}
+    return {
+        "confirmed": bool(getattr(args, "confirmed", False)),
+        "batch_id": str(getattr(args, "batch_id", "") or ""),
+        "preview_hash": str(getattr(args, "preview_hash", "") or ""),
+    }
+
+
+def _audit_result(payload):
+    """从命令响应提取有证明力、无评论正文的结果摘要。"""
+    return {
+        key: _audit_value(payload[key])
+        for key in AUDIT_RESULT_FIELDS if key in payload
+    }
+
+
+def _run_audited_action(handler, args, paths):
+    """记录命令起止事件；无开始记录时禁止执行，避免出现无证据发送。"""
+    command_id = new_batch_id()
+    audit_path = paths.get(
+        "audit", os.path.join(paths["directory"], "audit.json")
+    )
+    started_at = _audit_timestamp()
+    try:
+        previous_workflow_id = current_workflow_audit_id(audit_path)
+        if args.action == "prepare":
+            workflow_id = new_batch_id()
+            workflow_origin = "prepare"
+        elif previous_workflow_id:
+            workflow_id = previous_workflow_id
+            workflow_origin = "continued"
+        else:
+            workflow_id = new_batch_id()
+            workflow_origin = "continued_without_audited_prepare"
+        append_workflow_audit(audit_path, args.note_id, {
+            "event_id": new_batch_id(),
+            "workflow_id": workflow_id,
+            "command_id": command_id,
+            "timestamp": started_at,
+            "action": args.action,
+            "phase": "started",
+            "workflow_origin": workflow_origin,
+            "inputs": _audit_inputs(args, paths),
+        }, current_workflow_id=workflow_id)
+    except Exception as error:
+        print_json({
+            "ok": False,
+            "action": args.action,
+            "error": f"无法写入工作流审计，已停止执行: {error}",
+            "error_type": "audit_unavailable",
+            "automatic_retry": False,
+            "audit": {"path": audit_path, "recorded": False},
+        })
+        return
+
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            handler(args, paths)
+        raw = output.getvalue().strip()
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("工作流输出顶层不是JSON对象")
+    except Exception as error:
+        payload = _workflow_error(
+            args.action, error, prefix="工作流执行异常", paths=paths
+        )
+
+    audit_recorded = True
+    audit_error = ""
+    try:
+        append_workflow_audit(audit_path, args.note_id, {
+            "event_id": new_batch_id(),
+            "workflow_id": workflow_id,
+            "command_id": command_id,
+            "timestamp": _audit_timestamp(),
+            "action": args.action,
+            "phase": "completed" if payload.get("ok") else "failed",
+            "started_at": started_at,
+            "result": _audit_result(payload),
+        }, current_workflow_id=workflow_id)
+    except Exception as error:
+        audit_recorded = False
+        audit_error = _audit_text(error)
+    payload["audit"] = {
+        "command_id": command_id,
+        "workflow_id": workflow_id,
+        "path": audit_path,
+        "recorded": audit_recorded,
+        **({"error": audit_error} if audit_error else {}),
+    }
+    print_json(payload)
+
+
+def _record_send_attempt(
+    drafts, supplied_batch_id, supplied_preview_hash, outcome,
+    error_type="", mismatch=None, result=None,
+):
+    """在drafts.json内补充有界发送尝试，便于与命令审计交叉核对。"""
+    attempts = drafts.get("send_attempts", [])
+    if not isinstance(attempts, list):
+        attempts = []
+    attempt = {
+        "attempt_id": new_batch_id(),
+        "attempted_at": datetime.datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        ),
+        "outcome": outcome,
+        "supplied_batch_id": supplied_batch_id,
+        "supplied_preview_hash": supplied_preview_hash,
+    }
+    if error_type:
+        attempt["error_type"] = error_type
+    if mismatch is not None:
+        attempt["mismatch"] = mismatch
+    if result is not None:
+        attempt["result"] = result
+    attempts.append(attempt)
+    drafts["send_attempts"] = attempts[-SEND_ATTEMPT_LIMIT:]
+    return attempt
 
 
 def _active_items(drafts):
@@ -338,6 +596,13 @@ def _reply_map_validation_error(errors, error_type="invalid_reply_map_mapping",
     }
 
 
+def _with_quote_repair(payload, repaired, replacements):
+    """在后续成功或失败响应中保留本次已落盘的安全修复事实。"""
+    payload["reply_map_repaired"] = bool(repaired)
+    payload["quote_replacements"] = int(replacements or 0)
+    return payload
+
+
 def _duplicate_send_errors(candidates, reply_map):
     """同一用户的相同正文最多允许一条映射为send。"""
     groups = {}
@@ -544,19 +809,54 @@ def _draft(args, paths):
         })
         return
     # 在昂贵的在线复核前先检查映射文件语法，避免格式错误浪费平台请求。
+    reply_map_repaired = False
+    quote_replacements = 0
     try:
         reply_map = _load_json(reply_path)
-    except (OSError, json.JSONDecodeError) as error:
+    except json.JSONDecodeError as error:
+        try:
+            reply_map, quote_replacements = (
+                _repair_reply_map_text_quotes(reply_path)
+            )
+        except OSError:
+            reply_map = None
+        if reply_map is None:
+            print_json({
+                "ok": False, "action": "draft",
+                "error": f"reply_map.json 不是有效 JSON: {error}",
+                "error_type": "invalid_reply_map_json",
+                "automatic_retry": False,
+                "requires_file_fix": True,
+                "error_location": {
+                    "line": error.lineno,
+                    "column": error.colno,
+                    "character": error.pos,
+                },
+                "quote_policy": {
+                    "text_values": (
+                        "只把reply、review等文本内容里的英文半角双引号"
+                        "改为中文引号“”或「」"
+                    ),
+                    "json_structure": "JSON键名和结构引号必须保留英文半角双引号",
+                    "forbidden": "禁止全文件查找替换英文双引号",
+                    "preferred_writer": "优先使用标准JSON写入器自动转义",
+                },
+                "next": (
+                    "检查error_location；若回复或审查正文含未转义的英文半角"
+                    "双引号，只将正文中的引号改为中文引号“”或「」，不要替换"
+                    "JSON结构引号；修复后重新运行draft"
+                ),
+            })
+            return
+        reply_map_repaired = True
+    except OSError as error:
         print_json({
             "ok": False, "action": "draft",
-            "error": f"reply_map.json 不是有效 JSON: {error}",
-            "error_type": "invalid_reply_map_json",
+            "error": f"无法读取 reply_map.json: {error}",
+            "error_type": "reply_map_read_error",
             "automatic_retry": False,
             "requires_file_fix": True,
-            "next": (
-                "先修复 reply_map.json 再重跑 draft；JSON字符串中的英文"
-                "半角双引号必须写成 \\\"，也可改用中文引号“”或「」"
-            ),
+            "next": "检查文件路径和读取权限后重新运行draft",
         })
         return
     if not isinstance(reply_map, dict):
@@ -571,17 +871,25 @@ def _draft(args, paths):
     ]
     mapping_errors = _validate_reply_map(reply_map, scan_candidate_ids)
     if mapping_errors:
-        print_json(_reply_map_validation_error(mapping_errors))
+        print_json(_with_quote_repair(
+            _reply_map_validation_error(mapping_errors),
+            reply_map_repaired,
+            quote_replacements,
+        ))
         return
     duplicate_errors = _duplicate_send_errors(candidates, reply_map)
     if duplicate_errors:
-        print_json(_reply_map_validation_error(
-            duplicate_errors,
-            error_type="duplicate_send_mapping",
-            next_step=(
-                "同一用户的相同评论只保留一条send，其余改为skip，"
-                "然后重新运行draft"
+        print_json(_with_quote_repair(
+            _reply_map_validation_error(
+                duplicate_errors,
+                error_type="duplicate_send_mapping",
+                next_step=(
+                    "同一用户的相同评论只保留一条send，其余改为skip，"
+                    "然后重新运行draft"
+                ),
             ),
+            reply_map_repaired,
+            quote_replacements,
         ))
         return
     scanner = CommentScanner()
@@ -594,14 +902,20 @@ def _draft(args, paths):
             quiet=True,
         )
     except Exception as error:
-        print_json(_workflow_error(
-            "draft", error, prefix="在线复核失败", paths=paths
+        print_json(_with_quote_repair(
+            _workflow_error(
+                "draft", error, prefix="在线复核失败", paths=paths
+            ),
+            reply_map_repaired,
+            quote_replacements,
         ))
         return
     if not candidates:
         print_json({
             "ok": True, "action": "draft", "count": 0,
             "excluded_online": len(excluded),
+            "reply_map_repaired": reply_map_repaired,
+            "quote_replacements": quote_replacements,
             "columns": DRAFT_COLUMNS,
             "preview": [], "next": "在线复核后没有可回复评论，停止",
             "paths": paths,
@@ -662,6 +976,8 @@ def _draft(args, paths):
         ),
         "archive_count": len(archives),
         "excluded_online": len(excluded),
+        "reply_map_repaired": reply_map_repaired,
+        "quote_replacements": quote_replacements,
         "batch_id": batch_id,
         "revision": revision,
         "preview_hash": current_preview_hash,
@@ -757,33 +1073,76 @@ def _send(args, paths):
         supplied_batch_id != expected_batch_id
         or supplied_preview_hash != expected_preview_hash
     ):
+        mismatch = {
+            "batch_id": supplied_batch_id != expected_batch_id,
+            "preview_hash": supplied_preview_hash != expected_preview_hash,
+        }
+        attempt = _record_send_attempt(
+            drafts,
+            supplied_batch_id,
+            supplied_preview_hash,
+            "rejected",
+            error_type="stale_preview",
+            mismatch=mismatch,
+        )
+        write_json(drafts, paths["drafts"])
         print_json({
             "ok": False,
             "action": "send",
-            "error": "确认信息与当前活动批次不一致，草稿可能已被其他AI更新",
+            "error": "确认信息与当前活动批次不一致，提交的可能是旧预览或混用了确认参数",
             "error_type": "stale_preview",
             "automatic_retry": False,
+            "requires_user_confirmation": True,
+            "mismatch": mismatch,
+            "current_revision": active_batch.get("revision"),
+            "current_batch_status": active_batch.get("status", ""),
+            "attempt_id": attempt["attempt_id"],
+            "attempt_log": paths["drafts"],
+            "diagnostic": (
+                "只能确认提交值与当前活动批次不一致；可能由新draft覆盖、"
+                "复制旧参数或混用不同预览的参数造成"
+            ),
             "next": "重新运行draft、展示新preview并取得用户确认",
         })
         return
     if active_batch.get("status") == "superseded":
+        attempt = _record_send_attempt(
+            drafts,
+            supplied_batch_id,
+            supplied_preview_hash,
+            "rejected",
+            error_type="stale_preview",
+        )
+        write_json(drafts, paths["drafts"])
         print_json({
             "ok": False,
             "action": "send",
             "error": "该批次已被更新批次替代，禁止发送旧预览",
             "error_type": "stale_preview",
             "automatic_retry": False,
+            "attempt_id": attempt["attempt_id"],
+            "attempt_log": paths["drafts"],
         })
         return
     active_items = _active_items(drafts)
     actual_preview_hash = preview_hash(active_items)
     if actual_preview_hash != expected_preview_hash:
+        attempt = _record_send_attempt(
+            drafts,
+            supplied_batch_id,
+            supplied_preview_hash,
+            "rejected",
+            error_type="preview_content_changed",
+        )
+        write_json(drafts, paths["drafts"])
         print_json({
             "ok": False,
             "action": "send",
             "error": "草稿内容在用户确认后发生变化，已停止发送",
             "error_type": "preview_content_changed",
             "automatic_retry": False,
+            "attempt_id": attempt["attempt_id"],
+            "attempt_log": paths["drafts"],
             "next": "重新运行draft、展示新preview并取得用户确认",
         })
         return
@@ -876,6 +1235,17 @@ def _send(args, paths):
                 timespec="seconds"
             )
         )
+        attempt = _record_send_attempt(
+            drafts,
+            supplied_batch_id,
+            supplied_preview_hash,
+            "completed",
+            result={
+                "sent": reconciled_sent,
+                "failed": 0,
+                "skipped": len(skipped_items) + online_archived_count,
+            },
+        )
         write_json(drafts, paths["drafts"])
         result_rows = _result_rows(active_items)
         print_json({
@@ -889,6 +1259,8 @@ def _send(args, paths):
             "results_truncated": len(result_rows) > INLINE_ROW_LIMIT,
             "results_source": paths["drafts"],
             "batch_id": expected_batch_id,
+            "attempt_id": attempt["attempt_id"],
+            "attempt_log": paths["drafts"],
         })
         return
 
@@ -925,6 +1297,23 @@ def _send(args, paths):
             )
         )
     active_batch.pop("send_started_at", None)
+    attempt = _record_send_attempt(
+        drafts,
+        supplied_batch_id,
+        supplied_preview_hash,
+        "paused" if stats.get("stopped") else "completed",
+        error_type=("send_failed" if stats.get("fail", 0) else ""),
+        result={
+            "sent": stats.get("success", 0) + reconciled_sent,
+            "failed": stats.get("fail", 0),
+            "skipped": (
+                stats.get("skip", 0)
+                + online_archived_count
+                + len(skipped_items)
+            ),
+            "remaining": stats.get("remaining", 0),
+        },
+    )
     write_json(drafts, paths["drafts"])
     result_rows = _result_rows(active_items)
     print_json({
@@ -941,6 +1330,8 @@ def _send(args, paths):
             + len(skipped_items)
         ),
         "batch_id": expected_batch_id,
+        "attempt_id": attempt["attempt_id"],
+        "attempt_log": paths["drafts"],
         "columns": RESULT_COLUMNS,
         "results": _inline_rows(result_rows),
         "results_total": len(result_rows),
@@ -958,12 +1349,12 @@ def cmd_ai_reply(args):
         with workflow_lock(
             args.note_id, timeout=3.0, directory=paths["directory"]
         ):
-            if args.action == "prepare":
-                _prepare(args, paths)
-            elif args.action == "draft":
-                _draft(args, paths)
-            else:
-                _send(args, paths)
+            handler = {
+                "prepare": _prepare,
+                "draft": _draft,
+                "send": _send,
+            }[args.action]
+            _run_audited_action(handler, args, paths)
     except StateLockTimeout as error:
         print_json({
             "ok": False,

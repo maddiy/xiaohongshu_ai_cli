@@ -93,13 +93,14 @@ COMMAND_EFFECTS = {
     },
     "paths": {
         "platform": "不访问",
-        "local": "只检查固定工作文件是否存在",
+        "local": "读取固定工作文件状态；--audit-limit可内联最近审计事件",
         "output": "始终为单一 JSON",
     },
     "ai-reply": {
         "platform": "prepare/draft 读取并核验；send 发送回复",
         "local": (
             "持有同笔记跨进程锁，读写带批次指纹的固定工作流文件；"
+            "以0600权限记录有界命令审计；"
             "失败时更新 skipped.json；在线核验可能更新敏感令牌索引"
         ),
         "output": "始终为单一紧凑 JSON",
@@ -291,6 +292,10 @@ def build_parser():
     )
     paths = subparsers.add_parser("paths", help="显示固定工作文件路径")
     paths.add_argument("--note-id", default="all", help="笔记ID（默认 all）")
+    paths.add_argument(
+        "--audit-limit", type=int, default=0,
+        help="内联最近几条工作流审计事件（默认0，最大100）",
+    )
 
     ai_reply = subparsers.add_parser(
         "ai-reply", help="AI 专用紧凑回复工作流（仅输出 JSON）"

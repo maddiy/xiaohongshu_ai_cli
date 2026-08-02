@@ -390,7 +390,9 @@ def cmd_ai_help(args):
             "reply_map_json_error": (
                 "返回error_type=invalid_reply_map_json、"
                 "automatic_retry=false、requires_file_fix=true；"
-                "英文半角双引号必须转义，修复文件后重跑draft"
+                "error_location给出行列；reply/review正文默认使用中文引号，"
+                "JSON结构引号不得替换，正文英文双引号必须转义；独立"
+                "reply/reason行的成对未转义引号仅在整文件修复后有效时自动处理"
             ),
             "reply_map_mapping_error": (
                 "JSON语法正确但action、reply或review不合法时返回"
@@ -492,7 +494,20 @@ def cmd_ai_help(args):
             ),
         },
         "storage": {
-            "workflow": ".cache/workflows/<note_id>/{scan,reply_map,drafts}.json",
+            "workflow": (
+                ".cache/workflows/<note_id>/"
+                "{scan,reply_map,drafts,audit}.json"
+            ),
+            "workflow_audit": (
+                "audit.json（0600，最多500条命令事件；不含评论正文、"
+                "回复正文和凭据；paths --audit-limit按需内联）"
+            ),
+            "audit_evidence_rule": (
+                "先按workflow_id限定同一轮prepare/draft/send，再按command_id"
+                "配对started与completed/failed；新prepare生成新workflow_id；"
+                "旧事件无编号时不得跨prepare拼接；没有审计事件时"
+                "只能报告当前状态，不得从最终状态反推历史命令或错误"
+            ),
             "comment_archive": (
                 ".cache/comments.json（0600，累计保存通知接口已返回且程序"
                 "未截断的原始正文；不代表完整评论树核验）"
@@ -516,6 +531,10 @@ def cmd_ai_help(args):
                 ".cache/workflows/<id>/reply_map.json",
                 ".cache/skipped.json",
             ],
+            "execution_evidence": (
+                ".cache/workflows/<id>/audit.json；用于报告命令过程，"
+                "不参与候选资格判定"
+            ),
             "key": "comment_id",
             "terminal_statuses": list(TERMINAL_SEND_STATUSES),
             "status_precedence": [
@@ -644,8 +663,9 @@ def cmd_ai_help(args):
             ),
             "quote_error": (
                 "JSON错误来自字符串内未转义的英文半角双引号，不是中文引号"
-                "被解析器误判；comments.json由程序用标准JSON生成，"
-                "英文引号会自动转义并在读取时还原，不得手工替换原评论"
+                "被解析器误判；只把AI生成的reply/review正文引号改成中文"
+                "引号，JSON结构引号必须保留且禁止全文件替换；comments.json"
+                "由程序用标准JSON生成，不得手工替换原评论"
             ),
             "captcha": (
                 "验证码不是保证等待冷却后即可恢复的普通暂时错误；"
@@ -772,6 +792,7 @@ def cmd_ai_help(args):
                 "prepare快速预算内未定位的深层楼中楼计入deferred_count，不生成草稿",
                 "同一笔记工作流由跨进程锁串行化；workflow_busy时等待",
                 "旧批次或内容变化返回stale_preview，必须重新预览确认",
+                "执行流程只按audit.json报告；无审计不得从最终状态倒推历史",
                 "平台写入前先保存sending；uncertain_send_state禁止自动重发",
                 "全量读取和批量发送复用单一登录会话；账号级错误暂停剩余批次",
                 "楼中楼数据不完整、验证码或网络核验失败时硬停止",
@@ -783,7 +804,13 @@ def cmd_ai_help(args):
             ],
             "state": {
                 "directory": ".cache/workflows/<note_id>/",
-                "files": ["scan.json", "reply_map.json", "drafts.json"],
+                "files": [
+                    "scan.json", "reply_map.json", "drafts.json", "audit.json",
+                ],
+                "audit": (
+                    "0600有界事件日志；paths --audit-limit按需内联，完整保留窗口读取"
+                    "workflow_audit.path"
+                ),
                 "comment_archive": (
                     ".cache/comments.json（0600，通知载荷原文未被本地截断；"
                     "不代表平台完整评论树）"
@@ -795,6 +822,7 @@ def cmd_ai_help(args):
             },
             "error_actions": {
                 "workflow_busy": "等待当前进程结束后重试，不并行启动",
+                "audit_unavailable": "审计未落盘，业务动作未执行；先修复审计文件",
                 "verification_required": "停止自动重试，按next提示处理",
                 "rate_limited": "当前失败项进入排除列表，剩余批次暂停",
                 "not_authenticated": "重新登录后接续暂停批次",
@@ -810,6 +838,7 @@ def cmd_ai_help(args):
 
 def cmd_paths(args):
     paths = workflow_paths(args.note_id)
+    audit_limit = max(0, min(int(getattr(args, "audit_limit", 0) or 0), 100))
     files = {
         key: {"path": value, "exists": os.path.exists(value)}
         for key, value in paths.items() if key != "directory"
@@ -818,6 +847,16 @@ def cmd_paths(args):
         "active_count": 0,
         "active_batch": None,
         "legacy_requires_redraft": False,
+    }
+    workflow_audit = {
+        "path": paths.get(
+            "audit", os.path.join(paths["directory"], "audit.json")
+        ),
+        "exists": False,
+        "events_total": 0,
+        "events_returned": 0,
+        "events": [],
+        "events_truncated": False,
     }
     if os.path.exists(paths["drafts"]):
         try:
@@ -842,6 +881,26 @@ def cmd_paths(args):
                     workflow_state["legacy_requires_redraft"] = True
         except (OSError, json.JSONDecodeError):
             workflow_state["state_error"] = "drafts.json无法解析"
+    audit_path = workflow_audit["path"]
+    if os.path.exists(audit_path):
+        workflow_audit["exists"] = True
+        try:
+            with open(audit_path, encoding="utf-8") as file:
+                audit = json.load(file)
+            events = audit.get("events", []) if isinstance(audit, dict) else []
+            if not isinstance(events, list):
+                raise ValueError("events不是数组")
+            workflow_audit.update({
+                "schema_version": audit.get("schema_version"),
+                "current_workflow_id": audit.get("current_workflow_id", ""),
+                "retained_limit": audit.get("retained_limit"),
+                "events_total": len(events),
+                "events_returned": min(len(events), audit_limit),
+                "events": events[-audit_limit:] if audit_limit else [],
+                "events_truncated": len(events) > audit_limit,
+            })
+        except (OSError, json.JSONDecodeError, ValueError):
+            workflow_audit["state_error"] = "audit.json无法解析"
     print_json({
         "ok": True,
         "note_id": args.note_id,
@@ -852,5 +911,6 @@ def cmd_paths(args):
             "exists": os.path.exists(COMMENTS_FILE),
         },
         "workflow_state": workflow_state,
+        "workflow_audit": workflow_audit,
         "post_note": os.path.abspath(os.path.join(WORK_DIR, "post", "note.json")),
     })
