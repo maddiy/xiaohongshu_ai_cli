@@ -258,10 +258,24 @@ python3 main.py scan --note-id <note_id> \
 
 ```json
 {
-  "<comment_id_1>": "针对该评论的回复",
-  "<comment_id_2>": {
-    "reply": "",
-    "action": "archive"
+  "<comment_id>": {
+    "reply": "针对该评论的回复",
+    "action": "send",
+    "review": {
+      "logic": {
+        "verdict": "partly_sound",
+        "reason": "观点有可讨论部分，但论据不足"
+      },
+      "fact_check": {
+        "verdict": "unverifiable",
+        "reason": "个人经历无法独立核实",
+        "sources": []
+      },
+      "boast_check": {
+        "verdict": "none",
+        "reason": "没有自我夸大或成就宣称"
+      }
+    }
   }
 }
 ```
@@ -275,14 +289,27 @@ python3 main.py scan --note-id <note_id> \
 `skip`和`archive`的`reply`可以为空；只有`action=send`要求非空回复。
 `action=send` 时 `reply` 必须是非空字符串；映射格式错误时程序返回
 `ok=false` 和 `details`，不会生成可发送草稿。
-映射值可直接使用非空字符串，等价于`action=send`。本次候选缺少映射时
-默认`skip`，不得由AI自动补写通用回复。
+AI流程要求本次每条候选都有对象映射和`review`；字符串简写和缺少映射都会
+被拒绝，不得由AI自动补写通用回复。
 `draft`在联网前先验证映射文件的JSON语法、顶层对象类型和本次候选的
-`action`、`reply`语义。写回复正文时优先使用中文引号；JSON字符串中的
+`action`、`reply`、`review`语义。写回复正文时优先使用中文引号；JSON字符串中的
 英文双引号必须转义。
 只校验本次scan候选对应的映射；其他批次旧键允许保留，不参与本次发送。
 同一用户、相同正文的多条候选最多一条可设为`send`；否则`draft`返回
 `duplicate_send_mapping`，其余重复项改为`skip`后重试。
+
+`review`必须先于回复决策完成：
+
+- `logic.verdict`：`sound|partly_sound|weak|fallacious|non_argument|unclear`。
+- `fact_check.verdict`：`supported|mixed|contradicted|unverifiable|not_applicable`。
+  前三种必须提供至少一个带HTTP(S) URL的来源；个人经历无法独立核实时用
+  `unverifiable`，不得直接判假。
+- `boast_check.verdict`：`none|possible|likely|unverifiable|not_applicable`。
+  语气强硬、逻辑错误或没有附来源本身不等于吹牛。
+- 三个字段都要有非空`reason`。程序只验证结构和来源格式，AI必须实际完成
+  逻辑分析、必要的联网事实核查和审慎的吹牛判定。
+- `draft.reviews`会为枚举附带中文`label`；审查表显示`label + reason`，
+  `fact_check.sources`显示为可点击链接。
 
 将回复映射转换成草稿：
 
@@ -298,9 +325,9 @@ python3 main.py drafts --note-id <note_id> \
 
 ```bash
 python3 main.py ai-reply --note-id <note_id> --action prepare
-# 根据 candidates 写入返回的 paths.reply_map
+# 逐条完成逻辑分析、事实核查和吹牛判定，再写入 paths.reply_map
 python3 main.py ai-reply --note-id <note_id> --action draft
-# 展示 preview 并取得用户明确确认
+# 先展示 reviews 审查表，再展示 preview 草稿表并取得明确确认
 python3 main.py ai-reply --note-id <note_id> --action send --confirmed \
   --batch-id <draft返回的batch_id> \
   --preview-hash <draft返回的preview_hash>

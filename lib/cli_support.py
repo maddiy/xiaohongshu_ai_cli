@@ -199,6 +199,7 @@ def preview_hash(items):
         "content": item.get("content", ""),
         "reply": item.get("reply", ""),
         "action": item.get("action", "send"),
+        **({"review": item["review"]} if "review" in item else {}),
     } for item in items]
     encoded = json.dumps(
         payload, ensure_ascii=False, separators=(",", ":")

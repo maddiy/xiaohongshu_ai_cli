@@ -351,21 +351,51 @@ def cmd_ai_help(args):
                 "<comment_id>": {
                     "reply": "非空字符串（action=send时必填）",
                     "action": "send|skip|archive",
+                    "review": {
+                        "logic": {
+                            "verdict": (
+                                "sound|partly_sound|weak|fallacious|"
+                                "non_argument|unclear"
+                            ),
+                            "reason": "逻辑结构与依据",
+                        },
+                        "fact_check": {
+                            "verdict": (
+                                "supported|mixed|contradicted|unverifiable|"
+                                "not_applicable"
+                            ),
+                            "reason": "事实核查说明",
+                            "sources": [{
+                                "title": "来源名称", "url": "https://...",
+                            }],
+                        },
+                        "boast_check": {
+                            "verdict": (
+                                "none|possible|likely|unverifiable|"
+                                "not_applicable"
+                            ),
+                            "reason": "吹牛判定依据",
+                        },
+                    },
                 },
             },
-            "reply_map_string_shorthand": {
-                "<comment_id>": "非空回复文案，等价于 action=send",
-            },
-            "reply_map_missing_key": "当前候选没有映射时默认本次跳过",
+            "reply_map_review_required": (
+                "ai-reply要求每条本次候选都有对象映射和review；缺少映射或"
+                "字符串简写均在联网前拒绝"
+            ),
+            "fact_check_sources": (
+                "supported、mixed、contradicted至少需要一个含http(s) URL的"
+                "可核对来源；unverifiable或not_applicable可为空数组"
+            ),
             "reply_map_json_error": (
                 "返回error_type=invalid_reply_map_json、"
                 "automatic_retry=false、requires_file_fix=true；"
                 "英文半角双引号必须转义，修复文件后重跑draft"
             ),
             "reply_map_mapping_error": (
-                "JSON语法正确但action/reply不合法时返回"
-                "error_type=invalid_reply_map_mapping；语法、顶层类型和"
-                "本次候选映射语义都在在线复核前检查"
+                "JSON语法正确但action、reply或review不合法时返回"
+                "error_type=invalid_reply_map_mapping；语法、顶层类型、"
+                "本次候选映射和审查语义都在在线复核前检查"
             ),
             "duplicate_send_error": (
                 "同一用户、标准化后相同正文有多条action=send时返回"
@@ -524,11 +554,25 @@ def cmd_ai_help(args):
                 "同一用户的相同评论最多回复一次；程序在联网前拒绝"
                 "重复send映射"
             ),
+            "pre_reply_review": {
+                "required_for": "本次每条候选，包括send、skip和archive",
+                "dimensions": ["逻辑分析", "事实核查", "吹牛判定"],
+                "program_role": "校验结构、枚举值和事实来源URL格式",
+                "ai_role": "理解语境、完成推理、联网查证并给出审慎判定",
+                "draft_output": (
+                    "draft返回review_columns、review_column_fields和reviews；"
+                    "reviews含中文label；先展示审查表，再展示preview草稿表"
+                ),
+            },
             "user_visible_ids": (
                 "comment_id仅供AI写映射和程序定位；评论、草稿、执行说明"
                 "面向用户展示时不得显示comment_id"
             ),
             "reply_quality": [
+                "回复前逐条完成逻辑分析、事实核查和吹牛判定",
+                "逻辑成立不代表事实为真；事实成立也不代表推理完整",
+                "个人经历通常标记unverifiable，不得武断判为虚假或吹牛",
+                "supported/mixed/contradicted必须提供可点击核对来源",
                 "只有辱骂、贴标签且没有实质观点的评论默认skip",
                 "不得编造来源、数据或使用无法核实的绝对化结论",
                 "保持克制，不升级冲突；有实质观点时再生成针对性回复",
@@ -557,7 +601,7 @@ def cmd_ai_help(args):
                 "python3 main.py ai-reply --note-id <id> --action prepare",
                 "prepare 默认只处理最新20条评论通知中的评论和楼中楼",
                 "仅当用户明确要求全部历史评论时使用 --full-scan",
-                "根据 candidates 写入返回路径中的 reply_map",
+                "逐条完成逻辑、事实和吹牛审查后写入paths.reply_map",
                 "python3 main.py ai-reply --note-id <id> --action draft",
                 "向用户展示 preview 并取得明确确认",
                 (
@@ -646,6 +690,10 @@ def cmd_ai_help(args):
                 "只校验本次scan候选对应的映射；reply_map中其他批次的旧键"
                 "允许保留，不参与本次校验或发送"
             ),
+            "review_is_not_automatic_truth": (
+                "程序只校验review结构、枚举和来源URL格式，不会自动证明评论"
+                "真伪；事实查证和吹牛判定仍由AI完成，结论必须与证据强度匹配"
+            ),
             "runtime_frequency": (
                 "没有持续、可核对的运行日志统计时，禁止根据一两次执行声称"
                 "某类错误最常见，或给出验证码与数据不一致的发生比例"
@@ -730,6 +778,8 @@ def cmd_ai_help(args):
                 "send失败默认写入skipped；sent/failed/archived不自动重试",
                 "评论ID和xsec_token不得显示给用户",
                 "评论列表和草稿的原评论必须完整显示，不得截断",
+                "每条候选先完成逻辑分析、事实核查和吹牛判定，再决定动作和回复",
+                "明确事实真伪结论必须带可核对来源；个人经历不得武断判假",
             ],
             "state": {
                 "directory": ".cache/workflows/<note_id>/",

@@ -31,6 +31,24 @@ from lib.cli_support import (
 )
 
 
+def _valid_review(fact_verdict="not_applicable", sources=None):
+    return {
+        "logic": {
+            "verdict": "partly_sound",
+            "reason": "观点有可讨论部分，但论据不足",
+        },
+        "fact_check": {
+            "verdict": fact_verdict,
+            "reason": "没有独立可核查的外部事实主张",
+            "sources": list(sources or []),
+        },
+        "boast_check": {
+            "verdict": "none",
+            "reason": "未发现自我夸大或无法核实的成就陈述",
+        },
+    }
+
+
 class CompactOutputTests(unittest.TestCase):
     def test_ai_large_rows_are_capped_without_losing_total_source(self):
         rows = [{"index": index} for index in range(25)]
@@ -58,8 +76,8 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
         self.assertEqual(payload["system_name"], "小红书AI智能运营系统")
         self.assertNotIn("cli_name", payload)
-        self.assertEqual(payload["app_version"], "4.0.0")
-        self.assertEqual(payload["schema_version"], "4")
+        self.assertEqual(payload["app_version"], "4.1.0")
+        self.assertEqual(payload["schema_version"], "5")
         self.assertEqual(
             payload["output_contract"]["ai_reply"],
             "始终为单一紧凑JSON",
@@ -116,8 +134,21 @@ class CompactOutputTests(unittest.TestCase):
             payload["reply_decision"]["status_precedence"][-1],
         )
         self.assertIn(
-            "reply_map_string_shorthand",
+            "reply_map_review_required",
             payload["output_contract"],
+        )
+        review_contract = payload["reply_decision"]["pre_reply_review"]
+        self.assertEqual(
+            review_contract["dimensions"],
+            ["逻辑分析", "事实核查", "吹牛判定"],
+        )
+        self.assertIn(
+            "reviews",
+            review_contract["draft_output"],
+        )
+        self.assertIn(
+            "http(s)",
+            payload["output_contract"]["fact_check_sources"],
         )
         self.assertIn(
             "batch_id",
@@ -242,8 +273,8 @@ class CompactOutputTests(unittest.TestCase):
             main.cmd_ai_help(args)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
-        self.assertEqual(payload["app_version"], "4.0.0")
-        self.assertEqual(payload["schema_version"], "4")
+        self.assertEqual(payload["app_version"], "4.1.0")
+        self.assertEqual(payload["schema_version"], "5")
         self.assertIn("--batch-id", payload["reply_workflow"]["send"])
         self.assertIn("--preview-hash", payload["reply_workflow"]["send"])
         self.assertIn(
@@ -275,8 +306,12 @@ class CompactOutputTests(unittest.TestCase):
 
     def test_reply_map_validation_rejects_unsafe_send_entries(self):
         errors = cli_ai._validate_reply_map({
-            "c1": {"reply": "", "action": "send"},
-            "c2": {"reply": "回复", "action": "sent"},
+            "c1": {
+                "reply": "", "action": "send", "review": _valid_review(),
+            },
+            "c2": {
+                "reply": "回复", "action": "sent", "review": _valid_review(),
+            },
         }, ["c1", "c2"])
         self.assertEqual(len(errors), 2)
         self.assertIn("reply 不能为空", errors[0])
@@ -284,10 +319,61 @@ class CompactOutputTests(unittest.TestCase):
 
     def test_reply_map_allows_empty_skip_and_archive(self):
         errors = cli_ai._validate_reply_map({
-            "c1": {"reply": "", "action": "skip"},
-            "c2": {"reply": "", "action": "archive"},
+            "c1": {
+                "reply": "", "action": "skip", "review": _valid_review(),
+            },
+            "c2": {
+                "reply": "", "action": "archive", "review": _valid_review(),
+            },
         }, ["c1", "c2"])
         self.assertEqual(errors, [])
+
+    def test_reply_map_requires_review_for_every_candidate(self):
+        errors = cli_ai._validate_reply_map({
+            "c1": {"reply": "回复", "action": "send"},
+        }, ["c1", "c2"])
+        self.assertTrue(any("review 必须是对象" in item for item in errors))
+        self.assertTrue(any("缺少映射" in item for item in errors))
+
+    def test_fact_check_verdict_requires_traceable_source(self):
+        review = _valid_review(fact_verdict="contradicted")
+        errors = cli_ai._validate_reply_map({
+            "c1": {
+                "reply": "回复", "action": "send", "review": review,
+            },
+        }, ["c1"])
+        self.assertTrue(any("至少需要一个可核对来源" in item for item in errors))
+
+    def test_fact_check_accepts_traceable_source(self):
+        review = _valid_review(
+            fact_verdict="supported",
+            sources=[{
+                "title": "权威来源",
+                "url": "https://example.com/source",
+            }],
+        )
+        errors = cli_ai._validate_reply_map({
+            "c1": {
+                "reply": "回复", "action": "send", "review": review,
+            },
+        }, ["c1"])
+        self.assertEqual(errors, [])
+
+    def test_review_change_invalidates_preview_hash(self):
+        first_review = _valid_review()
+        second_review = json.loads(json.dumps(first_review))
+        second_review["logic"]["reason"] = "新的逻辑分析"
+        base = {
+            "comment_id": "c1",
+            "nickname": "用户",
+            "content": "评论",
+            "reply": "回复",
+            "action": "send",
+        }
+        self.assertNotEqual(
+            cli_ai.preview_hash([{**base, "review": first_review}]),
+            cli_ai.preview_hash([{**base, "review": second_review}]),
+        )
 
     def test_workflow_error_marks_captcha_as_user_action(self):
         payload = cli_ai._workflow_error(
@@ -453,8 +539,14 @@ class CompactOutputTests(unittest.TestCase):
                 paths["reply_map"], "w", encoding="utf-8"
             ) as file:
                 json.dump({
-                    "c1": {"reply": "回复一", "action": "send"},
-                    "c2": {"reply": "回复二", "action": "send"},
+                    "c1": {
+                        "reply": "回复一", "action": "send",
+                        "review": _valid_review(),
+                    },
+                    "c2": {
+                        "reply": "回复二", "action": "send",
+                        "review": _valid_review(),
+                    },
                 }, file)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -674,7 +766,13 @@ class CompactOutputTests(unittest.TestCase):
             with open(
                 paths["reply_map"], "w", encoding="utf-8"
             ) as file:
-                json.dump({"c1": {"reply": "回复", "action": "send"}}, file)
+                json.dump({
+                    "c1": {
+                        "reply": "回复",
+                        "action": "send",
+                        "review": _valid_review(),
+                    },
+                }, file)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 cli_ai._draft(
@@ -696,6 +794,23 @@ class CompactOutputTests(unittest.TestCase):
         )
         self.assertIn("--batch-id", payload["next"])
         self.assertIn("--preview-hash", payload["next"])
+        self.assertEqual(payload["review_columns"], [
+            "序号", "用户", "逻辑分析", "事实核查", "吹牛判定",
+        ])
+        self.assertEqual(payload["reviews_total"], 1)
+        self.assertEqual(
+            payload["reviews"][0]["logic_analysis"]["verdict"],
+            "partly_sound",
+        )
+        self.assertEqual(
+            payload["reviews"][0]["logic_analysis"]["label"],
+            "部分成立",
+        )
+        self.assertFalse(payload["review_display"]["comment_id_visible"])
+        self.assertEqual(
+            saved["drafts"][0]["review"]["boast_check"]["verdict"],
+            "none",
+        )
 
     @patch("lib.cli_ai.CommentScanner")
     def test_ai_send_rejects_confirmation_for_old_batch(

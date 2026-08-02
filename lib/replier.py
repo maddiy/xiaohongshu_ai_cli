@@ -161,13 +161,16 @@ class Replier:
                 if isinstance(entry, dict):
                     reply_text = entry.get("reply", "")
                     action = entry.get("action", "send")
+                    review = entry.get("review", {})
                 else:
                     reply_text = str(entry)
                     action = "send"
+                    review = {}
             else:
                 # 映射中没有的评论，默认跳过
                 reply_text = ""
                 action = "skip"
+                review = {}
                 unmatched += 1
 
             drafts["drafts"].append({
@@ -176,6 +179,7 @@ class Replier:
                 "content": content,
                 "reply": reply_text,
                 "action": action,
+                **({"review": review} if review else {}),
             })
 
             if action == "send":

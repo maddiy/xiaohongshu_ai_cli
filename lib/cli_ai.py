@@ -25,8 +25,52 @@ from .scanner import CommentScanner
 
 
 DRAFT_COLUMNS = ["序号", "用户", "原评论", "拟回复", "操作"]
+REVIEW_COLUMNS = ["序号", "用户", "逻辑分析", "事实核查", "吹牛判定"]
+REVIEW_COLUMN_FIELDS = {
+    "序号": "index",
+    "用户": "nickname",
+    "逻辑分析": "logic_analysis",
+    "事实核查": "fact_check",
+    "吹牛判定": "boast_check",
+}
 RESULT_COLUMNS = ["序号", "用户", "回复摘要", "结果", "失败原因"]
 INLINE_ROW_LIMIT = 20
+
+LOGIC_VERDICTS = {
+    "sound", "partly_sound", "weak", "fallacious",
+    "non_argument", "unclear",
+}
+FACT_VERDICTS = {
+    "supported", "mixed", "contradicted", "unverifiable",
+    "not_applicable",
+}
+BOAST_VERDICTS = {
+    "none", "possible", "likely", "unverifiable", "not_applicable",
+}
+REVIEW_VERDICT_LABELS = {
+    "logic": {
+        "sound": "逻辑成立",
+        "partly_sound": "部分成立",
+        "weak": "论证薄弱",
+        "fallacious": "存在逻辑谬误",
+        "non_argument": "非论证表达",
+        "unclear": "无法判断",
+    },
+    "fact_check": {
+        "supported": "有依据支持",
+        "mixed": "部分支持",
+        "contradicted": "与证据矛盾",
+        "unverifiable": "无法核实",
+        "not_applicable": "无外部事实主张",
+    },
+    "boast_check": {
+        "none": "未发现吹牛",
+        "possible": "可能吹牛",
+        "likely": "较可能吹牛",
+        "unverifiable": "无法判定",
+        "not_applicable": "不适用",
+    },
+}
 
 
 def _workflow_error(action, error, prefix="", paths=None):
@@ -110,6 +154,32 @@ def _preview(items):
     } for index, item in enumerate(items, start=1)]
 
 
+def _review_rows(items):
+    """输出与草稿序号一一对应的结构化评论审查结果。"""
+    def labeled(field, block):
+        block = dict(block) if isinstance(block, dict) else {}
+        block["label"] = REVIEW_VERDICT_LABELS.get(field, {}).get(
+            block.get("verdict", ""), ""
+        )
+        return block
+
+    rows = []
+    for index, item in enumerate(items, start=1):
+        review = item.get("review", {})
+        rows.append({
+            "index": index,
+            "nickname": item.get("nickname", "?"),
+            "logic_analysis": labeled("logic", review.get("logic", {})),
+            "fact_check": labeled(
+                "fact_check", review.get("fact_check", {})
+            ),
+            "boast_check": labeled(
+                "boast_check", review.get("boast_check", {})
+            ),
+        })
+    return rows
+
+
 def _result_rows(items):
     """把活动批次转换为稳定的发送结果，不把已发送项目误报为跳过。"""
     return [{
@@ -134,8 +204,66 @@ def _inline_rows(rows):
     return rows[:INLINE_ROW_LIMIT]
 
 
+def _validate_review(comment_id, review):
+    """校验AI对单条评论的逻辑、事实和吹牛审查记录。"""
+    if not isinstance(review, dict):
+        return [f"{comment_id}: review 必须是对象"]
+
+    errors = []
+    specifications = (
+        ("logic", LOGIC_VERDICTS),
+        ("fact_check", FACT_VERDICTS),
+        ("boast_check", BOAST_VERDICTS),
+    )
+    for field, allowed in specifications:
+        block = review.get(field)
+        if not isinstance(block, dict):
+            errors.append(f"{comment_id}: review.{field} 必须是对象")
+            continue
+        verdict = block.get("verdict", "")
+        if verdict not in allowed:
+            errors.append(
+                f"{comment_id}: review.{field}.verdict 必须是 "
+                + "、".join(sorted(allowed))
+            )
+        reason = block.get("reason", "")
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(
+                f"{comment_id}: review.{field}.reason 不能为空"
+            )
+
+    facts = review.get("fact_check")
+    if isinstance(facts, dict):
+        sources = facts.get("sources", [])
+        if not isinstance(sources, list):
+            errors.append(
+                f"{comment_id}: review.fact_check.sources 必须是数组"
+            )
+        else:
+            invalid_sources = [
+                source for source in sources
+                if not isinstance(source, dict)
+                or not isinstance(source.get("url"), str)
+                or not source["url"].startswith(("https://", "http://"))
+            ]
+            if invalid_sources:
+                errors.append(
+                    f"{comment_id}: fact_check来源必须包含有效的http(s) URL"
+                )
+            if (
+                facts.get("verdict")
+                in {"supported", "mixed", "contradicted"}
+                and not sources
+            ):
+                errors.append(
+                    f"{comment_id}: 事实判定为{facts.get('verdict')}时"
+                    "至少需要一个可核对来源"
+                )
+    return errors
+
+
 def _validate_reply_map(reply_map, candidate_ids):
-    """校验当前候选使用的映射；允许文件中保留其他批次的旧键。"""
+    """校验当前候选映射及逐条审查；允许保留其他批次旧键。"""
     if not isinstance(reply_map, dict):
         return ["顶层必须是 JSON 对象，以 comment_id 为键"]
 
@@ -143,11 +271,17 @@ def _validate_reply_map(reply_map, candidate_ids):
     allowed_actions = {"send", "skip", "archive"}
     for comment_id in candidate_ids:
         if comment_id not in reply_map:
+            errors.append(
+                f"{comment_id}: 缺少映射；每条候选都必须完成逻辑分析、"
+                "事实核查和吹牛判定"
+            )
             continue
         entry = reply_map[comment_id]
         if isinstance(entry, str):
-            if not entry.strip():
-                errors.append(f"{comment_id}: 回复内容不能为空")
+            errors.append(
+                f"{comment_id}: AI回复流程不接受字符串简写，必须使用"
+                "包含review的对象"
+            )
             continue
         if not isinstance(entry, dict):
             errors.append(f"{comment_id}: 值必须是字符串或对象")
@@ -163,6 +297,7 @@ def _validate_reply_map(reply_map, candidate_ids):
             not isinstance(reply, str) or not reply.strip()
         ):
             errors.append(f"{comment_id}: action=send 时 reply 不能为空")
+        errors.extend(_validate_review(comment_id, entry.get("review")))
     return errors
 
 
@@ -178,11 +313,21 @@ def _reply_map_validation_error(errors, error_type="invalid_reply_map_mapping",
         "requires_file_fix": True,
         "details": errors,
         "accepted_formats": [
-            {"<comment_id>": "非空回复字符串，等价于send"},
             {
                 "<comment_id>": {
                     "reply": "send时非空；skip/archive可为空",
                     "action": "send|skip|archive",
+                    "review": {
+                        "logic": {"verdict": "枚举值", "reason": "依据"},
+                        "fact_check": {
+                            "verdict": "枚举值",
+                            "reason": "依据",
+                            "sources": [{"title": "来源名", "url": "https://..."}],
+                        },
+                        "boast_check": {
+                            "verdict": "枚举值", "reason": "依据"
+                        },
+                    },
                 },
             },
         ],
@@ -200,7 +345,7 @@ def _duplicate_send_errors(candidates, reply_map):
         comment_id = candidate.get("comment_id", "")
         entry = reply_map.get(comment_id)
         if entry is None:
-            continue  # 缺少映射默认为skip
+            continue  # 前置校验会拒绝缺失；此处仅作防御性忽略。
         action = (
             entry.get("action", "send")
             if isinstance(entry, dict) else "send"
@@ -506,6 +651,7 @@ def _draft(args, paths):
         and item.get("send_status") != "archived"
     ]
     preview_rows = _preview(active_items)
+    review_rows = _review_rows(active_items)
     print_json({
         "ok": True,
         "action": "draft",
@@ -525,6 +671,17 @@ def _draft(args, paths):
         "preview_returned": min(len(preview_rows), INLINE_ROW_LIMIT),
         "preview_truncated": len(preview_rows) > INLINE_ROW_LIMIT,
         "preview_source": paths["drafts"],
+        "review_columns": REVIEW_COLUMNS,
+        "review_column_fields": REVIEW_COLUMN_FIELDS,
+        "review_display": {
+            "use": "label + reason；fact_check.sources按链接展示",
+            "comment_id_visible": False,
+        },
+        "reviews": _inline_rows(review_rows),
+        "reviews_total": len(review_rows),
+        "reviews_returned": min(len(review_rows), INLINE_ROW_LIMIT),
+        "reviews_truncated": len(review_rows) > INLINE_ROW_LIMIT,
+        "reviews_source": paths["drafts"],
         "next": (
             "向用户展示 preview；明确确认后运行 "
             "ai-reply --action send --confirmed "

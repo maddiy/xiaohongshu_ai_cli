@@ -4,7 +4,7 @@
 
 AI首次进入项目时优先读取根目录`AGENTS.md`，无需通读本文档。
 
-当前应用版本为 `4.0.0`，AI协议版本为`4`，共有14个子命令，不提供快捷别名：
+当前应用版本为 `4.1.0`，AI协议版本为`5`，共有14个子命令，不提供快捷别名：
 
 ```bash
 python3 main.py --version
@@ -341,7 +341,7 @@ python3 main.py ai-reply --note-id <笔记ID> --action send --confirmed \
 | 动作 | 输出 | 说明 |
 |---|---|---|
 | `prepare` | `candidates`、`paths`、`deferred_count` | 默认扫描最新20条通知；深层楼中楼使用6页快速定位预算 |
-| `draft` | `preview`、`paths`、`batch_id`、`revision`、`preview_hash` | 读取固定回复映射并再次在线核验 |
+| `draft` | `reviews`、`preview`、`paths`、`batch_id`、`revision`、`preview_hash` | 先返回三项审查结果，再返回草稿并再次在线核验 |
 | `send` | `results`、发送统计 | 发送前再次核验；必须提供确认、批次号和预览指纹 |
 
 默认回复映射位置为
@@ -351,8 +351,20 @@ python3 main.py ai-reply --note-id <笔记ID> --action send --confirmed \
 回复映射的顶层必须是以 `comment_id` 为键的 JSON 对象，`action` 只能为
 `send`、`skip` 或 `archive`；`action=send` 时 `reply` 必须是非空字符串。
 映射错误时 `draft` 返回 `ok=false` 和 `details`，不会生成可发送草稿。
-映射值也可直接使用非空字符串，等价于`action=send`；本次候选缺少映射时
-默认`skip`。
+AI流程要求本次每条候选都有对象映射和`review`；字符串简写或缺少映射会在
+联网前被拒绝。`review`必须包含：
+
+- `logic`：逻辑分析，`verdict`为
+  `sound|partly_sound|weak|fallacious|non_argument|unclear`。
+- `fact_check`：事实核查，`verdict`为
+  `supported|mixed|contradicted|unverifiable|not_applicable`；前三种至少
+  提供一个含HTTP(S) URL的`sources`来源。
+- `boast_check`：吹牛判定，`verdict`为
+  `none|possible|likely|unverifiable|not_applicable`。
+
+三项都必须有非空`reason`。程序只校验结构和来源格式；AI负责实际逻辑分析、
+必要的联网查证和与证据强度匹配的吹牛判定。个人经历无法独立核实时应标为
+`unverifiable`，不得因为观点错误、语气强硬或没有附来源就直接判为吹牛。
 校验范围仅限本次scan候选；文件中其他批次的旧键允许保留。
 同一用户、相同正文的多条候选最多一条`send`，否则返回
 `duplicate_send_mapping`，必须把其余重复项改为`skip`。
@@ -361,6 +373,9 @@ python3 main.py ai-reply --note-id <笔记ID> --action send --confirmed \
 `.cache/skipped.json`，但不会向平台发送回复。
 `comment_id`是内部主键，不得显示在面向用户的表格中。纯辱骂或贴标签且
 没有实质观点时默认`skip`；回复不得编造来源、数据或绝对化结论。
+`draft`返回的`reviews`与`preview`使用相同序号；先展示审查表，再展示回复
+草稿表并取得用户确认。`reviews`为结论附带中文`label`，表格显示
+`label + reason`，事实来源显示为可点击链接。
 
 `prepare` 会停用上一批草稿，`draft` 把当前候选写入
 `drafts.json.active_comment_ids`，`send` 只处理该活动批次。历史

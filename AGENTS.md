@@ -113,15 +113,30 @@ python3 main.py ai-reply --note-id <笔记ID> --action prepare
 {
   "<comment_id>": {
     "reply": "回复内容",
-    "action": "send"
+    "action": "send",
+    "review": {
+      "logic": {
+        "verdict": "partly_sound",
+        "reason": "观点有可讨论部分，但论据不足"
+      },
+      "fact_check": {
+        "verdict": "unverifiable",
+        "reason": "个人经历缺少独立证据，无法外部核实",
+        "sources": []
+      },
+      "boast_check": {
+        "verdict": "none",
+        "reason": "未发现自我夸大或成就宣称"
+      }
+    }
   }
 }
 ```
 
 `action`只能是`send`、`skip`或`archive`。
 `action=send`时`reply`必须是非空字符串；程序会拒绝错误映射并返回`details`。
-值也可直接写成非空回复字符串，等价于`action=send`；本次候选没有映射时
-默认`skip`，不会发送。
+AI流程要求本次每条候选都有对象映射和`review`；不再接受字符串简写，缺少
+映射也不会静默跳过，而是在联网前返回映射错误。
 `skip`和`archive`的`reply`都可以为空。
 `skip`只跳过本批；`archive`要在用户确认并执行`send`动作后才写入
 `skipped.json`。二者都不会向平台回复。
@@ -129,6 +144,22 @@ python3 main.py ai-reply --note-id <笔记ID> --action prepare
 同时校验本次候选的映射语义。其他AI仍应使用合法JSON写入，中文引号可
 直接使用，英文双引号必须转义。文件中的其他批次旧键允许保留，不参与
 本次校验或发送。
+
+逐条审查规则：
+
+- `logic.verdict`：`sound`、`partly_sound`、`weak`、`fallacious`、
+  `non_argument`或`unclear`。必须说明论点、证据和推理是否衔接；逻辑成立
+  不等于事实为真。
+- `fact_check.verdict`：`supported`、`mixed`、`contradicted`、
+  `unverifiable`或`not_applicable`。前三种必须在`sources`中提供至少一个
+  可点击的HTTP(S)来源，优先一手、权威和与评论时间相符的资料；个人经历
+  无法独立核实时用`unverifiable`，不得武断判假。
+- `boast_check.verdict`：`none`、`possible`、`likely`、`unverifiable`或
+  `not_applicable`。只能依据可识别的自我夸大、成就宣称、数字矛盾或明显
+  缺乏可验证细节作判断；语气强硬、观点错误或没有来源本身不等于吹牛。
+- 三个审查项都必须提供非空`reason`。程序只校验结构、枚举和来源URL格式，
+  不会替AI证明真伪；AI必须实际完成推理和必要的联网查证。
+
 同一用户、相同正文的多条候选最多保留一条`send`，其余必须设为`skip`；
 否则`draft`返回`duplicate_send_mapping`且不会发起在线复核。
 只有辱骂、贴标签且没有实质观点的评论默认`skip`。回复不得编造数据、来源
@@ -141,6 +172,9 @@ python3 main.py ai-reply --note-id <笔记ID> --action draft
 ```
 
 使用Markdown表格向用户展示返回的`preview`，然后等待明确确认。
+先按`review_columns`和`review_column_fields`展示`reviews`审查表，再展示
+`preview`回复草稿表；两表使用相同序号对应同一候选。审查结论优先显示
+程序返回的中文`label`和`reason`，事实来源显示为可点击链接。
 `preview`不是已经预处理的`comments.groups`；表格的“原评论”仍必须显示
 完整正文，并安全转义不可信HTML、表格竖线和换行，但不得删除、摘要、改写
 或为节省token而截断。

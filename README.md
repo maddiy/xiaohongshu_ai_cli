@@ -1,4 +1,4 @@
-# 小红书AI智能运营系统 v4.0.0
+# 小红书AI智能运营系统 v4.1.0
 
 - 系统名称：`小红书AI智能运营系统`
 
@@ -477,7 +477,9 @@ prepare结果通过`scan_method`和`verification_mode`明确本次执行方式�
 深层楼中楼不会被猜测或写入草稿，而计入`deferred_count`；其他已安全核验
 的候选继续返回。确需处理这些延后项时使用`--full-scan`。
 `draft`在联网前先检查`reply_map.json`是否存在、JSON语法和顶层对象类型，
-并校验本次候选映射中的`action`和`reply`，避免格式错误浪费在线核验请求。
+并校验本次候选映射中的`action`、`reply`和逐条`review`，避免格式错误浪费
+在线核验请求。AI流程要求每条候选都有对象映射，不接受字符串简写，也不再
+把缺少映射的候选静默设为`skip`。
 `reply_map.json`中其他批次的旧键允许保留，不参与本次校验或发送。
 同一用户、标准化后正文相同的多条候选最多保留一条`send`，否则`draft`
 返回`duplicate_send_mapping`；其余重复项应改为`skip`后再运行。
@@ -486,6 +488,21 @@ JSON字符串中的英文半角双引号必须写成`\"`，也可改用中文引
 `comment_id`是机器内部主键，允许存在于JSON和映射文件，但不得显示在
 面向用户的评论、草稿或流程追踪表格中。纯辱骂或贴标签且没有实质观点的
 评论默认`skip`；回复不得编造数据、来源或绝对化结论。
+
+每条候选在决定`send`、`skip`或`archive`前必须完成三项审查：
+
+- 逻辑分析：判断论点、证据和结论是否衔接，使用`sound`、
+  `partly_sound`、`weak`、`fallacious`、`non_argument`或`unclear`。
+- 事实核查：使用`supported`、`mixed`、`contradicted`、`unverifiable`或
+  `not_applicable`。明确支持、部分支持或反驳时，必须提供至少一个HTTP(S)
+  可核对来源；个人经历没有独立证据时应标记`unverifiable`。
+- 吹牛判定：使用`none`、`possible`、`likely`、`unverifiable`或
+  `not_applicable`。不得因为语气强硬、观点错误或没有附来源就直接判为吹牛。
+
+程序只校验审查字段、枚举和来源URL格式，AI仍须实际理解语境并完成必要的
+联网查证。`draft`返回`reviews`和`preview`，AI先展示审查表，再展示回复
+草稿表，使用相同序号关联；审查单元格使用程序生成的中文`label`、`reason`
+和可点击事实来源。
 
 `send` 动作还会在实际发送前进行最后一次在线核验。缺少`--confirmed`、
 `--batch-id`或`--preview-hash`时程序拒绝发送。
