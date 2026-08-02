@@ -1134,7 +1134,7 @@ class XHSClient:
         if not os.path.exists(path):
             XHSClient._skipped_cache = {}
             XHSClient._skipped_mtime = 0
-            return {}
+            return XHSClient._skipped_cache
         try:
             os.chmod(path, 0o600)
         except OSError:
@@ -1144,7 +1144,9 @@ class XHSClient:
         try:
             mtime = os.path.getmtime(path)
         except OSError:
-            return {}
+            XHSClient._skipped_cache = {}
+            XHSClient._skipped_mtime = 0
+            return XHSClient._skipped_cache
 
         if (not force_reload and XHSClient._skipped_cache is not None
                 and mtime <= XHSClient._skipped_mtime):
@@ -1158,7 +1160,7 @@ class XHSClient:
         except (json.JSONDecodeError, IOError):
             XHSClient._skipped_cache = {}
             XHSClient._skipped_mtime = 0
-            return {}
+            return XHSClient._skipped_cache
 
     @staticmethod
     def _write_skipped():
@@ -1197,7 +1199,7 @@ class XHSClient:
             skipped = XHSClient.load_skipped(force_reload=True)
             skipped[comment_id] = {
                 "nickname": nickname,
-                "content": content[:80],
+                "content": content,
                 "reason": reason,
                 "skipped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "note_id": note_id,

@@ -32,12 +32,14 @@ description: >
 14. 使用 `--output` 后优先读取生成的文件，不要求命令在终端重复输出完整数据。
 15. 评论分析默认使用摘要；只有用户明确需要全部明细时才使用 `analyze --json --details`。
 16. 所有 AI 必须复用 `.cache/workflows/<笔记ID>/`，不得为同一批任务另建临时存档。
-17. 生成任何回复内容前，必须先检查该评论是否已经被作者回复。
-18. 只有扫描结果中 `reply_status_verified` 为 `true` 时，才生成回复草稿。
-19. `scan.json` 中的未回复数组只是候选；`drafts.json` 的历史发送状态优先级更高。
-20. 同一 `comment_id` 已标记为 `sent`、`failed`、`archived`或`sending`时，不得重新生成或自动发送；`sending`必须先在线对账。
-21. 本地没有发送记录不等于平台没有回复；运行 `drafts` 时必须再次在线读取评论树，并按作者回复的 `target_comment.id` 核验一级评论和楼中楼。
-22. 在线核验失败、需要验证码或候选评论在平台不可见时，停止生成该评论的草稿，不得用本地状态推断为未回复。
+17. `comments`已读取的完整评论正文累计保存在`.cache/comments.json`；
+    必须用JSON解析器读取，不手工处理文件中的引号转义。
+18. 生成任何回复内容前，必须先检查该评论是否已经被作者回复。
+19. 只有扫描结果中 `reply_status_verified` 为 `true` 时，才生成回复草稿。
+20. `scan.json` 中的未回复数组只是候选；`drafts.json` 的历史发送状态优先级更高。
+21. 同一 `comment_id` 已标记为 `sent`、`failed`、`archived`或`sending`时，不得重新生成或自动发送；`sending`必须先在线对账。
+22. 本地没有发送记录不等于平台没有回复；运行 `drafts` 时必须再次在线读取评论树，并按作者回复的 `target_comment.id` 核验一级评论和楼中楼。
+23. 在线核验失败、需要验证码或候选评论在平台不可见时，停止生成该评论的草稿，不得用本地状态推断为未回复。
 
 ## 固定工作目录
 
@@ -48,6 +50,7 @@ description: >
 ├── scan.json
 ├── reply_map.json
 └── drafts.json
+.cache/comments.json
 ```
 
 发布笔记统一使用：
@@ -67,6 +70,8 @@ python3 main.py paths --note-id <note_id>
 - `scan.json` 保存最近一次扫描结果。
 - `reply_map.json` 保存 AI 生成并可继续修改的回复映射。
 - `drafts.json` 保存已组装、待预览或待发送的草稿。
+- `.cache/comments.json`以0600权限累计保存通知接口已返回且程序未截断的
+  原始评论正文，不替换引号；这不代表已核对平台完整评论树。
 - 文件存在时先读取并复用，不重复扫描或另存为带时间戳、批次号的副本。
 - 只有用户要求保留多个版本时，才创建额外文件。
 - `.cache` 已被 Git 忽略，不提交账号工作数据。
@@ -115,7 +120,14 @@ python3 main.py paths --note-id <note_id>
 
 展示时遵守：
 
-- 内容较长时可以截断，并使用省略号标明。
+- 评论列表和回复草稿中的原评论必须完整显示，不得截断、
+  摘要、改写或使用省略号代替。
+- `comments --json`返回的`groups`已经安全转义并插入必要的`<br>`和
+  `<wbr>`；按`display.column_fields`直接展示，不得再次转义或插入标记。
+  未经展示处理的原文读取`archive.path`。
+- 五列按`comments --json`的`display.columns`自适应：序号紧凑不换行；
+  时间、用户名和长状态的展示断点已由程序生成；评论列是唯一主伸缩列。
+  不得用固定截断代替软换行。
 - 没有标题时显示“无标题”，不得留空造成歧义。
 - 已删除、已跳过、已回复和发送失败等状态必须明确标出。
 - 不在表格中显示 Cookie、`xsec_token` 或其他凭据。
@@ -186,6 +198,13 @@ python3 main.py comments --note-id <note_id> --limit 50 --json
 
 `--limit`可省略，默认20条。
 `comments` 返回按文章分组的 `groups`，包含文章序号、评论时间、用户、正文和状态；它不会生成回复候选或修改草稿。
+面向用户显示时必须使用`content`全文，不得为节省token而截断。
+`groups`已经是可直接展示的安全值，按`display.column_fields`生成表格，
+不要二次转义或再次插入`<wbr>`。通知载荷中的原始正文会累计写入返回的
+`archive.path`；`content_complete_scope=notification_payload`不代表已读取
+或核验平台完整评论树。
+若`archive.ok=false`，仍可展示本次`groups`，但必须报告`warnings`且不得
+覆盖无法解析的旧归档。
 
 ## 扫描待回复评论
 
@@ -344,6 +363,7 @@ python3 main.py send --file .cache/workflows/<note_id>/drafts.json --dry-run
 ```
 
 使用“回复草稿”表格向用户展示原评论和对应回复。获得用户明确确认后再发送：
+其中“原评论”列必须完整显示，不得截断。
 
 ```bash
 python3 main.py send --file .cache/workflows/<note_id>/drafts.json

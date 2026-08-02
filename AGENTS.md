@@ -33,6 +33,9 @@ python3 main.py ai-help --summary
 
 - `articles`默认显示最新10篇。
 - `comments`默认读取最新20条评论通知。
+- `comments`每次把通知接口本次返回且程序未截断的评论正文累计保存到
+  `.cache/comments.json`；`--limit`只决定本次向平台读取的通知数，归档
+  不代表已经核对平台完整评论树。
 - 上述两个命令的`--limit`均可省略；只在用户要求其他数量时添加。
 - 回复默认只处理最新20条通知中的一级评论和楼中楼。
 - 只有用户明确要求全部历史评论时才使用`--full-scan`。
@@ -41,6 +44,7 @@ python3 main.py ai-help --summary
   `xhs`进程的低效调用。遇到限流、验证码或登录失效时暂停剩余批次。
 - `ai-reply`的大列表最多内联20行；看到`*_truncated=true`时从对应
   `*_source`固定状态文件读取完整数据，不得把内联片段当作全部结果。
+  该上限只限制内联行数，不允许截断任何一行的评论正文。
 
 ## 查看文章
 
@@ -60,10 +64,29 @@ python3 main.py articles --json
 python3 main.py comments --json
 ```
 
+- `groups`已由程序转义不可信HTML并加入自适应软换行，可直接展示；
+  不得二次转义或再次插入`<wbr>`。
 - 按`groups[].note_index`分别展示每篇文章。
 - 分组标题显示文章标题和笔记ID。
-- 表格固定列：`序号｜时间｜用户｜评论｜状态`。
+- 表格严格按`display.column_fields`取值，固定列为
+  `序号｜时间｜用户｜评论｜状态`。
 - 不向用户显示`comment_id`。
+- `评论`列必须显示返回的完整展示正文；禁止字符切片、省略号、
+  摘要、改写或用“内容较长”代替。
+- 确认`archive.content_untruncated_locally=true`。需要未经展示标记处理的
+  本地原文时读取`archive.path`；`content_complete_scope=notification_payload`
+  且`platform_tree_verified=false`表示只保证已读取通知载荷未被本地截断。
+- 若`archive.ok=false`，本次`groups`仍可展示，但归档未更新；程序会保留
+  无法解析的旧文件并返回`warnings`，AI不得覆盖该文件。
+- `groups`中的`&#124;`、`&lt;`、`<br>`和`<wbr>`均为程序生成的安全展示
+  标记；直接放入Markdown表格，不得还原、替换或重复处理。中英文引号
+  已保持可见原文。
+- 必须按返回的`display.columns`布局五列，不得用空格人工撑宽：
+  - `序号`：紧凑不换行，只显示整数。
+  - `时间`、`用户`和`状态`：直接使用程序生成的紧凑展示值。
+  - `评论`：是唯一主伸缩列，接收其他列节省的宽度。
+  `<wbr>`是软换行，界面宽时不换行、界面窄时自动换行，
+  不得改为固定截断。
 - 用户只要求查看时，到此停止，不运行回复流程。
 
 ## AI回复流程
@@ -118,6 +141,9 @@ python3 main.py ai-reply --note-id <笔记ID> --action draft
 ```
 
 使用Markdown表格向用户展示返回的`preview`，然后等待明确确认。
+`preview`不是已经预处理的`comments.groups`；表格的“原评论”仍必须显示
+完整正文，并安全转义不可信HTML、表格竖线和换行，但不得删除、摘要、改写
+或为节省token而截断。
 同时保存返回的`batch_id`和`preview_hash`；它们绑定了用户实际审核的
 草稿内容，发送时必须原样提交。
 `comment_id`只供AI写映射和程序定位，不得显示在面向用户的评论、草稿或
@@ -154,11 +180,15 @@ python3 main.py ai-reply \
 ├── scan.json
 ├── reply_map.json
 └── drafts.json
+.cache/comments.json
 .cache/skipped.json
 .cache/xsec_index.json
 ```
 
 必须复用这些文件，不为同一任务创建其他临时存档。
+`.cache/comments.json`为0600权限的累计评论归档，保存通知接口已返回且
+程序未截断的原始正文；它不代表未读取的全部历史通知，也不代表已经
+用平台完整评论树进行二次核对。
 通知中的`xsec_token`必须先安全写入权限为0600的`xsec_index.json`，再从
 `scan.json`输出中移除；这样后续`draft`和`send`既不泄露令牌，也不会退化
 为无令牌楼中楼请求。
@@ -221,6 +251,8 @@ python3 main.py ai-reply \
 - 浏览器可正常使用、账号身份检查成功，不代表楼中楼API没有独立风控。
 - 发布文章和发送回复前都必须先预览并取得确认。
 - `articles`对平台是只读操作，但可能更新本地0600敏感`xsec_index.json`。
+- `comments`对平台是只读操作，但会累计更新本地
+  `.cache/comments.json`；评论正文不截断。
 - 传统`send --resume`只改变提示文案；终态和排除过滤无论是否添加该参数
   都始终执行。
 

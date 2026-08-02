@@ -106,7 +106,7 @@ class CommentAnalyzer:
         print(f"🔥 最热门评论 TOP 10（按点赞数）")
         print(f"{'='*60}")
         for i, item in enumerate(result["sorted_by_likes"][:10]):
-            print(f"{i+1}. [{item['sentiment']}] 👍{item['likes']} @{item['nick']}: {item['content'][:80]}")
+            print(f"{i+1}. [{item['sentiment']}] 👍{item['likes']} @{item['nick']}: {item['content']}")
 
         print(f"\n{'='*60}")
         print(f"📝 各类型典型评论")
@@ -116,7 +116,7 @@ class CommentAnalyzer:
             samples = [x for x in result["classified"] if x["sentiment"] == sent_key]
             print(f"\n{label}（共{len(samples)}条）:")
             for item in samples[:5]:
-                print(f"  · @{item['nick']}: {item['content'][:80]}")
+                print(f"  · @{item['nick']}: {item['content']}")
 
         print(f"\n{'='*60}")
         print(f"👥 活跃用户（评论数超过1条）")
@@ -188,7 +188,7 @@ def _classify_sentiment(comments, author_id):
 
         results.append({
             "nick": nick,
-            "content": content[:100],
+            "content": content,
             "sentiment": sentiment,
             "likes": likes,
         })

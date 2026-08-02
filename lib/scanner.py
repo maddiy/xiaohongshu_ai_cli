@@ -477,7 +477,7 @@ class CommentScanner:
                 )
                 print(f"   通知中 {len(new_comments)} 条新评论，实际未回复 {len(unreplied)} 条")
                 for u in unreplied:
-                    print(f"   ⚠️ [一级] @{u['nickname']}: {u['content'][:60]}")
+                    print(f"   ⚠️ [一级] @{u['nickname']}: {u['content']}")
 
         if not results:
             return {
@@ -628,13 +628,13 @@ class CommentScanner:
             if cid in skipped_ids:
                 filtered_skipped += 1
                 if verbose:
-                    print(f"  ⏭️ [已跳过] @{info['nickname']}: {info['content'][:50]}")
+                    print(f"  ⏭️ [已跳过] @{info['nickname']}: {info['content']}")
             elif cid not in reply_targets and (
                 subs_complete or info["sub_count"] == 0
             ):
                 unreplied_l1.append(info)
                 if verbose:
-                    print(f"  ⚠️ [一级] @{info['nickname']}: {info['content'][:50]}")
+                    print(f"  ⚠️ [一级] @{info['nickname']}: {info['content']}")
 
             if not subs_complete and not include_sub_comments:
                 pending_sub_comment_ids.append({
@@ -725,7 +725,7 @@ class CommentScanner:
             nick = c.get("user_info", {}).get("nickname", "?")
             sc_count = int(c.get("sub_comment_count", 0) or 0)
             if verbose:
-                print(f"  📥 @{nick}: {c.get('content','')[:40]}... (sub_count={sc_count})")
+                print(f"  📥 @{nick}: {c.get('content','')} (sub_count={sc_count})")
 
             inline_subs = c.get("sub_comments", [])
             if sc_count <= len(inline_subs):

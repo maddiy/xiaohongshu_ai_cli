@@ -53,6 +53,8 @@ GENERIC_REPLIES = [
 CACHE_DIR = os.path.join(PROJECT_ROOT, ".cache")
 CACHE_TTL_MINUTES = 30         # 缓存有效期（分钟），超时后自动刷新
 WORK_DIR = os.path.join(CACHE_DIR, "workflows")  # AI 之间共享的临时工作目录
+# 累计保存comments从通知接口读取到且程序未截断的原始正文。
+COMMENTS_FILE = os.path.join(CACHE_DIR, "comments.json")
 
 # 跳过列表（不想回复 / 无法回复的评论存档）
 SKIPPED_FILE = os.path.join(CACHE_DIR, "skipped.json")  # 跳过列表存储路径

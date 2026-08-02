@@ -5,11 +5,14 @@ import math
 import os
 import shlex
 
-from config import CACHE_DIR
+from config import CACHE_DIR, COMMENTS_FILE
 from .cli_support import (
     build_comment_groups,
+    build_comment_display_groups,
     call_for_output,
+    COMMENT_DISPLAY_RULES,
     print_json,
+    save_comment_archive,
     write_json,
 )
 from .xhs_client import XHSClient
@@ -177,24 +180,42 @@ def cmd_comments(args):
             strict=True,
             quiet=args.json,
         )
-        groups = build_comment_groups(notifications, args.note_id or "")
+        raw_groups = build_comment_groups(notifications, args.note_id or "")
+        groups = build_comment_display_groups(raw_groups)
     except RuntimeError as error:
         print_json({"ok": False, "error": str(error)}) if args.json \
             else print(f"❌ 读取最新评论失败: {error}")
         return
+    try:
+        archive = save_comment_archive(raw_groups)
+    except (OSError, RuntimeError) as error:
+        # 归档损坏时保护旧文件，但不让本地存储故障遮住已成功读取的评论。
+        archive = {
+            "ok": False,
+            "path": os.path.abspath(COMMENTS_FILE),
+            "write_skipped": True,
+            "error": str(error),
+        }
     if args.json:
-        print_json({
+        payload = {
             "ok": True,
             "columns": ["序号", "时间", "用户", "评论", "状态"],
             "groups": groups,
             "notes": len(groups),
             "comments": sum(len(group["comments"]) for group in groups),
-        })
+            "archive": archive,
+            "display": COMMENT_DISPLAY_RULES,
+        }
+        if not archive.get("ok", True):
+            payload["warnings"] = [archive["error"]]
+        print_json(payload)
         return
-    if not groups:
+    if not archive.get("ok", True):
+        print(f"⚠️ 评论已读取，但本地归档未更新: {archive['error']}")
+    if not raw_groups:
         print("暂无评论通知")
         return
-    for group in groups:
+    for group in raw_groups:
         print(
             f"\n{group['note_index']}. {group['note_title']}"
             f"（{group['note_id']}）"
@@ -204,5 +225,5 @@ def cmd_comments(args):
             print(
                 f"{index:<6} {item['time'][5:]:<18} "
                 f"{item['nickname'][:16]:<18} {item['status']:<10} "
-                f"{item['content'][:80]}"
+                f"{item['content']}"
             )

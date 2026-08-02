@@ -19,6 +19,7 @@ python3 main.py --version
 ├── scan.json
 ├── reply_map.json
 └── drafts.json
+.cache/comments.json
 ```
 
 查看路径和文件状态：
@@ -79,7 +80,26 @@ python3 main.py comments --json
 
 `--limit`可省略，默认20。
 面向用户固定显示 `序号｜时间｜用户｜评论｜状态`，不显示评论 ID；
-JSON 内仍保留 `comment_id`，仅供在线核验和回复定位使用。
+JSON展示分组不包含`comment_id`；内部ID保留在权限为0600的原始归档，
+查看评论命令不得替代回复工作流的候选扫描。
+命令会把已读取的评论按`comment_id`累计合并到权限为0600的
+`.cache/comments.json`，JSON返回`archive.path`。归档保留完整正文，
+不做长度截断。`--limit`仍只表示本次读取的通知数，不代表自动
+读取超出范围的全部历史通知。
+
+评论原文中的中英文引号不会被替换。文件中英文双引号会按JSON
+规则写成`\"`，必须用JSON解析器读取；解析后得到的仍是原始`"`字符。
+所有AI展示`groups[].comments[].content`时必须使用全文，不得字符
+切片、摘要或加省略号。`groups`已由程序完成HTML安全转义、换行和软换行
+处理，直接按`display.column_fields`放入Markdown表格，不得二次处理。
+顶层`display.columns`提供五列宽度自适应参数。序号、时间、用户和
+状态为紧凑列，评论为唯一主伸缩列。时间使用`YYYY-MM-DD<br>HH:mm`；
+时间、长用户名、长状态和评论的软换行点均已写入`groups`；实际换行位置
+由界面宽度决定。未经展示处理的原文读取`archive.path`，其中
+`content_complete_scope=notification_payload`且`platform_tree_verified=false`
+表示只保证已读取通知正文未被本地截断。
+若`archive.ok=false`，本次`groups`仍有效，但归档为保护旧数据没有更新；
+报告顶层`warnings`，不得覆盖无法解析的旧文件。
 
 完整扫描楼中楼时，程序会自动从本地文章索引取得 `xsec_token`，兼容
 `xiaohongshu-cli 0.6.4` 未给楼中楼接口传递文章令牌的问题。

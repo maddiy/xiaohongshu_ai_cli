@@ -37,7 +37,10 @@ COMMAND_EFFECTS = {
     },
     "comments": {
         "platform": "读取",
-        "local": "仅读取本地终态和排除列表",
+        "local": (
+            "读取本地终态和排除列表；累计写入"
+            ".cache/comments.json，保留通知接口已返回且程序未截断的原文"
+        ),
         "output": "终端文本；--json 时为单一 JSON",
     },
     "scan": {

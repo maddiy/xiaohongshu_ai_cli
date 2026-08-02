@@ -94,7 +94,7 @@ class Replier:
 
         for i, c in enumerate(unreplied):
             nick = c["nickname"]
-            content = c["content"][:60]
+            content = c["content"]
             cid = c["comment_id"]
 
             print(f"[{i+1}/{total}] @{nick}: {content}")
@@ -154,7 +154,7 @@ class Replier:
         for c in unreplied:
             cid = c["comment_id"]
             nick = c["nickname"]
-            content = c["content"][:60]
+            content = c["content"]
 
             if cid in reply_map:
                 entry = reply_map[cid]
@@ -391,7 +391,7 @@ class Replier:
 
         for i, c in enumerate(unreplied):
             nick = c["nickname"]
-            content = c["content"][:60]
+            content = c["content"]
             cid = c["comment_id"]
 
             print(f"\n[{i+1}/{total}] @{nick}: {content}")

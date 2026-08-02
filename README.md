@@ -104,7 +104,14 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 补充规则：
 
 - 即使只有一条记录，也使用表格。
-- 长内容可以截断，但必须用省略号标明。
+- 评论列表和回复草稿中的原评论必须显示完整正文，不得截断、
+  摘要或使用省略号代替。
+- `comments --json`的`groups`已由程序安全转义并加入软换行，可直接按
+  `display.column_fields`放入Markdown表格；不得二次转义或再次插入
+  `<wbr>`。未经展示标记处理的原文读取`archive.path`。
+- 五列按`comments --json`返回的`display.columns`自适应：序号、时间、
+  用户和状态使用紧凑宽度，评论列作为唯一主伸缩列。时间分行、HTML
+  转义和`<wbr>`均由程序完成；实际换行由手机或桌面窗口宽度决定。
 - 无标题统一显示“无标题”。
 - 已删除、已跳过、已回复和发送失败必须明确标注。
 - 评论列表默认固定使用 `序号、时间、用户、评论、状态`，并保持这一顺序。
@@ -131,6 +138,7 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 │   └── drafts.json
 └── post/
     └── note.json
+.cache/comments.json
 ```
 
 文件用途：
@@ -141,6 +149,7 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 | `reply_map.json` | AI 生成并可继续修改的回复映射 |
 | `drafts.json` | 已组装、待预览或待发送的回复草稿 |
 | `post/note.json` | 待预览或待发布的笔记 |
+| `.cache/comments.json` | 累计保存`comments`已读取的完整评论正文 |
 
 查询某篇笔记的固定路径和文件状态：
 
@@ -284,6 +293,7 @@ CACHE_TTL_MINUTES = 30
 | `BATCH_REPLY_PAUSE_EVERY` | 大批量回复每发送多少条主动休息一次 |
 | `BATCH_REPLY_PAUSE_SECONDS` | 每次主动休息的秒数 |
 | `CACHE_TTL_MINUTES` | 评论缓存有效时间 |
+| `COMMENTS_FILE` | 完整评论正文累计归档的保存位置 |
 | `GENERIC_REPLIES` | 通用回复模式使用的话术 |
 | `SKIPPED_FILE` | 永久跳过列表的保存位置 |
 
@@ -338,6 +348,21 @@ python3 main.py comments --limit 50 --json
 
 `--limit`可省略，默认读取20条通知。
 结果按文章分组，并结合平台删除状态、本地发送终态和排除列表显示状态。
+所有AI必须按顶层`display.column_fields`直接展示`groups`，不得按字符数
+截断或改写为摘要，也不得重复转义或再次添加`<wbr>`。`groups`是安全的
+界面值，未经展示处理的原文位于`archive.path`。
+每次读取到的评论都会按`comment_id`合并到权限为0600的
+`.cache/comments.json`，保留完整正文，不做长度截断。`--json`返回的
+`archive.path`是该固定归档路径。`content_untruncated_locally=true`且
+`content_complete_scope=notification_payload`表示通知接口已经返回的正文
+没有被程序截断；`platform_tree_verified=false`表示它不是完整评论树核验
+结果，也不等于本次超出`--limit`读取了全部历史通知。
+若`archive.ok=false`，本次`groups`仍然有效，但程序为保护历史数据没有
+覆盖损坏或格式错误的旧归档；按`warnings`报告问题，不要手工覆盖该文件。
+
+中文引号`“”`、`「」`和英文引号`""`均按平台原文保存。
+JSON文件中英文双引号显示为`\"`属于标准转义，解析JSON后会自动还原；
+归档原文不要再次转义或替换引号；用户表格则直接使用程序生成的`groups`。
 
 ### 4. 扫描可回复评论
 
@@ -759,6 +784,8 @@ python3 main.py skipped --clear
 - 查询命令的 JSON 使用紧凑编码，不输出格式化空白。
 - `articles --json` 不输出 `xsec_token`。
 - `scan --json` 只在终端返回摘要，评论正文保存在固定工作文件中。
+- `comments --json`把已读取评论的完整正文累计保存到
+  `.cache/comments.json`，长内容无需在多个AI之间重复粘贴。
 - 扫描文件移除 `inline_subs` 等内部重复结构。
 - `analyze --json` 默认只输出统计、热门评论和活跃用户。
 - 只有确实需要全部分析明细时才使用 `analyze --json --details`。

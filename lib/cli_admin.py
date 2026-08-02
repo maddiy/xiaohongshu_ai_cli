@@ -6,11 +6,12 @@ import os
 import shutil
 import sys
 
-from config import WORK_DIR
+from config import COMMENTS_FILE, WORK_DIR
 from . import poster
 from .analyzer import CommentAnalyzer
 from .cli_support import (
     call_for_output,
+    COMMENT_DISPLAY_RULES,
     compact_analysis,
     print_json,
     TERMINAL_SEND_STATUSES,
@@ -79,7 +80,7 @@ def cmd_skipped(args):
         print(
             f"{index:<4} {info.get('skipped_at',''):<20} "
             f"{info.get('reason',''):<14} {info.get('nickname',''):<16} "
-            f"{info.get('content','')[:40]}"
+            f"{info.get('content','')}"
         )
     print("\n💡 移除: python3 main.py skipped --remove <comment_id>")
     print("💡 清空: python3 main.py skipped --clear")
@@ -318,6 +319,26 @@ def cmd_ai_help(args):
                 "严格按columns和column_fields展示全部列，笔记ID对应note_id；"
                 "大列表按pagination.next_command读取缓存后续页，直到has_more=false"
             ),
+            "comment_list": (
+                "comments返回的groups已经安全转义、加入自适应软换行并移除"
+                "comment_id，可直接按display.column_fields展示；正文不得截断、"
+                "摘要或使用省略号，也不得二次转义或再次插入wbr。通知接口已返回"
+                "且程序未截断的原文累计原子写入archive.path"
+            ),
+            "comment_archive_completeness": {
+                "content_complete_scope": "notification_payload",
+                "content_untruncated_locally": True,
+                "platform_tree_verified": False,
+                "meaning": (
+                    "只保证comments读取到的通知正文未被本地截断；不代表"
+                    "超出limit读取了全部历史通知或核对了平台完整评论树"
+                ),
+                "failure_behavior": (
+                    "旧归档无法解析时不覆盖；groups仍返回且archive.ok=false，"
+                    "顶层warnings提示归档未更新"
+                ),
+            },
+            "comment_display": COMMENT_DISPLAY_RULES,
             "prepare_metadata": (
                 "scan_method明确实际扫描入口；verification_mode为"
                 "candidate_online_recheck或full_tree_scan，禁止据scope猜测"
@@ -442,6 +463,10 @@ def cmd_ai_help(args):
         },
         "storage": {
             "workflow": ".cache/workflows/<note_id>/{scan,reply_map,drafts}.json",
+            "comment_archive": (
+                ".cache/comments.json（0600，累计保存通知接口已返回且程序"
+                "未截断的原始正文；不代表完整评论树核验）"
+            ),
             "global_exclusions": ".cache/skipped.json",
             "sensitive_token_cache": ".cache/xsec_index.json（0600，禁止展示）",
             "notification_token_handoff": (
@@ -522,8 +547,10 @@ def cmd_ai_help(args):
             "view_comments": [
                 "python3 main.py comments --json",
                 "--limit可省略，默认20",
-                "按 columns 和 groups[].note_index 分组展示评论",
-                "面向用户的表格不得显示 comment_id",
+                "groups已预先安全转义并加入软换行；直接按display.column_fields展示",
+                "不得二次转义、再次插入wbr、截断、摘要或使用省略号",
+                "原始通知正文累计保存到archive.path；其完整性范围不是平台评论树",
+                "展示groups已移除comment_id，面向用户不得从归档补回该字段",
                 "查看流程到此结束，不运行 scan、drafts 或 send",
             ],
             "reply": [
@@ -573,7 +600,8 @@ def cmd_ai_help(args):
             ),
             "quote_error": (
                 "JSON错误来自字符串内未转义的英文半角双引号，不是中文引号"
-                "被解析器误判；中文弯引号“”和书名式引号「」可直接使用"
+                "被解析器误判；comments.json由程序用标准JSON生成，"
+                "英文引号会自动转义并在读取时还原，不得手工替换原评论"
             ),
             "captcha": (
                 "验证码不是保证等待冷却后即可恢复的普通暂时错误；"
@@ -627,8 +655,9 @@ def cmd_ai_help(args):
                 "duplicate_send_mapping，AI必须只保留一条send"
             ),
             "internal_comment_ids": (
-                "comment_id是机器内部主键，允许出现在紧凑JSON和映射文件，"
-                "但不得出现在面向用户的评论、草稿或流程追踪表格"
+                "comment_id是机器内部主键，允许出现在AI回复紧凑JSON、映射"
+                "和原始归档；comments展示groups已主动移除该字段。任何面向"
+                "用户的评论、草稿或流程追踪表格都不得显示comment_id"
             ),
             "reply_decision_quality": (
                 "纯辱骂或贴标签且无实质观点时默认skip；不得编造数据、来源"
@@ -700,10 +729,15 @@ def cmd_ai_help(args):
                 "楼中楼数据不完整、验证码或网络核验失败时硬停止",
                 "send失败默认写入skipped；sent/failed/archived不自动重试",
                 "评论ID和xsec_token不得显示给用户",
+                "评论列表和草稿的原评论必须完整显示，不得截断",
             ],
             "state": {
                 "directory": ".cache/workflows/<note_id>/",
                 "files": ["scan.json", "reply_map.json", "drafts.json"],
+                "comment_archive": (
+                    ".cache/comments.json（0600，通知载荷原文未被本地截断；"
+                    "不代表平台完整评论树）"
+                ),
                 "batch_fields": [
                     "batch_id", "revision", "preview_hash", "status",
                 ],
@@ -763,6 +797,10 @@ def cmd_paths(args):
         "note_id": args.note_id,
         "directory": paths["directory"],
         "files": files,
+        "comment_archive": {
+            "path": os.path.abspath(COMMENTS_FILE),
+            "exists": os.path.exists(COMMENTS_FILE),
+        },
         "workflow_state": workflow_state,
         "post_note": os.path.abspath(os.path.join(WORK_DIR, "post", "note.json")),
     })

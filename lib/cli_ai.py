@@ -224,7 +224,7 @@ def _duplicate_send_errors(candidates, reply_map):
             continue
         errors.append(
             "同一用户的相同评论只能保留一条send："
-            f"用户={nickname}，评论={content[:40]}，"
+            f"用户={nickname}，评论={content}，"
             f"comment_ids={','.join(unique_ids)}"
         )
     return errors
