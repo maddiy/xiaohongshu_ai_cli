@@ -143,6 +143,18 @@ class ProtocolTests(unittest.TestCase):
             payload["storage"]["notification_token_handoff"],
         )
         self.assertIn(
+            "AI编辑的JSON快照优先",
+            payload["storage"]["read_authority"]["reply_map.json"],
+        )
+        self.assertIn(
+            "SQLite优先",
+            payload["storage"]["read_authority"]["drafts.json"],
+        )
+        self.assertIn(
+            "对象键顺序无关",
+            payload["storage"]["canonical_hash"],
+        )
+        self.assertIn(
             "scan_via_notifications",
             payload["common_misunderstandings"]["notification_entrypoint"],
         )
@@ -249,6 +261,7 @@ class ProtocolTests(unittest.TestCase):
             "batch_id",
             payload["state"]["batch_fields"],
         )
+        self.assertIn("对象键顺序无关", payload["state"]["canonical_hash"])
         self.assertLess(len(output.getvalue().encode("utf-8")), 4000)
         self.assertNotIn("architecture", payload)
         self.assertEqual(

@@ -75,6 +75,29 @@ class AIReplyMappingTests(unittest.TestCase):
             cli_ai.preview_hash([{**base, "review": second_review}]),
         )
 
+    def test_preview_hash_ignores_nested_object_key_order(self):
+        first_review = _valid_review()
+        second_review = {
+            "boast_check": dict(reversed(list(
+                first_review["boast_check"].items()
+            ))),
+            "fact_check": dict(reversed(list(
+                first_review["fact_check"].items()
+            ))),
+            "logic": dict(reversed(list(first_review["logic"].items()))),
+        }
+        base = {
+            "comment_id": "c1",
+            "nickname": "用户",
+            "content": "评论",
+            "reply": "回复",
+            "action": "send",
+        }
+        self.assertEqual(
+            cli_ai.preview_hash([{**base, "review": first_review}]),
+            cli_ai.preview_hash([{**base, "review": second_review}]),
+        )
+
     def test_workflow_error_marks_captcha_as_user_action(self):
         payload = cli_ai._workflow_error(
             "draft",

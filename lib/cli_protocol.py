@@ -141,9 +141,11 @@ def cmd_ai_help(args):
             "lib/cli_ai_audit.py": "脱敏审计和发送尝试记录",
             "lib/cli_support.py": "存储、状态合并和精简输出",
             "lib/cli_comment_view.py": "评论表格安全转换和通知正文归档",
+            "lib/json_codec.py": "SQLite、JSON快照和预览指纹共用的规范化编码",
             "lib/state_db.py": "SQLite权威状态库、账号身份和旧JSON迁移",
-            "lib/state_io.py": "跨进程锁、SQLite读写和JSON兼容快照",
-            "lib/scanner.py": "最新评论/全量扫描编排",
+            "lib/state_io.py": "跨进程锁、显式状态读取策略和JSON兼容快照",
+            "lib/scanner.py": "全量扫描和扫描器组合入口",
+            "lib/scanner_notifications.py": "最新评论通知候选收集",
             "lib/scanner_online.py": "在线存在性、回复关系和楼中楼完整性核验",
             "lib/replier.py": "草稿生成、发送和失败排除",
             "lib/analyzer.py": "评论统计与摘要分析",
@@ -387,6 +389,16 @@ def cmd_ai_help(args):
             "workflow": (
                 ".cache/workflows/<note_id>/"
                 "{scan,reply_map,drafts,audit}.json（AI交换/兼容快照）"
+            ),
+            "read_authority": {
+                "reply_map.json": "ai_input：AI编辑的JSON快照优先并同步入SQLite",
+                "scan.json": "program_state：SQLite优先并自动恢复失配快照",
+                "drafts.json": "program_state：SQLite优先并自动恢复失配快照",
+                "audit.json": "program_state：SQLite优先并自动恢复失配快照",
+            },
+            "canonical_hash": (
+                "SQLite文档哈希和preview_hash共用递归规范化JSON编码；"
+                "对象键顺序无关，列表顺序保留"
             ),
             "workflow_audit": (
                 "audit.json（0600，最多500条命令事件；不含评论正文、"
@@ -719,7 +731,11 @@ def cmd_ai_help(args):
                     "scan.json", "reply_map.json", "drafts.json", "audit.json",
                 ],
                 "compatibility": (
-                    "上述JSON是AI交换入口或兼容快照；程序状态判断以SQLite为准"
+                    "reply_map是AI输入，JSON快照优先并同步SQLite；"
+                    "scan/drafts/audit是程序状态，SQLite优先并修复兼容快照"
+                ),
+                "canonical_hash": (
+                    "对象键顺序无关，列表顺序保留"
                 ),
                 "audit": (
                     "0600有界事件日志；paths --audit-limit按需内联，完整保留窗口读取"

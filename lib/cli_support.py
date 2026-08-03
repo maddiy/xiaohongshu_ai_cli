@@ -2,7 +2,6 @@
 
 import contextlib
 import datetime
-import hashlib
 import io
 import json
 import os
@@ -17,6 +16,7 @@ from .state_io import (
     StateLockTimeout,
 )
 from .xhs_client import XHSClient
+from .json_codec import json_digest
 from .cli_comment_view import (
     COMMENT_DISPLAY_RULES,
     build_comment_display_groups,
@@ -57,10 +57,7 @@ def preview_hash(items):
         "action": item.get("action", "send"),
         **({"review": item["review"]} if "review" in item else {}),
     } for item in items]
-    encoded = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return json_digest(payload)
 
 
 def print_json(data):

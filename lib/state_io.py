@@ -1,7 +1,6 @@
 """跨进程锁、SQLite权威状态和JSON兼容快照。"""
 
 import fcntl
-import hashlib
 import json
 import os
 import tempfile
@@ -9,6 +8,15 @@ import time
 from contextlib import contextmanager
 
 from .state_db import state_db, state_key_for_path
+from .json_codec import json_digest
+
+
+WORKFLOW_STATE_READ_POLICIES = {
+    "scan.json": "program_state",
+    "reply_map.json": "ai_input",
+    "drafts.json": "program_state",
+    "audit.json": "program_state",
+}
 
 
 class StateLockTimeout(RuntimeError):
@@ -91,10 +99,7 @@ def read_json_state(path, default=None, prefer_snapshot=False):
     if key and prefer_snapshot and os.path.exists(path):
         with open(path, encoding="utf-8") as file:
             value = json.load(file)
-        encoded = json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        if hashlib.sha256(encoded).hexdigest() != state_db().document_hash(key):
+        if json_digest(value) != state_db().document_hash(key):
             state_db().put_document(key, value)
         return value
     if key:
@@ -108,6 +113,41 @@ def read_json_state(path, default=None, prefer_snapshot=False):
             state_db().put_document(key, value)
         return value
     return default
+
+
+def read_workflow_state(path, default=None, role=None):
+    """按文件职责选择权威来源，并修复程序状态的失配兼容快照。
+
+    ai_input由AI编辑的JSON快照优先；program_state以SQLite为准，若快照
+    缺失、损坏或语义不同，则用SQLite值恢复快照。
+    """
+    path = os.path.abspath(path)
+    role = role or WORKFLOW_STATE_READ_POLICIES.get(
+        os.path.basename(path), "program_state"
+    )
+    if role not in {"ai_input", "program_state"}:
+        raise ValueError(f"未知工作流状态读取角色: {role}")
+    value = read_json_state(
+        path,
+        default=default,
+        prefer_snapshot=role == "ai_input",
+    )
+    key = state_key_for_path(path)
+    if role != "program_state" or not key or value is None:
+        return value
+
+    snapshot_matches = False
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as file:
+                snapshot_matches = json_digest(json.load(file)) == json_digest(
+                    value
+                )
+        except (OSError, json.JSONDecodeError):
+            snapshot_matches = False
+    if not snapshot_matches:
+        _write_json_snapshot(value, path, mode=0o600, indent=2)
+    return value
 
 
 def json_state_exists(path):

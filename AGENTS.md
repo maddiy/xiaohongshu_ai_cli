@@ -16,7 +16,7 @@ python3 main.py ai-help --summary
 JSON校验和全部测试，成功时只输出紧凑摘要。
 
 - 应用版本：`python3 main.py --version`
-- 当前发布版本为`5.1.0`，AI输出协议为schema`9`；运行时以
+- 当前发布版本为`5.2.0`，AI输出协议为schema`10`；运行时以
   `ai-help --summary`为唯一权威来源。
 - 必须检查`ai-help --summary.release_consistency`：文档或隐私检查失败时停止；
   `repository.status`为`working_tree_not_published`、`working_tree_dirty`或
@@ -252,6 +252,10 @@ python3 main.py ai-reply \
 当前AI交换快照保留。程序判断终态、身份、
 批次、排除列表、缓存和令牌时以SQLite为准；AI仍通过`paths.reply_map`写入
 合法JSON，`draft`会把该入口同步到SQLite。
+状态读取职责不可混用：`reply_map.json`是`ai_input`，AI编辑的JSON快照优先；
+`scan.json`、`drafts.json`和`audit.json`是`program_state`，SQLite优先并可
+自动恢复兼容快照。预览指纹与SQLite哈希使用同一套递归规范化JSON编码；
+对象键顺序不影响哈希，列表顺序仍影响哈希。
 `audit.json`为0600权限的有界命令审计，记录每次`ai-reply`的started及
 completed/failed事件、参数摘要、结果和错误，不保存评论正文、回复正文或
 认证凭据。使用`paths --note-id <ID> --audit-limit 20`读取最近20条；超过20条

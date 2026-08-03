@@ -49,7 +49,7 @@ def _draft(args, paths):
         })
         return
     try:
-        scan = _load_json(scan_path)
+        scan = _load_json(scan_path, role="program_state")
     except (OSError, json.JSONDecodeError) as error:
         print_json({
             "ok": False, "action": "draft",
@@ -91,7 +91,7 @@ def _draft(args, paths):
     reply_map_repaired = False
     quote_replacements = 0
     try:
-        reply_map = _load_json(reply_path)
+        reply_map = _load_json(reply_path, role="ai_input")
     except json.JSONDecodeError as error:
         try:
             reply_map, quote_replacements = (
@@ -216,7 +216,9 @@ def _draft(args, paths):
     existing_drafts = {}
     if json_state_exists(paths["drafts"]):
         try:
-            existing_drafts = _load_json(paths["drafts"])
+            existing_drafts = _load_json(
+                paths["drafts"], role="program_state"
+            )
             drafts = merge_draft_history(existing_drafts, drafts)
         except (OSError, json.JSONDecodeError):
             pass

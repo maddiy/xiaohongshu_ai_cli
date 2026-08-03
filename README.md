@@ -1,4 +1,4 @@
-# 小红书AI智能运营系统 v5.1.0
+# 小红书AI智能运营系统 v5.2.0
 
 - 系统名称：`小红书AI智能运营系统`
 
@@ -50,9 +50,11 @@
 | `lib/cli_ai_audit.py` | 脱敏审计和发送尝试记录 |
 | `lib/cli_support.py` | 原子存储、状态合并和精简输出 |
 | `lib/cli_comment_view.py` | 评论表格安全转换和通知正文归档 |
+| `lib/json_codec.py` | SQLite文档、JSON快照和预览指纹共用的规范化JSON编码 |
 | `lib/state_db.py` | SQLite权威状态库、账号身份和旧JSON迁移 |
-| `lib/state_io.py` | 跨进程锁、SQLite读写和JSON兼容快照 |
-| `lib/scanner.py` | 最新通知和全量评论扫描编排 |
+| `lib/state_io.py` | 跨进程锁、显式状态读取策略和JSON兼容快照 |
+| `lib/scanner.py` | 全量评论扫描和扫描器组合入口 |
+| `lib/scanner_notifications.py` | 最新评论通知候选收集 |
 | `lib/scanner_online.py` | 在线回复关系、存在性和楼中楼完整性核验 |
 | `lib/replier.py` | 草稿生成、发送和失败排除 |
 | `lib/analyzer.py` | 评论统计与摘要分析 |
@@ -71,7 +73,7 @@
 | `pyproject.toml` | 项目元数据和固定依赖声明 |
 | `requirements.txt` | 已验证的`xiaohongshu-cli`安装版本 |
 
-当前共有14个子命令，没有快捷别名。`schema_version: 9` 表示 AI 输出协议
+当前共有14个子命令，没有快捷别名。`schema_version: 10` 表示 AI 输出协议
 版本，应用版本单独由 `python3 main.py --version` 查看。
 
 拆分后的公共入口保持不变：业务代码继续从`lib.xhs_client`导入
@@ -175,6 +177,10 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 `state.sqlite3`是程序判断身份、终态、批次、排除列表、缓存和令牌的唯一权威
 状态源。上面的JSON文件继续保留，是为了让AI方便写入`reply_map.json`、读取
 完整结果以及兼容旧脚本；除AI写入入口外，它们只是由程序刷新的兼容快照。
+读取职责是显式固定的：`reply_map.json`属于`ai_input`，以AI编辑的JSON快照
+为准并在`draft`时同步进SQLite；`scan.json`、`drafts.json`和`audit.json`
+属于`program_state`，始终以SQLite为准，快照缺失、损坏或内容不一致时由
+程序自动恢复，不能依靠某次调用传入的布尔参数临时决定权威来源。
 首次运行`doctor`会幂等导入旧`.cache/**/*.json`；只有SQLite内容哈希与迁移
 源文件完全一致后才删除已导入的历史JSON。程序当前生成、没有迁移记录的AI
 交换快照继续保留，也不会覆盖已经进入SQLite的新状态。
@@ -190,6 +196,10 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 | `audit.json` | 命令审计兼容快照；不保存评论/回复正文或凭据 |
 | `post/note.json` | 待预览或待发布的笔记 |
 | `.cache/comments.json` | 累计保存`comments`已读取的完整评论正文 |
+
+SQLite文档哈希与`preview_hash`共用递归规范化JSON编码：对象键排序、列表
+顺序保留。因而同一`review`对象仅键顺序变化不会让确认指纹失效，而评论、
+草稿或来源列表的顺序变化仍会产生新的指纹。
 
 查询某篇笔记的固定路径和文件状态：
 

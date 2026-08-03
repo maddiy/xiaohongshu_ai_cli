@@ -17,7 +17,7 @@ description: >
 ## 基本规则
 
 1. 在项目根目录运行命令，首先执行 `python3 main.py doctor --json` 检查环境。
-   当前发布为`5.1.0`、AI协议schema为`9`；以`ai-help --summary`运行时输出为准。
+   当前发布为`5.2.0`、AI协议schema为`10`；以`ai-help --summary`运行时输出为准。
 2. 查询、扫描和预览等只读操作可以直接执行。
 3. 发送回复或发布笔记前必须先预览。
 4. 除非用户明确要求自动发送，否则先展示草稿并等待确认。
@@ -88,6 +88,10 @@ python3 main.py paths --note-id <note_id>
 - 只有用户要求保留多个版本时，才创建额外文件。
 - `.cache` 已被 Git 忽略，不提交账号工作数据。
 - 发送状态会逐条写回 `drafts.json`；先读取 `send_status`，不得重复发送已标记为 `sent` 的项目。
+- 状态来源按职责固定：`reply_map.json`以AI编辑快照为准并同步入SQLite；
+  `scan.json`、`drafts.json`和`audit.json`以SQLite为准，程序自动修复失配快照。
+- `preview_hash`和SQLite文档哈希共用规范化JSON编码；对象键顺序无关，列表
+  顺序仍参与指纹。
 - 打印执行流程时先运行`paths --note-id <ID> --audit-limit 20`，先按
   `workflow_id`选择同一轮prepare、draft重试和send，再按相同`command_id`
   配对审计事件。新prepare生成新编号；旧事件无编号时不得跨prepare拼接。

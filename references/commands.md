@@ -4,7 +4,7 @@
 
 AI首次进入项目时优先读取根目录`AGENTS.md`，无需通读本文档。
 
-当前应用版本为 `5.1.0`，AI协议版本为`9`，共有14个子命令，不提供快捷别名：
+当前应用版本为 `5.2.0`，AI协议版本为`10`，共有14个子命令，不提供快捷别名：
 
 ```bash
 python3 main.py --version
@@ -28,6 +28,10 @@ python3 main.py --version
 快照。首次运行`doctor`会幂等导入旧JSON，并在SQLite哈希核对成功后删除
 历史迁移源；当前AI交换快照保留。公开仓库不再配置具体用户ID，
 当前账号由`xhs whoami --json`自动识别并仅保存到SQLite。
+`reply_map.json`是唯一由AI编辑、以JSON快照优先的`ai_input`；`scan.json`、
+`drafts.json`和`audit.json`都是以SQLite优先的`program_state`。程序使用统一
+的递归规范化JSON编码比较两种存储并计算`preview_hash`，不会因嵌套对象键
+顺序变化产生错误的`stale_preview`。
 
 查看路径和文件状态：
 

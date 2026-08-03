@@ -1,7 +1,6 @@
 """SQLite 权威状态库；使用 JSON 文档值兼容现有业务数据结构。"""
 
 import datetime
-import hashlib
 import json
 import os
 import sqlite3
@@ -10,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 from config import CACHE_DIR, STATE_DB_FILE
+from .json_codec import canonical_json, json_digest
 
 
 DB_SCHEMA_VERSION = 1
@@ -21,13 +21,11 @@ def _timestamp():
 
 
 def _canonical_json(value):
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    return canonical_json(value)
 
 
 def _payload_hash(value):
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    return json_digest(value)
 
 
 def state_key_for_path(path, cache_root=CACHE_DIR):
@@ -118,7 +116,7 @@ class StateDB:
 
     def put_document(self, key, value):
         payload = _canonical_json(value)
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        digest = json_digest(value)
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(

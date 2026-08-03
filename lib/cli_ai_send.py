@@ -42,7 +42,7 @@ def _send(args, paths):
         })
         return
     try:
-        drafts = _load_json(paths["drafts"])
+        drafts = _load_json(paths["drafts"], role="program_state")
     except (OSError, json.JSONDecodeError) as error:
         print_json({
             "ok": False, "action": "send",

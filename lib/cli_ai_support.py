@@ -4,7 +4,7 @@ import json
 import os
 import re
 
-from .state_io import read_json_state
+from .state_io import read_workflow_state
 from .cli_support import NON_RESEND_STATUSES, write_json
 
 
@@ -113,11 +113,8 @@ def _workflow_error(action, error, prefix="", paths=None):
     return payload
 
 
-def _load_json(path):
-    return read_json_state(
-        path,
-        prefer_snapshot=os.path.basename(path) == "reply_map.json",
-    )
+def _load_json(path, role=None):
+    return read_workflow_state(path, role=role)
 
 
 def _unescaped_quote_positions(value):
@@ -438,4 +435,3 @@ def _duplicate_send_errors(candidates, reply_map):
             f"comment_ids={','.join(unique_ids)}"
         )
     return errors
-

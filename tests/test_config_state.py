@@ -79,6 +79,50 @@ class ConfigStateTests(unittest.TestCase):
             )
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
+    def test_program_state_repairs_divergent_snapshot_from_sqlite(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "drafts.json")
+            database = StateDB(os.path.join(temp_dir, "state.sqlite3"))
+            canonical = {
+                "drafts": [{
+                    "comment_id": "c1",
+                    "review": {"logic": {"verdict": "sound", "reason": "成立"}},
+                }],
+            }
+            with patch("lib.state_io.state_db", return_value=database), patch(
+                "lib.state_io.state_key_for_path",
+                return_value="workflows/n1/drafts.json",
+            ):
+                atomic_write_json(canonical, path, indent=2)
+                with open(path, "w", encoding="utf-8") as file:
+                    json.dump({"drafts": []}, file)
+                loaded = read_workflow_state(path, role="program_state")
+                self.assertEqual(loaded, canonical)
+                self.assertEqual(
+                    cli_ai.preview_hash(loaded["drafts"]),
+                    cli_ai.preview_hash(canonical["drafts"]),
+                )
+                with open(path, encoding="utf-8") as file:
+                    self.assertEqual(json.load(file), canonical)
+
+    def test_ai_input_snapshot_updates_sqlite(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "reply_map.json")
+            database = StateDB(os.path.join(temp_dir, "state.sqlite3"))
+            database.put_document("workflows/n1/reply_map.json", {"old": 1})
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump({"new": 2}, file)
+            with patch("lib.state_io.state_db", return_value=database), patch(
+                "lib.state_io.state_key_for_path",
+                return_value="workflows/n1/reply_map.json",
+            ):
+                loaded = read_workflow_state(path, role="ai_input")
+            self.assertEqual(loaded, {"new": 2})
+            self.assertEqual(
+                database.get_document("workflows/n1/reply_map.json"),
+                {"new": 2},
+            )
+
     def test_sqlite_migrates_legacy_json_without_overwriting_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             legacy = os.path.join(temp_dir, "comments.json")

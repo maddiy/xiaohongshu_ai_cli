@@ -27,7 +27,7 @@ def _clear_active_batch(drafts_path):
     if not json_state_exists(drafts_path):
         return
     try:
-        drafts = _load_json(drafts_path)
+        drafts = _load_json(drafts_path, role="program_state")
     except (OSError, json.JSONDecodeError):
         return
     if isinstance(drafts, dict) and drafts.get("active_comment_ids") != []:
