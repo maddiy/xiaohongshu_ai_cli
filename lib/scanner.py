@@ -3,15 +3,25 @@
 负责：发现文章 → 扫描评论和楼中楼 → 过滤已回复 → 输出未回复列表
 """
 import time
-from config import AUTHOR_USER_ID, READ_PAGE_DELAY
+from config import READ_PAGE_DELAY
 from .xhs_client import XHSClient
 
 
 class CommentScanner:
     """扫描笔记中所有未回复的评论（含楼中楼）"""
 
-    def __init__(self, client: XHSClient = None):
+    def __init__(self, client: XHSClient = None, author_user_id: str = ""):
         self.client = client or XHSClient()
+        self._author_user_id = str(author_user_id or "")
+
+    @property
+    def author_user_id(self):
+        if not self._author_user_id:
+            value = self.client.get_author_user_id()
+            if not isinstance(value, str) or not value:
+                raise RuntimeError("无法自动识别当前小红书账号ID")
+            self._author_user_id = value
+        return self._author_user_id
 
     # ---------- 笔记发现 ----------
     def list_notes_with_comments(self, max_pages: int = None):
@@ -24,16 +34,21 @@ class CommentScanner:
         return [n for n in notes if n["comments_count"] > 0]
 
     # ---------- 解析辅助 ----------
-    @staticmethod
-    def _is_author(comment: dict) -> bool:
-        return comment.get("user_info", {}).get("user_id", "") == AUTHOR_USER_ID
+    def _is_author(self, comment: dict) -> bool:
+        return (
+            comment.get("user_info", {}).get("user_id", "")
+            == self.author_user_id
+        )
 
-    @staticmethod
-    def _author_reply_targets(sub_comments: list, parent_id: str = "") -> set:
+    def _author_reply_targets(self, sub_comments: list,
+                              parent_id: str = "") -> set:
         """返回作者明确回复到的评论 ID；旧数据缺少目标时视为回复一级评论。"""
         targets = set()
         for sub in sub_comments:
-            if sub.get("user_info", {}).get("user_id", "") != AUTHOR_USER_ID:
+            if (
+                sub.get("user_info", {}).get("user_id", "")
+                != self.author_user_id
+            ):
                 continue
             target_id = sub.get("target_comment", {}).get("id", "")
             if target_id:
@@ -42,18 +57,16 @@ class CommentScanner:
                 targets.add(parent_id)
         return targets
 
-    @classmethod
-    def _has_author_reply(cls, sub_comments: list,
+    def _has_author_reply(self, sub_comments: list,
                           target_id: str = "") -> bool:
         """兼容旧调用；提供 target_id 时只判断作者是否回复了该评论。"""
         if target_id:
-            return target_id in cls._author_reply_targets(
+            return target_id in self._author_reply_targets(
                 sub_comments, target_id
             )
-        return bool(cls._author_reply_targets(sub_comments))
+        return bool(self._author_reply_targets(sub_comments))
 
-    @staticmethod
-    def _online_reply_index(comments: list) -> tuple:
+    def _online_reply_index(self, comments: list) -> tuple:
         """
         从平台实时评论树建立"存在的评论"和"作者已直接回复的评论"索引。
 
@@ -70,7 +83,10 @@ class CommentScanner:
                 sub_id = sub.get("id", "")
                 if sub_id:
                     existing_ids.add(sub_id)
-                if sub.get("user_info", {}).get("user_id", "") != AUTHOR_USER_ID:
+                if (
+                    sub.get("user_info", {}).get("user_id", "")
+                    != self.author_user_id
+                ):
                     continue
                 target_id = sub.get("target_comment", {}).get("id", "")
                 if target_id:
@@ -290,15 +306,17 @@ class CommentScanner:
                 eligible.append(candidate)
         return eligible, excluded
 
-    @staticmethod
-    def _extract_non_author_subs(sub_comments: list, parent_id: str,
+    def _extract_non_author_subs(self, sub_comments: list, parent_id: str,
                                  parent_nick: str, skipped_ids: set = None,
                                  replied_ids: set = None) -> list:
         """提取尚未被作者直接回复的非作者楼中楼评论。"""
         result = []
         replied_ids = replied_ids or set()
         for sc in sub_comments:
-            if sc.get("user_info", {}).get("user_id", "") != AUTHOR_USER_ID:
+            if (
+                sc.get("user_info", {}).get("user_id", "")
+                != self.author_user_id
+            ):
                 if (
                     (skipped_ids and sc["id"] in skipped_ids)
                     or sc["id"] in replied_ids

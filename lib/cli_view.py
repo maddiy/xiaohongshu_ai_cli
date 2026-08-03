@@ -16,6 +16,7 @@ from .cli_support import (
     write_json,
 )
 from .xhs_client import XHSClient
+from .state_io import read_json_state
 
 
 ARTICLE_COLUMNS = ["序号", "发布时间", "评论数", "标题", "笔记ID"]
@@ -53,8 +54,7 @@ def cmd_articles(args):
         return
     try:
         if use_cache:
-            with open(output_path, encoding="utf-8") as file:
-                cached = json.load(file)
+            cached = read_json_state(output_path)
             articles = [{
                 "index": item.get("index", index),
                 "note_id": item.get("note_id") or item.get("id", ""),

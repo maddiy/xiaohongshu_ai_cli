@@ -30,40 +30,40 @@ COMMAND_EFFECTS = {
     "articles": {
         "platform": "读取",
         "local": (
-            "可能更新 .cache/xsec_index.json 敏感令牌索引；"
-            "大列表写入 .cache/articles.json 供分页读取"
+            "可能更新SQLite敏感令牌索引；大列表写入SQLite并刷新"
+            ".cache/articles.json兼容快照供分页读取"
         ),
         "output": "终端文本；--json 时为单一 JSON",
     },
     "comments": {
         "platform": "读取",
         "local": (
-            "读取本地终态和排除列表；累计写入"
-            ".cache/comments.json，保留通知接口已返回且程序未截断的原文"
+            "读取SQLite终态和排除列表；累计写入SQLite并刷新"
+            ".cache/comments.json兼容快照，保留完整通知正文"
         ),
         "output": "终端文本；--json 时为单一 JSON",
     },
     "scan": {
         "platform": "读取",
-        "local": "写入 scan.json，并可能更新评论缓存和令牌索引",
+        "local": "写入SQLite并刷新scan.json兼容快照；可能更新缓存和令牌索引",
         "output": "终端文本；--json 时为单一 JSON 摘要",
     },
     "drafts": {
         "platform": "读取并在线核验",
-        "local": "写入 drafts.json，并可能更新敏感令牌索引",
+        "local": "写入SQLite并刷新drafts.json兼容快照；可能更新敏感令牌索引",
         "output": "终端文本，可能进入逐条输入",
     },
     "send": {
         "platform": "发送回复",
         "local": (
-            "逐条更新 drafts.json；失败时更新 skipped.json；"
+            "逐条更新SQLite并刷新drafts/skipped兼容快照；"
             "在线核验可能更新敏感令牌索引"
         ),
         "output": "终端文本",
     },
     "reply": {
         "platform": "读取、在线核验并发送回复",
-        "local": "失败或归档时更新 skipped.json，并可能更新敏感令牌索引",
+        "local": "失败或归档时更新SQLite排除状态，并可能更新敏感令牌索引",
         "output": "终端文本，smart 策略会逐条输入",
     },
     "post": {

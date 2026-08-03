@@ -9,8 +9,14 @@ import json
 import os
 import uuid
 
-from config import COMMENTS_FILE, WORK_DIR
-from .state_io import atomic_write_json, file_lock, StateLockTimeout
+from config import COMMENTS_FILE, STATE_DB_FILE, WORK_DIR
+from .state_io import (
+    atomic_write_json,
+    file_lock,
+    json_state_exists,
+    read_json_state,
+    StateLockTimeout,
+)
 from .xhs_client import XHSClient
 
 
@@ -203,7 +209,7 @@ def preview_hash(items):
         **({"review": item["review"]} if "review" in item else {}),
     } for item in items]
     encoded = json.dumps(
-        payload, ensure_ascii=False, separators=(",", ":")
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -236,10 +242,9 @@ def workflow_paths(note_id):
 
 def current_workflow_audit_id(path):
     """读取当前审计工作流编号；旧审计没有该字段时返回空字符串。"""
-    if not os.path.exists(path):
+    if not json_state_exists(path):
         return ""
-    with open(path, encoding="utf-8") as file:
-        audit = json.load(file)
+    audit = read_json_state(path)
     if not isinstance(audit, dict):
         raise RuntimeError("工作流审计文件结构无效")
     return str(audit.get("current_workflow_id", "") or "")
@@ -258,10 +263,9 @@ def append_workflow_audit(
             "retained_limit": WORKFLOW_AUDIT_LIMIT,
             "events": [],
         }
-        if os.path.exists(path):
+        if json_state_exists(path):
             try:
-                with open(path, encoding="utf-8") as file:
-                    existing = json.load(file)
+                existing = read_json_state(path)
             except (OSError, json.JSONDecodeError) as error:
                 raise RuntimeError(
                     f"工作流审计文件无法解析，已保留原文件: {error}"
@@ -291,13 +295,12 @@ def load_local_comment_states(note_id):
     """读取指定笔记的本地终态。"""
     states = {}
     draft_path = workflow_paths(note_id)["drafts"]
-    if os.path.exists(draft_path):
+    if json_state_exists(draft_path):
         try:
-            with open(draft_path, encoding="utf-8") as file:
-                for item in json.load(file).get("drafts", []):
-                    comment_id = item.get("comment_id", "")
-                    if comment_id and item.get("send_status"):
-                        states[comment_id] = item["send_status"]
+            for item in read_json_state(draft_path).get("drafts", []):
+                comment_id = item.get("comment_id", "")
+                if comment_id and item.get("send_status"):
+                    states[comment_id] = item["send_status"]
         except (OSError, json.JSONDecodeError):
             pass
     return states
@@ -369,10 +372,9 @@ def save_comment_archive(groups, path=None):
     path = os.path.abspath(path or COMMENTS_FILE)
     with file_lock(f"{path}.lock"):
         existing = {}
-        if os.path.exists(path):
+        if json_state_exists(path):
             try:
-                with open(path, encoding="utf-8") as file:
-                    existing = json.load(file)
+                existing = read_json_state(path)
             except (OSError, json.JSONDecodeError) as error:
                 raise RuntimeError(
                     f"评论归档无法解析，已停止写入以保护历史数据: {path}"
@@ -479,6 +481,10 @@ def save_comment_archive(groups, path=None):
     return {
         "ok": True,
         "path": path,
+        "storage_backend": "sqlite",
+        "database": os.path.abspath(STATE_DB_FILE),
+        "state_key": "comments.json",
+        "path_role": "JSON兼容快照",
         "notes": archive["notes"],
         "comments": archive["comments"],
         "content_complete": True,

@@ -1,7 +1,4 @@
-"""
-配置文件 - 修改此文件以适配你的账号和偏好
-运行 xhs whoami 可查看你的 user_id
-"""
+"""系统配置；账号身份由程序首次运行时自动识别并保存。"""
 import os
 
 # 项目根目录。所有本地状态都基于该绝对路径，避免AI从其他工作目录运行时
@@ -11,11 +8,8 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 # 唯一正式名称（APP_NAME 保留为旧代码兼容别名）
 SYSTEM_NAME = "小红书AI智能运营系统"
 APP_NAME = SYSTEM_NAME
-APP_VERSION = "4.3.0"
-AI_SCHEMA_VERSION = "7"
-
-# 作者信息
-AUTHOR_USER_ID = "6321167e0000000023038acd"  # 运行 xhs whoami 查看
+APP_VERSION = "5.0.0"
+AI_SCHEMA_VERSION = "8"
 
 # 登录时默认读取的浏览器 Cookie
 LOGIN_COOKIE_SOURCE = "firefox"
@@ -51,8 +45,10 @@ GENERIC_REPLIES = [
 
 # 缓存配置
 CACHE_DIR = os.path.join(PROJECT_ROOT, ".cache")
+STATE_DB_FILE = os.path.join(CACHE_DIR, "state.sqlite3")
 CACHE_TTL_MINUTES = 30         # 缓存有效期（分钟），超时后自动刷新
 WORK_DIR = os.path.join(CACHE_DIR, "workflows")  # AI 之间共享的临时工作目录
+# 以下JSON路径是兼容快照/AI交换入口；权威状态保存在STATE_DB_FILE。
 # 累计保存comments从通知接口读取到且程序未截断的原始正文。
 COMMENTS_FILE = os.path.join(CACHE_DIR, "comments.json")
 

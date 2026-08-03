@@ -4,7 +4,7 @@
 
 AI首次进入项目时优先读取根目录`AGENTS.md`，无需通读本文档。
 
-当前应用版本为 `4.3.0`，AI协议版本为`7`，共有14个子命令，不提供快捷别名：
+当前应用版本为 `5.0.0`，AI协议版本为`8`，共有14个子命令，不提供快捷别名：
 
 ```bash
 python3 main.py --version
@@ -15,6 +15,7 @@ python3 main.py --version
 每篇笔记使用唯一目录：
 
 ```text
+.cache/state.sqlite3
 .cache/workflows/<笔记ID>/
 ├── scan.json
 ├── reply_map.json
@@ -22,6 +23,10 @@ python3 main.py --version
 └── audit.json
 .cache/comments.json
 ```
+
+`.cache/state.sqlite3`是0600权限的权威状态库；JSON路径是AI交换入口或兼容
+快照。首次运行`doctor`会幂等导入旧JSON，公开仓库不再配置具体用户ID，
+当前账号由`xhs whoami --json`自动识别并仅保存到SQLite。
 
 查看路径和文件状态：
 
@@ -51,7 +56,16 @@ python3 main.py doctor
 python3 main.py doctor --json
 ```
 
-检查 Python、`xhs` 命令、作者用户 ID、Cookie 来源和缓存目录。
+检查Python、`xhs`命令、自动识别的账号身份、Cookie来源和SQLite状态库。
+自动识别不可用时可临时设置`XHS_AUTHOR_USER_ID`环境变量，禁止把值写入仓库。
+此外还返回：
+
+- `documentation_versions`：README、AGENTS、SKILL、命令参考与运行时版本一致；
+- `public_identity_privacy`：公开源码没有固定账号ID；
+- `repository_release`：当前版本和隐私修复已经进入Git `HEAD`。
+
+`repository_release.value=working_tree_not_published`表示修改仍停留在工作区，
+GitHub显示旧版本不是缓存；需要提交并推送后才能更新远端。
 
 ## `login`：登录账号
 
@@ -471,6 +485,11 @@ client.get_skipped_ids()
 client.add_skipped(comment_id, nickname, content, reason="manual", note_id=note_id)
 client.remove_skipped(comment_id)
 ```
+
+`XHSClient`的实现已按内容、评论和状态拆分，但上面的导入路径是唯一稳定
+公共入口；不要直接导入`xhs_client_content`、`xhs_client_comments`或
+`xhs_client_state`中的Mixin。AI回复命令同理，只从`lib.cli_ai`使用
+`cmd_ai_reply`，阶段模块属于内部实现。
 
 `reply` 返回：
 

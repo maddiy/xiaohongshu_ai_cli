@@ -3,10 +3,12 @@
 import ast
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 
-from config import COMMENTS_FILE, WORK_DIR
+from config import COMMENTS_FILE, STATE_DB_FILE, WORK_DIR
 from . import poster
 from .analyzer import CommentAnalyzer
 from .cli_support import (
@@ -19,6 +21,166 @@ from .cli_support import (
 )
 from .xhs_client import XHSClient
 from .cli_parser import COMMAND_NAMES, build_command_contract
+from .state_io import (
+    json_state_exists,
+    migrate_legacy_json,
+    read_json_state,
+)
+
+
+_FIXED_AUTHOR_ID_PATTERN = re.compile(
+    r"(?i)(?:AUTHOR_USER_ID|author_user_id|user_id)"
+    r"[^\n]{0,80}?[\"']([0-9a-f]{24})[\"']"
+)
+
+
+def _extract_release_values(config_source):
+    app_match = re.search(
+        r'^APP_VERSION\s*=\s*[\"\']([^\"\']+)[\"\']',
+        config_source,
+        flags=re.MULTILINE,
+    )
+    schema_match = re.search(
+        r'^AI_SCHEMA_VERSION\s*=\s*[\"\']([^\"\']+)[\"\']',
+        config_source,
+        flags=re.MULTILINE,
+    )
+    return (
+        app_match.group(1) if app_match else "",
+        schema_match.group(1) if schema_match else "",
+    )
+
+
+def _release_consistency(project_root):
+    """检查当前文档、公开账号信息和Git发布快照是否一致。"""
+    from config import AI_SCHEMA_VERSION, APP_VERSION
+
+    expectations = {
+        "README.md": (
+            f"# 小红书AI智能运营系统 v{APP_VERSION}",
+            f"schema_version: {AI_SCHEMA_VERSION}",
+        ),
+        "AGENTS.md": (
+            f"发布版本为`{APP_VERSION}`",
+            f"schema`{AI_SCHEMA_VERSION}`",
+        ),
+        "SKILL.md": (
+            f"发布为`{APP_VERSION}`",
+            f"schema为`{AI_SCHEMA_VERSION}`",
+        ),
+        "references/commands.md": (
+            f"应用版本为 `{APP_VERSION}`",
+            f"协议版本为`{AI_SCHEMA_VERSION}`",
+        ),
+    }
+    version_errors = []
+    identity_findings = []
+    public_files = []
+    for relative_path in expectations:
+        absolute = os.path.join(project_root, relative_path)
+        try:
+            with open(absolute, encoding="utf-8") as file:
+                source = file.read()
+        except OSError as error:
+            version_errors.append(f"{relative_path}: {error}")
+            continue
+        public_files.append((relative_path, source))
+        for expected in expectations[relative_path]:
+            if expected not in source:
+                version_errors.append(
+                    f"{relative_path}缺少当前声明: {expected}"
+                )
+
+    source_candidates = ["config.py", "main.py"]
+    lib_dir = os.path.join(project_root, "lib")
+    if os.path.isdir(lib_dir):
+        source_candidates.extend(
+            f"lib/{name}" for name in sorted(os.listdir(lib_dir))
+            if name.endswith(".py")
+        )
+    source_candidates.append("tests/test_compact_output.py")
+    for relative_path in source_candidates:
+        absolute = os.path.join(project_root, relative_path)
+        try:
+            with open(absolute, encoding="utf-8") as file:
+                source = file.read()
+        except OSError:
+            continue
+        public_files.append((relative_path, source))
+    for relative_path, source in public_files:
+        for match in _FIXED_AUTHOR_ID_PATTERN.finditer(source):
+            identity_findings.append({
+                "file": relative_path,
+                "line": source.count("\n", 0, match.start()) + 1,
+                "rule": "固定24位账号ID",
+            })
+    config_source = next(
+        (source for path, source in public_files if path == "config.py"), ""
+    )
+    if re.search(r"^AUTHOR_USER_ID\s*=", config_source, re.MULTILINE):
+        identity_findings.append({
+            "file": "config.py",
+            "line": 0,
+            "rule": "公开配置包含AUTHOR_USER_ID赋值",
+        })
+
+    repository = {
+        "available": False,
+        "ok": True,
+        "status": "not_git_checkout",
+    }
+    if os.path.isdir(os.path.join(project_root, ".git")):
+        result = subprocess.run(
+            ["git", "show", "HEAD:config.py"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            head_app, head_schema = _extract_release_values(result.stdout)
+            head_has_fixed_id = bool(
+                re.search(r"^AUTHOR_USER_ID\s*=", result.stdout, re.MULTILINE)
+                or _FIXED_AUTHOR_ID_PATTERN.search(result.stdout)
+            )
+            repository = {
+                "available": True,
+                "ok": (
+                    head_app == APP_VERSION
+                    and head_schema == AI_SCHEMA_VERSION
+                    and not head_has_fixed_id
+                ),
+                "status": "synced" if (
+                    head_app == APP_VERSION
+                    and head_schema == AI_SCHEMA_VERSION
+                    and not head_has_fixed_id
+                ) else "working_tree_not_published",
+                "head_app_version": head_app,
+                "head_schema_version": head_schema,
+                "head_contains_fixed_author_id": head_has_fixed_id,
+                "working_app_version": APP_VERSION,
+                "working_schema_version": AI_SCHEMA_VERSION,
+                "next": (
+                    "提交并推送当前修复后，GitHub才会显示新版本"
+                    if head_app != APP_VERSION
+                    or head_schema != AI_SCHEMA_VERSION
+                    or head_has_fixed_id else ""
+                ),
+            }
+    return {
+        "versions": {
+            "ok": not version_errors,
+            "app_version": APP_VERSION,
+            "schema_version": AI_SCHEMA_VERSION,
+            "errors": version_errors,
+        },
+        "public_identity": {
+            "ok": not identity_findings,
+            "findings": identity_findings,
+            "identity_source": "xhs whoami --json → 本地SQLite metadata",
+        },
+        "repository": repository,
+    }
 
 
 def _build_test_inventory(project_root, test_files):
@@ -141,15 +303,30 @@ def cmd_analyze(args):
 
 
 def cmd_doctor(args):
-    from config import AUTHOR_USER_ID, LOGIN_COOKIE_SOURCE
+    from config import LOGIN_COOKIE_SOURCE
 
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    release = _release_consistency(project_root)
+    migration = migrate_legacy_json()
     xhs_path = shutil.which("xhs") or ""
+    identity_error = ""
+    if not xhs_path:
+        author_user_id = ""
+        identity_error = "未安装xhs，无法自动识别账号"
+    else:
+        try:
+            author_user_id = XHSClient.get_author_user_id()
+        except (OSError, RuntimeError) as error:
+            author_user_id = ""
+            identity_error = str(error)
+
     checks = {
         "python": {"ok": True, "value": sys.version.split()[0]},
         "xhs": {"ok": bool(xhs_path), "value": xhs_path},
         "author_user_id": {
-            "ok": bool(AUTHOR_USER_ID and "你的小红书" not in AUTHOR_USER_ID),
-            "value": AUTHOR_USER_ID,
+            "ok": bool(author_user_id),
+            "value": "已自动识别" if author_user_id else identity_error,
+            "storage": STATE_DB_FILE,
         },
         "cookie_source": {
             "ok": bool(LOGIN_COOKIE_SOURCE), "value": LOGIN_COOKIE_SOURCE
@@ -157,6 +334,35 @@ def cmd_doctor(args):
         "cache_writable": {
             "ok": os.access(os.path.dirname(os.path.abspath(WORK_DIR)), os.W_OK),
             "value": os.path.abspath(WORK_DIR),
+        },
+        "sqlite_state": {
+            "ok": not migration["errors"],
+            "value": STATE_DB_FILE,
+            "legacy_imported": migration["imported"],
+            "legacy_skipped": migration["skipped"],
+            "migration_errors": migration["errors"],
+        },
+        "documentation_versions": {
+            "ok": release["versions"]["ok"],
+            "value": (
+                f"{release['versions']['app_version']} / schema "
+                f"{release['versions']['schema_version']}"
+            ),
+            "errors": release["versions"]["errors"],
+        },
+        "public_identity_privacy": {
+            "ok": release["public_identity"]["ok"],
+            "value": (
+                "未发现公开固定账号ID"
+                if release["public_identity"]["ok"]
+                else "发现公开固定账号ID"
+            ),
+            "findings": release["public_identity"]["findings"],
+        },
+        "repository_release": {
+            "ok": release["repository"]["ok"],
+            "value": release["repository"]["status"],
+            "details": release["repository"],
         },
     }
     ok = all(item["ok"] for item in checks.values())
@@ -206,6 +412,7 @@ def cmd_ai_help(args):
         os.path.join(project_root, "tests", "test_compact_output.py")
     ) else []
     test_inventory = _build_test_inventory(project_root, test_files)
+    release_consistency = _release_consistency(project_root)
     if getattr(args, "tests", False):
         print_json({
             "app_name": SYSTEM_NAME,
@@ -230,6 +437,7 @@ def cmd_ai_help(args):
         "system_name": SYSTEM_NAME,
         "app_version": APP_VERSION,
         "schema_version": AI_SCHEMA_VERSION,
+        "release_consistency": release_consistency,
         "command_count": len(COMMAND_NAMES),
         "commands": list(COMMAND_NAMES),
         "command_consistency": {
@@ -262,18 +470,28 @@ def cmd_ai_help(args):
         "architecture": {
             "AGENTS.md": "其他AI首先读取的最短执行协议",
             "main.py": "COMMAND_HANDLERS命令分发及传统回复工作流编排",
-            "config.py": "应用名称、账号、浏览器、延迟和工作目录配置",
+            "config.py": "应用名称、版本、浏览器、延迟和工作目录配置",
             "lib/cli_parser.py": "唯一命令清单和参数定义",
             "lib/cli_view.py": "登录、文章、评论查看",
             "lib/cli_admin.py": "管理、发布、分析和机器协议",
-            "lib/cli_ai.py": "AI专用prepare/draft/send工作流",
+            "lib/cli_ai.py": "AI回复兼容门面、审计调度和命令入口",
+            "lib/cli_ai_prepare.py": "候选准备、扫描和旧批次停用",
+            "lib/cli_ai_draft.py": "映射校验、在线复核和草稿生成",
+            "lib/cli_ai_send.py": "确认绑定、在线对账和回复发送",
+            "lib/cli_ai_support.py": "回复映射校验、展示转换和错误结构",
+            "lib/cli_ai_audit.py": "脱敏审计和发送尝试记录",
             "lib/cli_support.py": "存储、状态合并和精简输出",
-            "lib/state_io.py": "跨进程文件锁和原子JSON写入",
+            "lib/state_db.py": "SQLite权威状态库、账号身份和旧JSON迁移",
+            "lib/state_io.py": "跨进程锁、SQLite读写和JSON兼容快照",
             "lib/scanner.py": "最新评论/全量扫描和在线核验",
             "lib/replier.py": "草稿生成、发送和失败排除",
             "lib/analyzer.py": "评论统计与摘要分析",
             "lib/poster.py": "图文笔记校验、预览和发布",
-            "lib/xhs_client.py": "xhs CLI封装、缓存和令牌索引",
+            "lib/xhs_client.py": "XHSClient兼容门面、账号和回复接口",
+            "lib/xhs_client_content.py": "笔记、通知和私有令牌索引",
+            "lib/xhs_client_comments.py": "评论树、楼中楼和在线查询",
+            "lib/xhs_client_state.py": "评论缓存和排除状态",
+            "lib/xhs_client_proxy.py": "拆分模块访问兼容门面的延迟绑定层",
             "lib/xhs_comments_helper.py": "单会话评论分页和候选楼层补全加速层",
             "lib/xhs_reply_helper.py": "单会话批量回复与逐条结果回传加速层",
             "lib/xhs_subcomments_helper.py": "楼中楼xsec_token兼容层",
@@ -494,9 +712,17 @@ def cmd_ai_help(args):
             ),
         },
         "storage": {
+            "canonical": (
+                ".cache/state.sqlite3（0600，SQLite权威状态源；账号身份、"
+                "工作流、评论归档、排除列表、缓存和令牌索引统一存储）"
+            ),
+            "migration": (
+                "doctor首次运行幂等导入旧.cache/**/*.json；旧文件保留为"
+                "可恢复兼容快照，不再作为程序判断的权威来源"
+            ),
             "workflow": (
                 ".cache/workflows/<note_id>/"
-                "{scan,reply_map,drafts,audit}.json"
+                "{scan,reply_map,drafts,audit}.json（AI交换/兼容快照）"
             ),
             "workflow_audit": (
                 "audit.json（0600，最多500条命令事件；不含评论正文、"
@@ -512,8 +738,15 @@ def cmd_ai_help(args):
                 ".cache/comments.json（0600，累计保存通知接口已返回且程序"
                 "未截断的原始正文；不代表完整评论树核验）"
             ),
-            "global_exclusions": ".cache/skipped.json",
-            "sensitive_token_cache": ".cache/xsec_index.json（0600，禁止展示）",
+            "global_exclusions": "SQLite文档skipped.json；同名JSON为兼容快照",
+            "sensitive_token_cache": (
+                "SQLite文档xsec_index.json（数据库0600，禁止展示）；"
+                "同名JSON为兼容快照"
+            ),
+            "account_identity": (
+                "首次运行通过xhs whoami --json自动识别，保存到SQLite metadata；"
+                "公开仓库不含用户ID"
+            ),
             "notification_token_handoff": (
                 "通知中的xsec_token不写入scan.json，而是立即保存到0600"
                 "敏感索引，供后续draft/send接续"
@@ -754,6 +987,7 @@ def cmd_ai_help(args):
             "app_name": SYSTEM_NAME,
             "app_version": APP_VERSION,
             "schema_version": payload["schema_version"],
+            "release_consistency": payload["release_consistency"],
             "command_count": payload["command_count"],
             "commands": payload["commands"],
             "entrypoints": {
@@ -803,10 +1037,14 @@ def cmd_ai_help(args):
                 "明确事实真伪结论必须带可核对来源；个人经历不得武断判假",
             ],
             "state": {
+                "database": ".cache/state.sqlite3（0600，权威状态源）",
                 "directory": ".cache/workflows/<note_id>/",
                 "files": [
                     "scan.json", "reply_map.json", "drafts.json", "audit.json",
                 ],
+                "compatibility": (
+                    "上述JSON是AI交换入口或兼容快照；程序状态判断以SQLite为准"
+                ),
                 "audit": (
                     "0600有界事件日志；paths --audit-limit按需内联，完整保留窗口读取"
                     "workflow_audit.path"
@@ -818,7 +1056,10 @@ def cmd_ai_help(args):
                 "batch_fields": [
                     "batch_id", "revision", "preview_hash", "status",
                 ],
-                "sensitive_token": ".cache/xsec_index.json（0600）",
+                "sensitive_token": (
+                    "SQLite敏感令牌索引（数据库0600）；xsec_index.json仅为"
+                    "兼容快照"
+                ),
             },
             "error_actions": {
                 "workflow_busy": "等待当前进程结束后重试，不并行启动",
@@ -840,7 +1081,7 @@ def cmd_paths(args):
     paths = workflow_paths(args.note_id)
     audit_limit = max(0, min(int(getattr(args, "audit_limit", 0) or 0), 100))
     files = {
-        key: {"path": value, "exists": os.path.exists(value)}
+        key: {"path": value, "exists": json_state_exists(value)}
         for key, value in paths.items() if key != "directory"
     }
     workflow_state = {
@@ -858,10 +1099,9 @@ def cmd_paths(args):
         "events": [],
         "events_truncated": False,
     }
-    if os.path.exists(paths["drafts"]):
+    if json_state_exists(paths["drafts"]):
         try:
-            with open(paths["drafts"], encoding="utf-8") as file:
-                drafts = json.load(file)
+            drafts = read_json_state(paths["drafts"])
             if isinstance(drafts, dict):
                 active_ids = drafts.get("active_comment_ids", [])
                 workflow_state["active_count"] = (
@@ -882,11 +1122,10 @@ def cmd_paths(args):
         except (OSError, json.JSONDecodeError):
             workflow_state["state_error"] = "drafts.json无法解析"
     audit_path = workflow_audit["path"]
-    if os.path.exists(audit_path):
+    if json_state_exists(audit_path):
         workflow_audit["exists"] = True
         try:
-            with open(audit_path, encoding="utf-8") as file:
-                audit = json.load(file)
+            audit = read_json_state(audit_path)
             events = audit.get("events", []) if isinstance(audit, dict) else []
             if not isinstance(events, list):
                 raise ValueError("events不是数组")
@@ -904,11 +1143,17 @@ def cmd_paths(args):
     print_json({
         "ok": True,
         "note_id": args.note_id,
+        "state": {
+            "backend": "sqlite",
+            "database": os.path.abspath(STATE_DB_FILE),
+            "database_exists": os.path.exists(STATE_DB_FILE),
+            "json_role": "AI交换入口或兼容快照，SQLite为权威状态源",
+        },
         "directory": paths["directory"],
         "files": files,
         "comment_archive": {
             "path": os.path.abspath(COMMENTS_FILE),
-            "exists": os.path.exists(COMMENTS_FILE),
+            "exists": json_state_exists(COMMENTS_FILE),
         },
         "workflow_state": workflow_state,
         "workflow_audit": workflow_audit,

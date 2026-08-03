@@ -3,7 +3,7 @@
 小红书AI智能运营系统
 
 准确命令清单和 AI 调用协议请运行：python3 main.py ai-help
-依赖 xiaohongshu-cli；账号与浏览器配置位于 config.py。
+依赖 xiaohongshu-cli；浏览器配置位于config.py，账号身份首次运行自动识别。
 """
 
 import json
@@ -41,6 +41,7 @@ from lib.cli_admin import (
     cmd_skipped,
 )
 from lib.cli_ai import cmd_ai_reply
+from lib.state_io import json_state_exists, read_json_state
 
 
 def cmd_scan(args):
@@ -228,11 +229,10 @@ def cmd_drafts(args):
 
     # 加载未回复列表：from-scan（跳过重扫）或 from-batch（批量导入）或实时扫描
     if args.from_scan:
-        if not os.path.exists(args.from_scan):
+        if not json_state_exists(args.from_scan):
             print(f"❌ 文件不存在: {args.from_scan}")
             return
-        with open(args.from_scan) as f:
-            data = json.load(f)
+        data = read_json_state(args.from_scan)
         if not data.get("reply_status_verified", False) and not args.allow_unverified:
             print("❌ 扫描文件未确认评论回复状态，已停止生成草稿")
             print("💡 请重新运行 scan；仅在明确接受重复回复风险时使用 --allow-unverified")
@@ -309,11 +309,10 @@ def cmd_drafts(args):
 
     if args.batch:
         # 批量模式：从映射文件导入AI预写的回复
-        if not os.path.exists(args.batch):
+        if not json_state_exists(args.batch):
             print(f"❌ 映射文件不存在: {args.batch}")
             return
-        with open(args.batch) as f:
-            reply_map = json.load(f)
+        reply_map = read_json_state(args.batch, prefer_snapshot=True)
         print(f"📂 从批量映射读取: {len(reply_map)} 条回复映射")
         drafts = replier.generate_drafts_from_mapping(
             all_unreplied, reply_map,
@@ -330,10 +329,9 @@ def cmd_drafts(args):
 
     # 保存草稿文件
     draft_path = args.output or workflow_paths(args.note_id)["drafts"]
-    if os.path.exists(draft_path):
+    if json_state_exists(draft_path):
         try:
-            with open(draft_path, encoding="utf-8") as f:
-                existing_drafts = json.load(f)
+            existing_drafts = read_json_state(draft_path)
             drafts = merge_draft_history(existing_drafts, drafts)
             print(f"🔄 已合并固定草稿中的历史发送状态")
         except (OSError, json.JSONDecodeError):
@@ -349,13 +347,12 @@ def cmd_send(args):
         print("❌ 请指定草稿文件: --file <path>")
         return
 
-    if not os.path.exists(args.file):
+    if not json_state_exists(args.file):
         print(f"❌ 文件不存在: {args.file}")
         return
 
     try:
-        with open(args.file, encoding="utf-8") as file:
-            drafts = json.load(file)
+        drafts = read_json_state(args.file)
     except (OSError, json.JSONDecodeError) as error:
         print(f"❌ 无法读取草稿文件: {error}")
         return
@@ -458,8 +455,7 @@ def cmd_reply(args):
     scanner = CommentScanner()
 
     if args.from_file:
-        with open(args.from_file) as f:
-            data = json.load(f)
+        data = read_json_state(args.from_file)
         note_id = data.get("note_id", args.note_id or "")
         if not note_id:
             print("❌ 无法确定 note_id")

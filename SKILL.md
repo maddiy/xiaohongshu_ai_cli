@@ -17,6 +17,7 @@ description: >
 ## 基本规则
 
 1. 在项目根目录运行命令，首先执行 `python3 main.py doctor --json` 检查环境。
+   当前发布为`5.0.0`、AI协议schema为`8`；以`ai-help --summary`运行时输出为准。
 2. 查询、扫描和预览等只读操作可以直接执行。
 3. 发送回复或发布笔记前必须先预览。
 4. 除非用户明确要求自动发送，否则先展示草稿并等待确认。
@@ -40,12 +41,17 @@ description: >
 21. 同一 `comment_id` 已标记为 `sent`、`failed`、`archived`或`sending`时，不得重新生成或自动发送；`sending`必须先在线对账。
 22. 本地没有发送记录不等于平台没有回复；运行 `drafts` 时必须再次在线读取评论树，并按作者回复的 `target_comment.id` 核验一级评论和楼中楼。
 23. 在线核验失败、需要验证码或候选评论在平台不可见时，停止生成该评论的草稿，不得用本地状态推断为未回复。
+24. `.cache/state.sqlite3`是0600权限的权威状态库；JSON文件仅作为AI交换
+    入口或兼容快照。账号ID首次运行自动识别，禁止写入仓库配置。
+25. 读取`ai-help --summary.release_consistency`；版本、公开账号隐私或Git发布
+    快照不一致时必须明确报告。`working_tree_not_published`不是GitHub缓存。
 
 ## 固定工作目录
 
 每篇笔记使用唯一目录：
 
 ```text
+.cache/state.sqlite3
 .cache/workflows/<笔记ID>/
 ├── scan.json
 ├── reply_map.json
@@ -68,12 +74,14 @@ python3 main.py paths --note-id <note_id>
 
 约定：
 
+- `state.sqlite3`统一保存身份、工作流、评论归档、排除列表、缓存和令牌；
+  首次`doctor`幂等导入旧JSON，不删除旧文件。
 - `scan.json` 保存最近一次扫描结果。
 - `reply_map.json` 保存 AI 生成并可继续修改的回复映射。
 - `drafts.json` 保存已组装、待预览或待发送的草稿。
 - `audit.json`以0600权限保存`ai-reply`命令的开始、结束、参数摘要、结果和
   错误，不保存评论正文、回复正文或凭据；最多保留500条事件。
-- `.cache/comments.json`以0600权限累计保存通知接口已返回且程序未截断的
+- `.cache/comments.json`是0600权限的兼容快照，累计保存通知接口已返回且程序未截断的
   原始评论正文，不替换引号；这不代表已核对平台完整评论树。
 - 文件存在时先读取并复用，不重复扫描或另存为带时间戳、批次号的副本。
 - 只有用户要求保留多个版本时，才创建额外文件。
@@ -84,7 +92,7 @@ python3 main.py paths --note-id <note_id>
   配对审计事件。新prepare生成新编号；旧事件无编号时不得跨prepare拼接。
   普通`paths`默认不内联事件。没有事件
   只能报告当前状态，不得根据最终草稿倒推出不存在的失败批次或执行时间。
-- 通知中的`xsec_token`先写入权限为0600的`.cache/xsec_index.json`，再从
+- 通知中的`xsec_token`先写入权限为0600的SQLite索引，再从
   `scan.json`移除；后续步骤复用索引，不得因脱敏而退回无令牌请求。
 
 ## 回复评论判定算法

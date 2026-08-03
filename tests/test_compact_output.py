@@ -11,13 +11,20 @@ import stat
 from unittest.mock import MagicMock, patch
 
 import main
-from config import CACHE_DIR, PROJECT_ROOT
+from config import (
+    AI_SCHEMA_VERSION,
+    APP_VERSION,
+    CACHE_DIR,
+    PROJECT_ROOT,
+)
 from lib.replier import Replier
 from lib.scanner import CommentScanner
 from lib.analyzer import _classify_sentiment
 from lib.state_io import file_lock, StateLockTimeout
+from lib.state_db import StateDB
 from lib.xhs_client import XHSClient
 from lib import cli_ai
+from lib.cli_admin import _release_consistency
 from lib.cli_parser import (
     COMMAND_EFFECTS,
     COMMAND_NAMES,
@@ -50,6 +57,111 @@ def _valid_review(fact_verdict="not_applicable", sources=None):
 
 
 class CompactOutputTests(unittest.TestCase):
+    def test_public_versions_and_runtime_versions_match(self):
+        with open(
+            os.path.join(PROJECT_ROOT, "README.md"), encoding="utf-8"
+        ) as file:
+            readme = file.read()
+        with open(
+            os.path.join(PROJECT_ROOT, "references", "commands.md"),
+            encoding="utf-8",
+        ) as file:
+            commands = file.read()
+        self.assertIn(f"v{APP_VERSION}", readme)
+        self.assertIn(f"schema_version: {AI_SCHEMA_VERSION}", readme)
+        self.assertIn(f"`{APP_VERSION}`", commands)
+        self.assertIn(f"`{AI_SCHEMA_VERSION}`", commands)
+
+    def test_public_config_contains_no_fixed_author_id(self):
+        import config
+
+        self.assertFalse(hasattr(config, "AUTHOR_USER_ID"))
+
+    def test_release_consistency_checks_versions_and_identity(self):
+        report = _release_consistency(PROJECT_ROOT)
+        self.assertTrue(report["versions"]["ok"])
+        self.assertEqual(report["versions"]["app_version"], APP_VERSION)
+        self.assertEqual(
+            report["versions"]["schema_version"], AI_SCHEMA_VERSION
+        )
+        self.assertTrue(report["public_identity"]["ok"])
+        self.assertIn("status", report["repository"])
+
+    def test_sqlite_state_round_trip_and_permissions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "state.sqlite3")
+            database = StateDB(path)
+            database.put_document("workflow/n1/scan", {"count": 2})
+            database.set_setting("author_user_id", "author-user")
+            self.assertEqual(
+                database.get_document("workflow/n1/scan"), {"count": 2}
+            )
+            self.assertEqual(
+                database.get_setting("author_user_id"), "author-user"
+            )
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_sqlite_migrates_legacy_json_without_overwriting_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            legacy = os.path.join(temp_dir, "comments.json")
+            with open(legacy, "w", encoding="utf-8") as file:
+                json.dump({"comments": 3}, file)
+            database = StateDB(os.path.join(temp_dir, "state.sqlite3"))
+            first = database.migrate_legacy_json(temp_dir)
+            self.assertEqual(first["imported"], 1)
+            self.assertEqual(
+                database.get_document("comments.json"), {"comments": 3}
+            )
+            with open(legacy, "w", encoding="utf-8") as file:
+                json.dump({"comments": 99}, file)
+            second = database.migrate_legacy_json(temp_dir)
+            self.assertEqual(second["skipped"], 1)
+            self.assertEqual(
+                database.get_document("comments.json"), {"comments": 3}
+            )
+
+    def test_author_identity_is_discovered_once_and_saved(self):
+        database = MagicMock()
+        database.get_setting.return_value = ""
+        XHSClient._author_user_id_cache = ""
+        payload = {
+            "ok": True,
+            "data": {"user": {"id": "author-user"}},
+        }
+        with patch("lib.xhs_client.state_db", return_value=database), patch(
+            "lib.xhs_client.XHSClient._run_xhs", return_value=payload
+        ) as run_xhs:
+            self.assertEqual(
+                XHSClient.get_author_user_id(), "author-user"
+            )
+            self.assertEqual(
+                XHSClient.get_author_user_id(), "author-user"
+            )
+        run_xhs.assert_called_once_with(
+            ["xhs", "whoami", "--json"], timeout=30
+        )
+        database.set_setting.assert_called_once_with(
+            "author_user_id", "author-user"
+        )
+        XHSClient._author_user_id_cache = ""
+
+    def test_author_identity_accepts_private_environment_override(self):
+        database = MagicMock()
+        XHSClient._author_user_id_cache = ""
+        with patch.dict(
+            os.environ, {"XHS_AUTHOR_USER_ID": "environment-author"}
+        ), patch(
+            "lib.xhs_client.state_db", return_value=database
+        ), patch("lib.xhs_client.XHSClient._run_xhs") as run_xhs:
+            self.assertEqual(
+                XHSClient.get_author_user_id(), "environment-author"
+            )
+        run_xhs.assert_not_called()
+        database.set_setting.assert_called_once_with(
+            "author_user_id", "environment-author"
+        )
+        XHSClient._author_user_id_cache = ""
+
     def test_ai_large_rows_are_capped_without_losing_total_source(self):
         rows = [{"index": index} for index in range(25)]
         self.assertEqual(len(cli_ai._inline_rows(rows)), 20)
@@ -76,8 +188,8 @@ class CompactOutputTests(unittest.TestCase):
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
         self.assertEqual(payload["system_name"], "小红书AI智能运营系统")
         self.assertNotIn("cli_name", payload)
-        self.assertEqual(payload["app_version"], "4.3.0")
-        self.assertEqual(payload["schema_version"], "7")
+        self.assertEqual(payload["app_version"], "5.0.0")
+        self.assertEqual(payload["schema_version"], "8")
         self.assertEqual(
             payload["output_contract"]["ai_reply"],
             "始终为单一紧凑JSON",
@@ -273,8 +385,8 @@ class CompactOutputTests(unittest.TestCase):
             main.cmd_ai_help(args)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
-        self.assertEqual(payload["app_version"], "4.3.0")
-        self.assertEqual(payload["schema_version"], "7")
+        self.assertEqual(payload["app_version"], "5.0.0")
+        self.assertEqual(payload["schema_version"], "8")
         self.assertIn("--batch-id", payload["reply_workflow"]["send"])
         self.assertIn("--preview-hash", payload["reply_workflow"]["send"])
         self.assertIn(
@@ -1613,7 +1725,7 @@ class CompactOutputTests(unittest.TestCase):
             "sub_comment_count": "0",
             "sub_comments": [],
         }]
-        result = CommentScanner(client).scan_via_notifications(
+        result = CommentScanner(client, "author-user").scan_via_notifications(
             note_id="n1", verbose=False
         )
         self.assertTrue(result["reply_status_verified"])
@@ -1637,7 +1749,7 @@ class CompactOutputTests(unittest.TestCase):
             }],
         }]
         client.get_skipped_ids.return_value = set()
-        result = CommentScanner(client).scan_via_notifications(
+        result = CommentScanner(client, "author-user").scan_via_notifications(
             note_id="n1", verbose=False
         )
         self.assertTrue(result["reply_status_verified"])
@@ -1669,7 +1781,7 @@ class CompactOutputTests(unittest.TestCase):
             "sub_comment_count": "0",
             "sub_comments": [],
         }]
-        result = CommentScanner(client).scan_via_notifications(
+        result = CommentScanner(client, "author-user").scan_via_notifications(
             note_id="n1",
             verbose=False,
             excluded_comment_ids={"sent"},
@@ -1687,7 +1799,7 @@ class CompactOutputTests(unittest.TestCase):
         client.get_new_comment_notifications.side_effect = RuntimeError(
             "network unavailable"
         )
-        result = CommentScanner(client).scan_via_notifications(verbose=False)
+        result = CommentScanner(client, "author-user").scan_via_notifications(verbose=False)
         self.assertFalse(result["reply_status_verified"])
         self.assertIn("network unavailable", result["scan_error"])
 
@@ -1945,12 +2057,14 @@ class CompactOutputTests(unittest.TestCase):
                 },
                 {
                     "id": "author-reply",
-                    "user_info": {"user_id": "6321167e0000000023038acd"},
+                    "user_info": {"user_id": "author-user"},
                     "target_comment": {"id": "candidate"},
                 },
             ],
         }]
-        existing, replied = CommentScanner._online_reply_index(comments)
+        existing, replied = CommentScanner(
+            author_user_id="author-user"
+        )._online_reply_index(comments)
         self.assertEqual(existing, {"root", "candidate", "author-reply"})
         self.assertEqual(replied, {"candidate"})
 
@@ -1960,14 +2074,16 @@ class CompactOutputTests(unittest.TestCase):
             "id": "keep",
             "sub_comments": [{
                 "id": "author-reply",
-                "user_info": {"user_id": "6321167e0000000023038acd"},
+                "user_info": {"user_id": "author-user"},
                 "target_comment": {"id": "replied"},
             }, {
                 "id": "replied",
                 "user_info": {"user_id": "other"},
             }],
         }]
-        eligible, excluded = CommentScanner(client).verify_candidates_online(
+        eligible, excluded = CommentScanner(
+            client, "author-user"
+        ).verify_candidates_online(
             "note",
             [
                 {"comment_id": "keep"},
@@ -2001,11 +2117,13 @@ class CompactOutputTests(unittest.TestCase):
             },
             {
                 "id": "author-reply",
-                "user_info": {"user_id": "6321167e0000000023038acd"},
+                "user_info": {"user_id": "author-user"},
                 "target_comment": {"id": "candidate"},
             },
         ]
-        eligible, excluded = CommentScanner(client).verify_candidates_online(
+        eligible, excluded = CommentScanner(
+            client, "author-user"
+        ).verify_candidates_online(
             "note", [{"comment_id": "candidate"}]
         )
         self.assertEqual(eligible, [])
@@ -2018,7 +2136,7 @@ class CompactOutputTests(unittest.TestCase):
         client = MagicMock()
         client.get_comments_until_ids.return_value = ([], False)
         with self.assertRaisesRegex(RuntimeError, "页数上限"):
-            CommentScanner(client).verify_candidates_online(
+            CommentScanner(client, "author-user").verify_candidates_online(
                 "note", [{"comment_id": "candidate"}]
             )
 
@@ -2058,7 +2176,7 @@ class CompactOutputTests(unittest.TestCase):
             "user_info": {"user_id": "other"},
         }]
         with self.assertRaisesRegex(RuntimeError, "楼中楼在线数据不完整"):
-            CommentScanner(client).verify_candidates_online(
+            CommentScanner(client, "author-user").verify_candidates_online(
                 "note", [{"comment_id": "candidate"}]
             )
 
@@ -2106,7 +2224,7 @@ class CompactOutputTests(unittest.TestCase):
 
         client.get_sub_comments.side_effect = get_sub_comments
         eligible, excluded = CommentScanner(
-            client
+            client, "author-user"
         ).verify_candidates_online(
             "note", [{"comment_id": "candidate"}]
         )
@@ -2138,7 +2256,7 @@ class CompactOutputTests(unittest.TestCase):
             "user_info": {"user_id": "other"},
         }]
         eligible, excluded = CommentScanner(
-            client
+            client, "author-user"
         ).verify_candidates_online(
             "note",
             [{
@@ -2177,7 +2295,7 @@ class CompactOutputTests(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeError, "候选评论尚未定位"
         ):
-            CommentScanner(client).verify_candidates_online(
+            CommentScanner(client, "author-user").verify_candidates_online(
                 "note", [{"comment_id": "candidate"}]
             )
 
@@ -2185,7 +2303,7 @@ class CompactOutputTests(unittest.TestCase):
     def test_scan_keeps_unreplied_nested_comment_when_root_was_replied(
         self, _sleep
     ):
-        author_id = "6321167e0000000023038acd"
+        author_id = "author-user"
         client = MagicMock()
         client.get_skipped_ids.return_value = set()
         client.get_comments_cached.return_value = ([{
@@ -2221,7 +2339,7 @@ class CompactOutputTests(unittest.TestCase):
                 "user_info": {"user_id": "other", "nickname": "丙"},
             },
         ]
-        result = CommentScanner(client).scan_note(
+        result = CommentScanner(client, "author-user").scan_note(
             "note", include_sub_comments=True, verbose=False
         )
         self.assertEqual(result["unreplied_level1"], [])
@@ -2232,7 +2350,7 @@ class CompactOutputTests(unittest.TestCase):
         self.assertTrue(result["reply_status_verified"])
 
     def test_complete_inline_nested_comments_use_target_specific_reply(self):
-        author_id = "6321167e0000000023038acd"
+        author_id = "author-user"
         client = MagicMock()
         client.get_skipped_ids.return_value = set()
         client.get_comments_cached.return_value = ([{
@@ -2258,7 +2376,7 @@ class CompactOutputTests(unittest.TestCase):
                 },
             ],
         }], False)
-        result = CommentScanner(client).scan_note(
+        result = CommentScanner(client, "author-user").scan_note(
             "note", include_sub_comments=True, verbose=False
         )
         self.assertEqual(
@@ -2282,7 +2400,7 @@ class CompactOutputTests(unittest.TestCase):
             "sub_comments": [],
         }], False)
         client.get_sub_comments.return_value = []
-        result = CommentScanner(client).scan_note(
+        result = CommentScanner(client, "author-user").scan_note(
             "note", include_sub_comments=True, verbose=False
         )
         self.assertFalse(result["reply_status_verified"])
@@ -2946,7 +3064,7 @@ class CompactOutputTests(unittest.TestCase):
         client = MagicMock()
         client.get_comments_cached.return_value = ([], False)
         client.get_skipped_ids.return_value = set()
-        CommentScanner(client).scan_note(
+        CommentScanner(client, "author-user").scan_note(
             "n1", include_sub_comments=True, verbose=False
         )
         self.assertTrue(

@@ -1,4 +1,4 @@
-# 小红书AI智能运营系统 v4.3.0
+# 小红书AI智能运营系统 v5.0.0
 
 - 系统名称：`小红书AI智能运营系统`
 
@@ -36,25 +36,46 @@
 |---|---|
 | `AGENTS.md` | 其他 AI 首先读取的最短执行协议 |
 | `main.py` | `COMMAND_HANDLERS`命令分发及传统回复工作流编排 |
-| `config.py` | 应用名称、账号、浏览器、延迟和工作目录配置 |
+| `config.py` | 应用名称、版本、浏览器、延迟和工作目录配置 |
 | `lib/cli_parser.py` | 唯一命令清单和命令行参数定义 |
 | `lib/cli_view.py` | 登录及文章、评论查看；其中登录会更新认证状态 |
 | `lib/cli_admin.py` | 发布、分析、环境检查和 AI 协议 |
-| `lib/cli_ai.py` | AI 专用 `prepare → draft → send` 工作流 |
+| `lib/cli_ai.py` | AI 回复兼容门面、审计调度和命令入口 |
+| `lib/cli_ai_prepare.py` | 候选准备、旧批次停用和扫描结果保存 |
+| `lib/cli_ai_draft.py` | 映射校验、在线复核和草稿生成 |
+| `lib/cli_ai_send.py` | 确认绑定、在线对账和回复发送 |
+| `lib/cli_ai_support.py` | 回复映射校验、表格数据和错误转换 |
+| `lib/cli_ai_audit.py` | 脱敏审计和发送尝试记录 |
 | `lib/cli_support.py` | 原子存储、状态合并和精简输出 |
-| `lib/state_io.py` | 跨进程文件锁和原子JSON写入 |
+| `lib/state_db.py` | SQLite权威状态库、账号身份和旧JSON迁移 |
+| `lib/state_io.py` | 跨进程锁、SQLite读写和JSON兼容快照 |
 | `lib/scanner.py` | 最新/全量扫描和在线回复核验 |
 | `lib/replier.py` | 草稿生成、发送和失败排除 |
 | `lib/analyzer.py` | 评论统计与摘要分析 |
 | `lib/poster.py` | 图文笔记校验、预览和发布 |
-| `lib/xhs_client.py` | `xhs` CLI 封装及私有令牌索引 |
+| `lib/xhs_client.py` | `XHSClient`兼容门面、账号和回复接口 |
+| `lib/xhs_client_content.py` | 笔记、通知和私有令牌索引 |
+| `lib/xhs_client_comments.py` | 评论树、楼中楼和在线评论查询 |
+| `lib/xhs_client_state.py` | 评论缓存和排除状态 |
+| `lib/xhs_client_proxy.py` | 拆分模块访问兼容门面的延迟绑定层 |
 | `lib/xhs_comments_helper.py` | 单一登录会话内完成评论分页及候选楼层补全 |
 | `lib/xhs_reply_helper.py` | 单一登录会话内连续回复并逐条回传结果 |
 | `lib/xhs_subcomments_helper.py` | `xiaohongshu-cli 0.6.4` 楼中楼令牌兼容层 |
 | `tests/test_compact_output.py` | 自动化回归测试；数量以实际运行结果为准 |
 
-当前共有14个子命令，没有快捷别名。`schema_version: 4` 表示 AI 输出协议
+当前共有14个子命令，没有快捷别名。`schema_version: 8` 表示 AI 输出协议
 版本，应用版本单独由 `python3 main.py --version` 查看。
+
+拆分后的公共入口保持不变：业务代码继续从`lib.xhs_client`导入
+`XHSClient`，命令分发继续从`lib.cli_ai`导入`cmd_ai_reply`。其他AI不要
+直接依赖阶段模块或Mixin；这些文件只用于明确职责和降低维护成本。
+
+版本只在`config.py`维护，README、AGENTS、SKILL和命令参考由自动测试及
+`doctor`交叉检查。`doctor --json`中的`documentation_versions`检查当前工作区
+文档，`public_identity_privacy`检查公开源码是否误含固定账号ID，
+`repository_release`比较当前工作区与Git `HEAD`。若状态为
+`working_tree_not_published`，说明修复尚未提交，GitHub继续显示旧内容并非
+页面缓存；必须明确提交并推送后远端才会更新。
 
 项目概况优先读取 `python3 main.py ai-help --summary`；需要完整协议时再运行
 `python3 main.py ai-help`。`main.py` 不只是分发
@@ -76,8 +97,7 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 生产源码数量和清单以`ai-help --summary`返回的`source_inventory`为准，
 完整相关文件看`project_inventory`；不要在文档中固定测试文件行数。
 `login`会导入浏览器Cookie并更新本地认证状态，因此不能归入只读命令。
-`articles`对平台是只读操作，但读取笔记时可能更新本地权限为0600的敏感
-`xsec_index.json`令牌索引。
+`articles`对平台是只读操作，但读取笔记时可能更新本地SQLite敏感令牌索引。
 
 ## 设计目标
 
@@ -131,6 +151,7 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 为了让 Codex、Cursor、Claude Code、Copilot、CodeBuddy 等不同 AI 可以接续同一任务，所有临时工作文件统一保存在：
 
 ```text
+.cache/state.sqlite3          # 0600，所有运行状态的权威来源
 .cache/workflows/
 ├── <笔记ID>/
 │   ├── scan.json
@@ -142,14 +163,21 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 .cache/comments.json
 ```
 
+`state.sqlite3`是程序判断身份、终态、批次、排除列表、缓存和令牌的唯一权威
+状态源。上面的JSON文件继续保留，是为了让AI方便写入`reply_map.json`、读取
+完整结果以及兼容旧脚本；除AI写入入口外，它们只是由程序刷新的兼容快照。
+首次运行`doctor`会幂等导入旧`.cache/**/*.json`，不会删除旧文件或覆盖已经
+进入SQLite的新状态。
+
 文件用途：
 
 | 文件 | 用途 |
 |---|---|
-| `scan.json` | 最近一次评论扫描结果 |
-| `reply_map.json` | AI 生成并可继续修改的回复映射 |
-| `drafts.json` | 已组装、待预览或待发送的回复草稿 |
-| `audit.json` | `ai-reply`命令级审计：起止时间、参数摘要、结果和错误，不保存评论/回复正文或凭据 |
+| `state.sqlite3` | 权威状态库；账号身份、工作流、缓存、归档和敏感令牌统一事务保存 |
+| `scan.json` | 最近一次扫描结果的AI兼容快照 |
+| `reply_map.json` | AI可编辑的回复映射交换入口；`draft`读取时同步入SQLite |
+| `drafts.json` | 草稿和发送状态的兼容快照 |
+| `audit.json` | 命令审计兼容快照；不保存评论/回复正文或凭据 |
 | `post/note.json` | 待预览或待发布的笔记 |
 | `.cache/comments.json` | 累计保存`comments`已读取的完整评论正文 |
 
@@ -177,9 +205,9 @@ python3 main.py paths --note-id <笔记ID>
   本次活动批次，不会把历史未完成草稿混入本次发送。
 - `active_batch`还保存`batch_id、revision、preview_hash`；用户确认必须
   与这三个字段对应的预览一致。
-- `.cache/xsec_index.json` 是敏感的本地令牌索引，不是业务状态文件；不得展示、
-  复制或提交。
-- 通知中的`xsec_token`会先保存到该0600索引，再从`scan.json`中移除。
+- 敏感令牌索引以0600权限保存在SQLite；`.cache/xsec_index.json`仅为0600
+  兼容快照，二者都不得展示、复制或提交。
+- 通知中的`xsec_token`会先保存到SQLite索引，再从`scan.json`中移除。
   后续`draft`和`send`因此可以安全复用令牌，不会退化为无令牌楼中楼请求。
 
 ## 回复评论的唯一判定逻辑
@@ -282,7 +310,6 @@ python3 main.py doctor --json
 编辑 `config.py`：
 
 ```python
-AUTHOR_USER_ID = "你的小红书用户ID"
 LOGIN_COOKIE_SOURCE = "firefox"
 REQUEST_DELAY = 3
 BATCH_REPLY_DELAY = 2.0
@@ -295,16 +322,16 @@ CACHE_TTL_MINUTES = 30
 
 | 配置项 | 作用 |
 |---|---|
-| `AUTHOR_USER_ID` | 用于判断评论是否由笔记作者回复 |
 | `LOGIN_COOKIE_SOURCE` | 登录时读取 Cookie 的浏览器 |
 | `REQUEST_DELAY` | 兼容旧单次进程发送模式的间隔秒数 |
 | `BATCH_REPLY_DELAY` | 推荐批量回复会话的最小间隔，可由环境变量调整 |
 | `BATCH_REPLY_PAUSE_EVERY` | 大批量回复每发送多少条主动休息一次 |
 | `BATCH_REPLY_PAUSE_SECONDS` | 每次主动休息的秒数 |
 | `CACHE_TTL_MINUTES` | 评论缓存有效时间 |
-| `COMMENTS_FILE` | 完整评论正文累计归档的保存位置 |
+| `STATE_DB_FILE` | SQLite权威状态库位置 |
+| `COMMENTS_FILE` | 完整评论正文的JSON兼容快照位置 |
 | `GENERIC_REPLIES` | 通用回复模式使用的话术 |
-| `SKIPPED_FILE` | 永久跳过列表的保存位置 |
+| `SKIPPED_FILE` | 永久跳过列表的JSON兼容快照位置 |
 
 当前登录支持的浏览器来源由 `xiaohongshu-cli` 决定，例如 `firefox`、`chrome`、`edge` 和 `safari`。
 
@@ -324,7 +351,10 @@ python3 main.py login
 xhs whoami
 ```
 
-将返回的用户 ID 写入 `config.py` 的 `AUTHOR_USER_ID`。
+不需要手工复制用户ID。`login`成功后会自动识别账号；若尚未保存，首次运行
+`doctor`、扫描或查找笔记时会调用`xhs whoami --json`，并把账号ID仅保存到
+本地SQLite。公开仓库和配置文件不包含具体用户ID。无浏览器或自动识别不可用
+时，可临时设置环境变量`XHS_AUTHOR_USER_ID`；环境变量值同样不会写入仓库。
 
 ### 2. 查看最近笔记
 
@@ -838,7 +868,17 @@ python3 main.py skipped --clear
 ├── config.py               # 账号与请求配置
 ├── SKILL.md                # AI 助手执行规则
 ├── lib/
-│   ├── xhs_client.py       # xhs 命令封装、缓存和跳过列表
+│   ├── xhs_client.py       # XHSClient兼容门面、账号和回复
+│   ├── xhs_client_content.py  # 笔记、通知和令牌索引
+│   ├── xhs_client_comments.py # 评论树和楼中楼读取
+│   ├── xhs_client_state.py    # 缓存和排除状态
+│   ├── xhs_client_proxy.py    # 门面延迟绑定
+│   ├── cli_ai.py           # AI回复兼容门面和审计调度
+│   ├── cli_ai_prepare.py   # prepare阶段
+│   ├── cli_ai_draft.py     # draft阶段
+│   ├── cli_ai_send.py      # send阶段
+│   ├── cli_ai_support.py   # 映射校验和展示转换
+│   ├── cli_ai_audit.py     # 脱敏审计
 │   ├── scanner.py          # 评论扫描与回复状态判断
 │   ├── replier.py          # 草稿生成和回复发送
 │   ├── analyzer.py         # 评论统计与情感分类

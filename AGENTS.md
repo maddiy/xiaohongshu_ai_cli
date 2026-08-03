@@ -13,6 +13,14 @@ python3 main.py ai-help --summary
 ```
 
 - 应用版本：`python3 main.py --version`
+- 当前发布版本为`5.0.0`，AI输出协议为schema`8`；运行时以
+  `ai-help --summary`为唯一权威来源。
+- 必须检查`ai-help --summary.release_consistency`：文档或隐私检查失败时停止；
+  `repository.status=working_tree_not_published`表示当前修复尚未进入Git
+  `HEAD`，不能把GitHub旧页面解释为缓存或声称远端已更新。
+- 账号ID不写在仓库或`config.py`中；程序首次运行时通过
+  `xhs whoami --json`自动识别并仅保存到本地SQLite；无浏览器环境可用
+  `XHS_AUTHOR_USER_ID`环境变量覆盖，不得把值写回公开文件。
 - 当前共有14个子命令，没有快捷别名；准确清单以`ai-help --summary`为准。
 - 需要某条命令的精确参数、副作用和输出时运行
   `python3 main.py ai-help --command <命令>`，不要手工抄写参数表。
@@ -22,6 +30,9 @@ python3 main.py ai-help --summary
 - 生产源码看`source_inventory`，完整相关文件看`project_inventory`，不手工
   统计文件数或行数。
 - 所有命令从项目根目录运行。
+- 公共Python入口固定为`from lib.xhs_client import XHSClient`和
+  `from lib.cli_ai import cmd_ai_reply`；`xhs_client_*`与`cli_ai_*`是内部
+  职责模块，其他AI不得绕过门面直接调用，以免依赖实现细节。
 - 机器交互只读取JSON，不解析终端表格或emoji。
 - 需要全部字段、状态规则和发布协议时再运行`python3 main.py ai-help`。
 - `login`会更新本地认证状态，不得描述为只读命令。
@@ -34,7 +45,8 @@ python3 main.py ai-help --summary
 - `articles`默认显示最新10篇。
 - `comments`默认读取最新20条评论通知。
 - `comments`每次把通知接口本次返回且程序未截断的评论正文累计保存到
-  `.cache/comments.json`；`--limit`只决定本次向平台读取的通知数，归档
+  `.cache/state.sqlite3`，并刷新`.cache/comments.json`兼容快照；`--limit`
+  只决定本次向平台读取的通知数，归档
   不代表已经核对平台完整评论树。
 - 上述两个命令的`--limit`均可省略；只在用户要求其他数量时添加。
 - 回复默认只处理最新20条通知中的一级评论和楼中楼。
@@ -220,6 +232,7 @@ python3 main.py ai-reply \
 ## 固定状态文件
 
 ```text
+.cache/state.sqlite3
 .cache/workflows/<笔记ID>/
 ├── scan.json
 ├── reply_map.json
@@ -231,6 +244,10 @@ python3 main.py ai-reply \
 ```
 
 必须复用这些文件，不为同一任务创建其他临时存档。
+`.cache/state.sqlite3`是0600权限的权威状态源；JSON路径是AI交换入口或兼容
+快照。首次`doctor`幂等导入旧JSON且不删除旧文件。程序判断终态、身份、
+批次、排除列表、缓存和令牌时以SQLite为准；AI仍通过`paths.reply_map`写入
+合法JSON，`draft`会把该入口同步到SQLite。
 `audit.json`为0600权限的有界命令审计，记录每次`ai-reply`的started及
 completed/failed事件、参数摘要、结果和错误，不保存评论正文、回复正文或
 认证凭据。使用`paths --note-id <ID> --audit-limit 20`读取最近20条；超过20条
@@ -240,10 +257,10 @@ completed/failed事件、参数摘要、结果和错误，不保存评论正文�
 该字段时不得跨越其他prepare拼接。没有历史审计记录时只能说明当前状态，
 不得从文件修改时间或最终草稿反推曾经执行的命令和报错。审计启用前的动作
 不会追溯补写。
-`.cache/comments.json`为0600权限的累计评论归档，保存通知接口已返回且
+`.cache/comments.json`为0600权限的累计评论归档兼容快照，保存通知接口已返回且
 程序未截断的原始正文；它不代表未读取的全部历史通知，也不代表已经
 用平台完整评论树进行二次核对。
-通知中的`xsec_token`必须先安全写入权限为0600的`xsec_index.json`，再从
+通知中的`xsec_token`必须先安全写入权限为0600的SQLite令牌索引，再从
 `scan.json`输出中移除；这样后续`draft`和`send`既不泄露令牌，也不会退化
 为无令牌楼中楼请求。
 
@@ -306,7 +323,8 @@ completed/failed事件、参数摘要、结果和错误，不保存评论正文�
 - `--confirmed`还必须与当前`batch_id`和`preview_hash`同时匹配，防止
   其他AI在用户确认后替换草稿。
 - 不输出Cookie、`xsec_token`或其他登录凭据。
-- `.cache/xsec_index.json`是敏感令牌缓存，不是回复工作流状态。
+- SQLite中的xsec索引及`.cache/xsec_index.json`兼容快照都是敏感令牌缓存，
+  不是回复工作流状态。
 - 浏览器可正常使用、账号身份检查成功，不代表楼中楼API没有独立风控。
 - 发布文章和发送回复前都必须先预览并取得确认。
 - `articles`对平台是只读操作，但可能更新本地0600敏感`xsec_index.json`。
@@ -319,7 +337,7 @@ completed/failed事件、参数摘要、结果和错误，不保存评论正文�
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m py_compile main.py lib/*.py
+python3 -m py_compile main.py config.py lib/*.py
 python3 main.py ai-help | python3 -m json.tool
 ```
 
