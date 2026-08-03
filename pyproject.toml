@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xiaohongshu-ai-operations"
+version = "5.1.0"
+description = "面向中文用户和AI助手的小红书运营命令行系统"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "xiaohongshu-cli==0.6.4",
+]
+
+[tool.setuptools]
+py-modules = ["main", "config"]
+
+[tool.setuptools.packages.find]
+include = ["lib*"]
+
+[tool.coverage.run]
+branch = true
+source = ["lib", "main"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

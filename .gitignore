@@ -1,5 +1,8 @@
 __pycache__/
 .cache/
 *.pyc
+*.egg-info/
+.coverage
+htmlcov/
 .DS_Store
 /软著申请

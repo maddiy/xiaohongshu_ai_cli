@@ -165,26 +165,32 @@ class StateDB:
             connection.commit()
 
     def migrate_legacy_json(self, cache_dir=CACHE_DIR):
-        """幂等导入旧JSON；保留原文件作为可恢复兼容快照。"""
+        """幂等导入旧JSON；核对SQLite哈希后删除已迁移的历史源文件。"""
         root = Path(cache_dir).resolve()
         imported = 0
+        deleted = 0
         skipped = 0
         errors = []
         parsed = []
+        verified_legacy = []
         if not root.exists():
-            return {"imported": 0, "skipped": 0, "errors": []}
+            return {
+                "imported": 0, "deleted": 0, "skipped": 0, "errors": [],
+            }
         with closing(self._connect()) as connection:
-            existing_keys = {
-                row[0] for row in connection.execute(
-                    "SELECT key FROM documents"
+            existing_hashes = {
+                key: digest for key, digest in connection.execute(
+                    "SELECT key,payload_hash FROM documents"
+                ).fetchall()
+            }
+            migration_hashes = {
+                source: digest for source, digest in connection.execute(
+                    "SELECT source_path,payload_hash FROM migrations"
                 ).fetchall()
             }
         for path in sorted(root.rglob("*.json")):
             key = state_key_for_path(path, root)
             if not key:
-                continue
-            if key in existing_keys:
-                skipped += 1
                 continue
             try:
                 with path.open(encoding="utf-8") as file:
@@ -193,7 +199,24 @@ class StateDB:
                 errors.append({"path": str(path), "error": str(error)})
                 continue
             digest = _payload_hash(value)
+            source_path = str(path)
+            migration_digest = migration_hashes.get(source_path, "")
+            if migration_digest:
+                if (
+                    migration_digest == digest
+                    and existing_hashes.get(key) == digest
+                ):
+                    # 兼容旧版本“已导入但未删除”的迁移结果。
+                    verified_legacy.append((path, key, digest))
+                else:
+                    skipped += 1
+                continue
+            if key in existing_hashes:
+                # 没有迁移记录的同名文件是当前AI交换/兼容快照，不删除。
+                skipped += 1
+                continue
             parsed.append((path, key, value, digest))
+        newly_imported = []
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             for path, key, value, digest in parsed:
@@ -214,8 +237,32 @@ class StateDB:
                     (str(path), _timestamp(), digest),
                 )
                 imported += 1
+                newly_imported.append((path, key, digest))
             connection.commit()
-        return {"imported": imported, "skipped": skipped, "errors": errors}
+
+        for path, key, expected_hash in verified_legacy + newly_imported:
+            if self.document_hash(key) != expected_hash:
+                errors.append({
+                    "path": str(path),
+                    "phase": "verify_before_delete",
+                    "error": "SQLite内容哈希与迁移源文件不一致",
+                })
+                continue
+            try:
+                path.unlink()
+                deleted += 1
+            except OSError as error:
+                errors.append({
+                    "path": str(path),
+                    "phase": "delete_imported_json",
+                    "error": str(error),
+                })
+        return {
+            "imported": imported,
+            "deleted": deleted,
+            "skipped": skipped,
+            "errors": errors,
+        }
 
 
 _STATE_DB = StateDB()

@@ -1,4 +1,4 @@
-# 小红书AI智能运营系统 v5.0.0
+# 小红书AI智能运营系统 v5.1.0
 
 - 系统名称：`小红书AI智能运营系统`
 
@@ -39,7 +39,9 @@
 | `config.py` | 应用名称、版本、浏览器、延迟和工作目录配置 |
 | `lib/cli_parser.py` | 唯一命令清单和命令行参数定义 |
 | `lib/cli_view.py` | 登录及文章、评论查看；其中登录会更新认证状态 |
-| `lib/cli_admin.py` | 发布、分析、环境检查和 AI 协议 |
+| `lib/cli_admin.py` | 发布、分析、环境检查和路径管理 |
+| `lib/cli_protocol.py` | AI运行时协议、项目清单和命令清单 |
+| `lib/cli_release.py` | 版本、隐私、Git工作区和发布检查 |
 | `lib/cli_ai.py` | AI 回复兼容门面、审计调度和命令入口 |
 | `lib/cli_ai_prepare.py` | 候选准备、旧批次停用和扫描结果保存 |
 | `lib/cli_ai_draft.py` | 映射校验、在线复核和草稿生成 |
@@ -47,9 +49,11 @@
 | `lib/cli_ai_support.py` | 回复映射校验、表格数据和错误转换 |
 | `lib/cli_ai_audit.py` | 脱敏审计和发送尝试记录 |
 | `lib/cli_support.py` | 原子存储、状态合并和精简输出 |
+| `lib/cli_comment_view.py` | 评论表格安全转换和通知正文归档 |
 | `lib/state_db.py` | SQLite权威状态库、账号身份和旧JSON迁移 |
 | `lib/state_io.py` | 跨进程锁、SQLite读写和JSON兼容快照 |
-| `lib/scanner.py` | 最新/全量扫描和在线回复核验 |
+| `lib/scanner.py` | 最新通知和全量评论扫描编排 |
+| `lib/scanner_online.py` | 在线回复关系、存在性和楼中楼完整性核验 |
 | `lib/replier.py` | 草稿生成、发送和失败排除 |
 | `lib/analyzer.py` | 评论统计与摘要分析 |
 | `lib/poster.py` | 图文笔记校验、预览和发布 |
@@ -61,9 +65,13 @@
 | `lib/xhs_comments_helper.py` | 单一登录会话内完成评论分页及候选楼层补全 |
 | `lib/xhs_reply_helper.py` | 单一登录会话内连续回复并逐条回传结果 |
 | `lib/xhs_subcomments_helper.py` | `xiaohongshu-cli 0.6.4` 楼中楼令牌兼容层 |
-| `tests/test_compact_output.py` | 自动化回归测试；数量以实际运行结果为准 |
+| `tests/test_*.py` | 按协议、工作流、评论、客户端和状态拆分的回归测试 |
+| `tests/support.py` | 测试共享依赖和合法审查数据构造器 |
+| `scripts/verify.py` | 本地与CI统一质量检查入口 |
+| `pyproject.toml` | 项目元数据和固定依赖声明 |
+| `requirements.txt` | 已验证的`xiaohongshu-cli`安装版本 |
 
-当前共有14个子命令，没有快捷别名。`schema_version: 8` 表示 AI 输出协议
+当前共有14个子命令，没有快捷别名。`schema_version: 9` 表示 AI 输出协议
 版本，应用版本单独由 `python3 main.py --version` 查看。
 
 拆分后的公共入口保持不变：业务代码继续从`lib.xhs_client`导入
@@ -73,9 +81,10 @@
 版本只在`config.py`维护，README、AGENTS、SKILL和命令参考由自动测试及
 `doctor`交叉检查。`doctor --json`中的`documentation_versions`检查当前工作区
 文档，`public_identity_privacy`检查公开源码是否误含固定账号ID，
-`repository_release`比较当前工作区与Git `HEAD`。若状态为
-`working_tree_not_published`，说明修复尚未提交，GitHub继续显示旧内容并非
-页面缓存；必须明确提交并推送后远端才会更新。
+`repository_release`同时检查Git `HEAD`、未提交文件和本地跟踪分支。
+`working_tree_not_published`表示版本尚未进入提交，`working_tree_dirty`表示
+仍有未提交文件，`commits_not_pushed`表示本地提交尚未推送；这些状态都不能
+描述成远端已经更新。
 
 项目概况优先读取 `python3 main.py ai-help --summary`；需要完整协议时再运行
 `python3 main.py ai-help`。`main.py` 不只是分发
@@ -166,8 +175,9 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 `state.sqlite3`是程序判断身份、终态、批次、排除列表、缓存和令牌的唯一权威
 状态源。上面的JSON文件继续保留，是为了让AI方便写入`reply_map.json`、读取
 完整结果以及兼容旧脚本；除AI写入入口外，它们只是由程序刷新的兼容快照。
-首次运行`doctor`会幂等导入旧`.cache/**/*.json`，不会删除旧文件或覆盖已经
-进入SQLite的新状态。
+首次运行`doctor`会幂等导入旧`.cache/**/*.json`；只有SQLite内容哈希与迁移
+源文件完全一致后才删除已导入的历史JSON。程序当前生成、没有迁移记录的AI
+交换快照继续保留，也不会覆盖已经进入SQLite的新状态。
 
 文件用途：
 
@@ -269,16 +279,16 @@ python3 --version
 
 ### 2. 安装小红书 CLI
 
-推荐使用 `uv` 隔离安装：
+当前代码与`xiaohongshu-cli 0.6.4`完成兼容验证。推荐使用`uv`隔离安装固定版本：
 
 ```bash
-uv tool install xiaohongshu-cli
+uv tool install xiaohongshu-cli==0.6.4
 ```
 
-也可以使用 `pip`：
+也可以使用项目依赖清单：
 
 ```bash
-python3 -m pip install xiaohongshu-cli
+python3 -m pip install -r requirements.txt
 ```
 
 确认安装成功：
@@ -286,6 +296,8 @@ python3 -m pip install xiaohongshu-cli
 ```bash
 xhs --version
 ```
+
+输出应为`0.6.4`；`doctor`也会核对实际版本与`config.XHS_CLI_VERSION`。
 
 ### 3. 进入项目目录
 
@@ -328,6 +340,7 @@ CACHE_TTL_MINUTES = 30
 | `BATCH_REPLY_PAUSE_EVERY` | 大批量回复每发送多少条主动休息一次 |
 | `BATCH_REPLY_PAUSE_SECONDS` | 每次主动休息的秒数 |
 | `CACHE_TTL_MINUTES` | 评论缓存有效时间 |
+| `XHS_CLI_VERSION` | 已通过评论、楼中楼和持久会话验证的CLI版本 |
 | `STATE_DB_FILE` | SQLite权威状态库位置 |
 | `COMMENTS_FILE` | 完整评论正文的JSON兼容快照位置 |
 | `GENERIC_REPLIES` | 通用回复模式使用的话术 |
@@ -866,6 +879,8 @@ python3 main.py skipped --clear
 .
 ├── main.py                 # 中文命令行入口
 ├── config.py               # 账号与请求配置
+├── pyproject.toml          # 项目元数据与固定依赖
+├── requirements.txt       # xiaohongshu-cli兼容版本
 ├── SKILL.md                # AI 助手执行规则
 ├── lib/
 │   ├── xhs_client.py       # XHSClient兼容门面、账号和回复
@@ -879,12 +894,19 @@ python3 main.py skipped --clear
 │   ├── cli_ai_send.py      # send阶段
 │   ├── cli_ai_support.py   # 映射校验和展示转换
 │   ├── cli_ai_audit.py     # 脱敏审计
+│   ├── cli_comment_view.py # 评论展示和通知正文归档
 │   ├── scanner.py          # 评论扫描与回复状态判断
+│   ├── scanner_online.py   # 在线回复和楼中楼完整性核验
 │   ├── replier.py          # 草稿生成和回复发送
 │   ├── analyzer.py         # 评论统计与情感分类
 │   └── poster.py           # 图文笔记校验与发布
 ├── references/
 │   └── commands.md         # 详细命令和 Python API
+├── tests/
+│   ├── support.py          # 共享测试依赖与构造器
+│   └── test_*.py           # 按功能域拆分的回归测试
+├── scripts/
+│   └── verify.py           # 编译、协议和测试统一检查
 └── .cache/                 # 自动生成的缓存与工作文件
 ```
 

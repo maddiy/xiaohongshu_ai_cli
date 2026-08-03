@@ -12,12 +12,15 @@ python3 main.py doctor --json
 python3 main.py ai-help --summary
 ```
 
+完整质量检查统一运行`python3 scripts/verify.py`；它会执行Python编译、协议
+JSON校验和全部测试，成功时只输出紧凑摘要。
+
 - 应用版本：`python3 main.py --version`
-- 当前发布版本为`5.0.0`，AI输出协议为schema`8`；运行时以
+- 当前发布版本为`5.1.0`，AI输出协议为schema`9`；运行时以
   `ai-help --summary`为唯一权威来源。
 - 必须检查`ai-help --summary.release_consistency`：文档或隐私检查失败时停止；
-  `repository.status=working_tree_not_published`表示当前修复尚未进入Git
-  `HEAD`，不能把GitHub旧页面解释为缓存或声称远端已更新。
+  `repository.status`为`working_tree_not_published`、`working_tree_dirty`或
+  `commits_not_pushed`时都不能声称远端已更新。
 - 账号ID不写在仓库或`config.py`中；程序首次运行时通过
   `xhs whoami --json`自动识别并仅保存到本地SQLite；无浏览器环境可用
   `XHS_AUTHOR_USER_ID`环境变量覆盖，不得把值写回公开文件。
@@ -245,7 +248,8 @@ python3 main.py ai-reply \
 
 必须复用这些文件，不为同一任务创建其他临时存档。
 `.cache/state.sqlite3`是0600权限的权威状态源；JSON路径是AI交换入口或兼容
-快照。首次`doctor`幂等导入旧JSON且不删除旧文件。程序判断终态、身份、
+快照。首次`doctor`幂等导入旧JSON，SQLite哈希核对成功后删除历史迁移源；
+当前AI交换快照保留。程序判断终态、身份、
 批次、排除列表、缓存和令牌时以SQLite为准；AI仍通过`paths.reply_map`写入
 合法JSON，`draft`会把该入口同步到SQLite。
 `audit.json`为0600权限的有界命令审计，记录每次`ai-reply`的started及
@@ -336,9 +340,7 @@ completed/failed事件、参数摘要、结果和错误，不保存评论正文�
 ## 验证程序修改
 
 ```bash
-python3 -m unittest discover -s tests
-python3 -m py_compile main.py config.py lib/*.py
-python3 main.py ai-help | python3 -m json.tool
+python3 scripts/verify.py
 ```
 
 修改命令、JSON字段、默认范围或状态规则后，同步更新`AGENTS.md`、`README.md`、

@@ -4,7 +4,7 @@
 
 AI首次进入项目时优先读取根目录`AGENTS.md`，无需通读本文档。
 
-当前应用版本为 `5.0.0`，AI协议版本为`8`，共有14个子命令，不提供快捷别名：
+当前应用版本为 `5.1.0`，AI协议版本为`9`，共有14个子命令，不提供快捷别名：
 
 ```bash
 python3 main.py --version
@@ -25,7 +25,8 @@ python3 main.py --version
 ```
 
 `.cache/state.sqlite3`是0600权限的权威状态库；JSON路径是AI交换入口或兼容
-快照。首次运行`doctor`会幂等导入旧JSON，公开仓库不再配置具体用户ID，
+快照。首次运行`doctor`会幂等导入旧JSON，并在SQLite哈希核对成功后删除
+历史迁移源；当前AI交换快照保留。公开仓库不再配置具体用户ID，
 当前账号由`xhs whoami --json`自动识别并仅保存到SQLite。
 
 查看路径和文件状态：
@@ -56,16 +57,18 @@ python3 main.py doctor
 python3 main.py doctor --json
 ```
 
-检查Python、`xhs`命令、自动识别的账号身份、Cookie来源和SQLite状态库。
+检查Python、`xhs`命令及其固定兼容版本、自动识别的账号身份、Cookie来源和
+SQLite状态库。
 自动识别不可用时可临时设置`XHS_AUTHOR_USER_ID`环境变量，禁止把值写入仓库。
 此外还返回：
 
 - `documentation_versions`：README、AGENTS、SKILL、命令参考与运行时版本一致；
 - `public_identity_privacy`：公开源码没有固定账号ID；
-- `repository_release`：当前版本和隐私修复已经进入Git `HEAD`。
+- `repository_release`：当前版本、工作区和本地跟踪分支的发布状态。
 
-`repository_release.value=working_tree_not_published`表示修改仍停留在工作区，
-GitHub显示旧版本不是缓存；需要提交并推送后才能更新远端。
+`working_tree_not_published`表示版本尚未进入提交，`working_tree_dirty`表示仍有
+未提交文件，`commits_not_pushed`表示提交尚未推送；必须处理对应状态后才能
+声称远端仓库已经更新。
 
 ## `login`：登录账号
 

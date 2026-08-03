@@ -17,7 +17,7 @@ description: >
 ## 基本规则
 
 1. 在项目根目录运行命令，首先执行 `python3 main.py doctor --json` 检查环境。
-   当前发布为`5.0.0`、AI协议schema为`8`；以`ai-help --summary`运行时输出为准。
+   当前发布为`5.1.0`、AI协议schema为`9`；以`ai-help --summary`运行时输出为准。
 2. 查询、扫描和预览等只读操作可以直接执行。
 3. 发送回复或发布笔记前必须先预览。
 4. 除非用户明确要求自动发送，否则先展示草稿并等待确认。
@@ -75,7 +75,8 @@ python3 main.py paths --note-id <note_id>
 约定：
 
 - `state.sqlite3`统一保存身份、工作流、评论归档、排除列表、缓存和令牌；
-  首次`doctor`幂等导入旧JSON，不删除旧文件。
+  首次`doctor`幂等导入旧JSON；SQLite哈希核对成功后删除历史迁移源，
+  当前AI交换快照保留。
 - `scan.json` 保存最近一次扫描结果。
 - `reply_map.json` 保存 AI 生成并可继续修改的回复映射。
 - `drafts.json` 保存已组装、待预览或待发送的草稿。
