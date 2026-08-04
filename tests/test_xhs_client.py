@@ -121,7 +121,7 @@ class XHSClientTests(unittest.TestCase):
                 "target_comment": {"id": "root1"},
                 "illegal_info": {"illegal_status": "NORMAL"},
             },
-            "user_info": {"nickname": "用户"},
+            "user_info": {"nickname": "用户", "user_id": "u1"},
             "time": 1,
         }
         notifications.return_value = [item, dict(item)]
@@ -132,6 +132,7 @@ class XHSClientTests(unittest.TestCase):
             result[0]["new_comments"][0]["target_comment_id"],
             "root1",
         )
+        self.assertEqual(result[0]["new_comments"][0]["user_id"], "u1")
 
     @patch("lib.xhs_client.XHSClient._merge_xsec_index")
     @patch("lib.xhs_client.XHSClient.get_notifications")

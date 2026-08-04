@@ -9,6 +9,7 @@ from .cli_support import (
     TERMINAL_SEND_STATUSES,
     print_json,
 )
+from .state_db import DB_SCHEMA_VERSION
 from .xhs_client import XHSClient
 
 
@@ -20,10 +21,18 @@ def cmd_ai_help(args):
         BATCH_REPLY_PAUSE_EVERY,
         BATCH_REPLY_PAUSE_SECONDS,
         CACHE_TTL_MINUTES,
+        COMMENT_HELPER_MAX_SECONDS,
+        COMMENT_HELPER_REQUEST_TIMEOUT,
+        COMMENT_LOOKUP_MAX_PAGES,
         LOGIN_COOKIE_SOURCE,
+        PERSISTENT_HELPER_RESPONSE_TIMEOUT,
         READ_PAGE_DELAY,
         REQUEST_DELAY,
         SYSTEM_NAME,
+        WATCH_NOTIFICATION_LIMIT,
+        WATCH_POLL_INTERVAL_SECONDS,
+        WEB_HOST,
+        WEB_PORT,
     )
     requested_command = getattr(args, "command_name", None)
     if requested_command:
@@ -67,8 +76,10 @@ def cmd_ai_help(args):
     documentation_files = [
         path for path in (
             "AGENTS.md",
+            "QUICKSTART.md",
             "README.md",
             "SKILL.md",
+            "TROUBLESHOOTING.md",
             "references/commands.md",
         )
         if os.path.isfile(os.path.join(project_root, path))
@@ -82,9 +93,15 @@ def cmd_ai_help(args):
         )
         if os.path.isfile(os.path.join(project_root, path))
     ]
+    web_assets = [
+        path for path in (
+            "web/index.html", "web/app.js", "web/styles.css",
+        )
+        if os.path.isfile(os.path.join(project_root, path))
+    ]
     project_files = (
         source_files + test_files + test_support_files
-        + documentation_files + tooling_files
+        + documentation_files + tooling_files + web_assets
     )
 
     payload = {
@@ -122,6 +139,7 @@ def cmd_ai_help(args):
             "test_support": test_support_files,
             "documentation": documentation_files,
             "tooling": tooling_files,
+            "web_assets": web_assets,
             "rule": "不含.cache、软著材料及外部附件",
         },
         "architecture": {
@@ -135,14 +153,27 @@ def cmd_ai_help(args):
             "lib/cli_release.py": "版本、隐私、Git工作区和发布检查",
             "lib/cli_ai.py": "AI回复兼容门面、审计调度和命令入口",
             "lib/cli_ai_prepare.py": "候选准备、扫描和旧批次停用",
+            "lib/cli_ai_map.py": "结构化回复映射写入和批次失效控制",
+            "lib/cli_ai_state.py": "跨AI状态摘要和显式授权失败重试",
             "lib/cli_ai_draft.py": "映射校验、在线复核和草稿生成",
             "lib/cli_ai_send.py": "确认绑定、在线对账和回复发送",
             "lib/cli_ai_support.py": "回复映射校验、展示转换和错误结构",
             "lib/cli_ai_audit.py": "脱敏审计和发送尝试记录",
             "lib/cli_support.py": "存储、状态合并和精简输出",
             "lib/cli_comment_view.py": "评论表格安全转换和通知正文归档",
+            "lib/comment_watcher.py": (
+                "新评论过滤、SQLite检查点、在线核验和自动回复引擎"
+            ),
+            "lib/cli_watch.py": "手动前台监控命令和安全评论事件输出",
+            "lib/web_app.py": "仅监听本机的完整Web接口和监控线程管理",
+            "lib/web_services.py": (
+                "Web回复、分析、排除列表和系统工具的结构化服务"
+            ),
             "lib/json_codec.py": "SQLite、JSON快照和预览指纹共用的规范化编码",
-            "lib/state_db.py": "SQLite权威状态库、账号身份和旧JSON迁移",
+            "lib/reply_schema.py": "回复动作和三项审查枚举的共享模式",
+            "lib/state_db.py": (
+                "SQLite权威状态库、顺序schema迁移、账号身份和旧JSON迁移"
+            ),
             "lib/state_io.py": "跨进程锁、显式状态读取策略和JSON兼容快照",
             "lib/scanner.py": "全量扫描和扫描器组合入口",
             "lib/scanner_notifications.py": "最新评论通知候选收集",
@@ -155,15 +186,22 @@ def cmd_ai_help(args):
             "lib/xhs_client_comments.py": "评论树、楼中楼和在线查询",
             "lib/xhs_client_state.py": "评论缓存和排除状态",
             "lib/xhs_client_proxy.py": "拆分模块访问兼容门面的延迟绑定层",
-            "lib/xhs_comments_helper.py": "单会话评论分页和候选楼层补全加速层",
-            "lib/xhs_reply_helper.py": "单会话批量回复与逐条结果回传加速层",
+            "lib/xhs_comments_helper.py": (
+                "带内部时间预算的单会话评论分页和候选楼层补全加速层"
+            ),
+            "lib/xhs_reply_helper.py": (
+                "带父进程响应看门狗的单会话批量回复与逐条结果回传加速层"
+            ),
             "lib/xhs_subcomments_helper.py": "楼中楼xsec_token兼容层",
             "tests/test_*.py": "按功能域拆分的回归测试；运行时自动发现",
             "tests/support.py": "测试共享依赖和合法审查数据构造器",
+            "QUICKSTART.md": "中文最短安装、查看和AI回复流程",
+            "TROUBLESHOOTING.md": "结构化错误类型与安全处理方法",
             "pyproject.toml": "项目元数据和固定xiaohongshu-cli依赖",
             "requirements.txt": "兼容版xiaohongshu-cli安装清单",
             "scripts/verify.py": "本地与CI统一质量检查入口",
             ".github/workflows/ci.yml": "Python 3.10/3.11持续集成",
+            "web/": "无外部脚本依赖的本地Web控制台静态资源",
         },
         "defaults": {
             "articles": 10,
@@ -179,13 +217,36 @@ def cmd_ai_help(args):
             "batch_reply_pause_seconds": BATCH_REPLY_PAUSE_SECONDS,
             "read_page_delay_seconds": READ_PAGE_DELAY,
             "login_cookie_source": LOGIN_COOKIE_SOURCE,
+            "persistent_helper_response_timeout_seconds": (
+                PERSISTENT_HELPER_RESPONSE_TIMEOUT
+            ),
+            "comment_helper_request_timeout_seconds": (
+                COMMENT_HELPER_REQUEST_TIMEOUT
+            ),
+            "comment_helper_max_seconds": COMMENT_HELPER_MAX_SECONDS,
+            "comment_lookup_max_pages": COMMENT_LOOKUP_MAX_PAGES,
+            "state_db_schema_version": DB_SCHEMA_VERSION,
+            "watch_poll_interval_seconds": WATCH_POLL_INTERVAL_SECONDS,
+            "watch_notification_limit": WATCH_NOTIFICATION_LIMIT,
+            "web_url": f"http://{WEB_HOST}:{WEB_PORT}",
         },
         "output_contract": {
             "ai_reply": "始终为单一紧凑JSON",
             "json_capable_commands": [
                 "articles", "comments", "scan", "analyze", "doctor",
                 "ai-help", "paths", "ai-reply",
+                "watch",
             ],
+            "watch": (
+                "默认终端文本；--json为逐事件JSON Lines。首次运行只建立"
+                "SQLite基线，事件groups不含comment_id且评论正文不截断；"
+                "每轮已读取通知正文先累计归档，过滤条件只限制监控动作"
+            ),
+            "web": (
+                "web命令启动仅监听127.0.0.1的运营页面；读取、分析、排除列表"
+                "和监控接口返回结构化JSON，所有控制请求需要页面CSRF令牌；"
+                "回复按钮在浏览器生成提示词并直接复制，不展示内容或调用回复接口；网页不发笔记"
+            ),
             "draft_preview": (
                 "prepare/draft/send明细最多内联20行，完整数据读取返回的"
                 "*_source状态文件；preview含send/skip/archive，"
@@ -196,7 +257,22 @@ def cmd_ai_help(args):
             ),
             "draft_confirmation": (
                 "draft返回batch_id、revision、preview_hash；send必须原样"
-                "提交batch_id和preview_hash，防止确认后内容被替换"
+                "提交batch_id和preview_hash；完全相同的预览复用原绑定，"
+                "内容变化才生成新绑定并要求重新确认"
+            ),
+            "structured_mapping": (
+                "ai-reply --action map按明确字段写入一条候选映射；程序负责"
+                "JSON编码、语义校验和原子保存，返回remaining_candidate_indexes；"
+                "优先使用prepare返回的candidate_index，不要求AI直接编辑"
+                "reply_map.json"
+            ),
+            "workflow_status": (
+                "ai-reply --action status只读本地状态摘要，不返回可直接用于"
+                "send的batch_id或preview_hash"
+            ),
+            "failed_retry": (
+                "ai-reply --action retry仅在--retry-authorized明确代表用户授权"
+                "时重置单条failed；重置后仍须重新预览确认"
             ),
             "scan_candidates": "仅为候选，不能直接发送",
             "article_list": (
@@ -313,6 +389,11 @@ def cmd_ai_help(args):
             "post_dry_run_recommended": True,
             "traditional_send_online_recheck": True,
             "reply_error_types": list(XHSClient.REPLY_ERROR_TYPES),
+            "watch_is_manual_foreground_only": True,
+            "watch_first_poll_is_baseline_only": True,
+            "watch_auto_reply_requires": ["--auto-reply", "--confirmed"],
+            "web_bind": WEB_HOST,
+            "web_remote_access": False,
         },
         "verification": {
             "tests": "python3 -m unittest discover -s tests",
@@ -339,6 +420,10 @@ def cmd_ai_help(args):
                 "楼中楼计入deferred_count且不进入本批；全量模式由scan_note以"
                 "include_sub_comments=true、force_refresh=true完整扫描，"
                 "绕过评论TTL缓存且不调用该核验函数"
+            ),
+            "map": (
+                "只读取已核验scan和本地状态，不访问平台；映射实际变化时"
+                "停用旧活动批次，内容相同时不重写或失效绑定"
             ),
             "draft": (
                 "先停用旧active_comment_ids但保留历史草稿和终态，"
@@ -380,11 +465,16 @@ def cmd_ai_help(args):
         "storage": {
             "canonical": (
                 ".cache/state.sqlite3（0600，SQLite权威状态源；账号身份、"
-                "工作流、评论归档、排除列表、缓存和令牌索引统一存储）"
+                "工作流、监控检查点、评论归档、排除列表、缓存和令牌索引"
+                "统一存储）"
             ),
             "migration": (
                 "doctor首次运行幂等导入旧.cache/**/*.json；SQLite哈希核对"
                 "成功后删除历史迁移源，当前AI交换快照继续保留"
+            ),
+            "database_schema": (
+                f"DB schema {DB_SCHEMA_VERSION}；启动时按版本顺序迁移，"
+                "主库、WAL和SHM均强制0600；拒绝读取未知的更高版本"
             ),
             "workflow": (
                 ".cache/workflows/<note_id>/"
@@ -405,7 +495,7 @@ def cmd_ai_help(args):
                 "回复正文和凭据；paths --audit-limit按需内联）"
             ),
             "audit_evidence_rule": (
-                "先按workflow_id限定同一轮prepare/draft/send，再按command_id"
+                "先按workflow_id限定同一轮prepare/map/draft/send，再按command_id"
                 "配对started与completed/failed；新prepare生成新workflow_id；"
                 "旧事件无编号时不得跨prepare拼接；没有审计事件时"
                 "只能报告当前状态，不得从最终状态反推历史命令或错误"
@@ -465,13 +555,15 @@ def cmd_ai_help(args):
             "empty_result": "报告没有可回复评论；禁止复用旧 reply_map.json",
             "failed_handling": "所有失败评论自动加入 skipped.json；默认不重试",
             "failed_retry": (
-                "failed是草稿终态；重试需用户明确授权，同时移出"
-                "skipped.json并重置drafts.json中的failed状态"
+                "failed是草稿终态；重试需用户明确授权并运行ai-reply "
+                "--action retry --comment-id <id> --retry-authorized；程序同时"
+                "移出skipped并重置failed，但不直接发送"
             ),
             "incomplete_online_data": "立即停止；禁止使用内联数据猜测回复状态",
             "active_batch": (
-                "prepare和draft都会停用上一批次但保留历史草稿；"
-                "draft成功后写入active_comment_ids和active_batch；send必须"
+                "prepare和新内容的draft会停用上一批次但保留历史草稿；"
+                "相同预览重复draft复用原绑定；成功后写入active_comment_ids"
+                "和active_batch；send必须"
                 "提交相同batch_id与preview_hash，只处理该批次"
             ),
             "inflight_safety": (
@@ -529,7 +621,8 @@ def cmd_ai_help(args):
                 "python3 main.py ai-reply --note-id <id> --action prepare",
                 "prepare 默认只处理最新20条评论通知中的评论和楼中楼",
                 "仅当用户明确要求全部历史评论时使用 --full-scan",
-                "逐条完成逻辑、事实和吹牛审查后写入paths.reply_map",
+                "逐条完成审查后用ai-reply --action map结构化写入；"
+                "remaining_count=0后继续",
                 "python3 main.py ai-reply --note-id <id> --action draft",
                 "向用户展示 preview 并取得明确确认",
                 (
@@ -537,6 +630,7 @@ def cmd_ai_help(args):
                     "--confirmed --batch-id <draft返回值> "
                     "--preview-hash <draft返回值>"
                 ),
+                "跨会话不确定进度时先运行ai-reply --action status",
             ],
             "traditional_reply": {
                 "purpose": "兼容人工操作和旧脚本；AI不优先使用",
@@ -555,6 +649,48 @@ def cmd_ai_help(args):
                 "创建 .cache/workflows/post/note.json",
                 "python3 main.py post --input .cache/workflows/post/note.json --dry-run",
                 "python3 main.py post --input .cache/workflows/post/note.json",
+            ],
+            "watch": [
+                "python3 main.py watch（全部新评论，只发现不回复）",
+                "python3 main.py watch --note-id <id>（指定文章）",
+                "python3 main.py watch --user <精确昵称或用户ID>（指定用户）",
+                (
+                    "自动回复必须显式增加--auto-reply --confirmed；可用"
+                    "--reply-text固定文案，省略时使用config通用话术"
+                ),
+                "首次启动或--reset只建立基线；Ctrl+C后不会后台运行",
+            ],
+            "web": [
+                "python3 main.py web",
+                f"打开http://{WEB_HOST}:{WEB_PORT}",
+                (
+                    "主导航分为工作台、最新文章、最新评论、自动监控和回复排除"
+                    "列表；不显示其他系统工具；"
+                    "文章内进入评论分析，评论内逐条复制AI回复提示词或人工忽略"
+                ),
+                (
+                    "文章和评论默认每页10条并可翻阅完整本地快照；两处笔记ID"
+                    "均提供无文字复制图标"
+                ),
+                (
+                    "每条评论的回复按钮生成只针对该评论的中文AI提示词，直接"
+                    "复制到剪贴板；内部评论ID不在页面显示"
+                ),
+                (
+                    "每条评论的忽略按钮读取归档原文并加入排除列表，原因固定为"
+                    "人工忽略；已有排除记录不覆盖"
+                ),
+                (
+                    "网页不展示提示词、弹窗或独立回复页面，也不从回复入口扫描、"
+                    "生成草稿或直接发送；复制后由AI只处理目标评论"
+                ),
+                (
+                    "回复排除列表默认每页15条；关键词输入后自动搜索，也可"
+                    "点击搜索按钮；支持稳定翻页、重置和删除"
+                ),
+                "网页不提供笔记发布，CLI post仍保留",
+                "AI必须展示草稿并取得确认后，才能执行CLI发送",
+                "只监听本机，不提供远程访问或后台常驻服务",
             ],
         },
         "common_misunderstandings": {
@@ -603,10 +739,15 @@ def cmd_ai_help(args):
             ),
             "terminal_retry": (
                 "failed与sent、archived同为默认终态；failed重试必须有用户"
-                "明确授权，并同时移出skipped和重置drafts中的failed状态"
+                "明确授权，并使用retry动作同时移出skipped和重置failed状态；"
+                "该动作不会直接发送"
+            ),
+            "context_resume": (
+                "跨AI接续使用status读取SQLite派生摘要；不要新增summary.md或"
+                "context.json成为第二份可漂移状态源"
             ),
             "workflow_sequence": (
-                "新批次必须prepare→写映射→draft→用户确认→send；CLI依据"
+                "新批次必须prepare→map或写映射→draft→用户确认→send；CLI依据"
                 "状态文件校验，不证明这些命令刚在同一轮依次执行。已有合法"
                 "active批次可在稍后继续send，不能把规则描述成物理上无法跳转"
             ),
@@ -640,6 +781,14 @@ def cmd_ai_help(args):
                 "纯辱骂或贴标签且无实质观点时默认skip；不得编造数据、来源"
                 "或绝对化事实，也不得用回复升级冲突"
             ),
+            "watch_is_not_background_service": (
+                "SQLite检查点只用于识别新通知和保存发送状态；它不表示监控"
+                "正在运行。watch或web进程退出后不会继续自动回复"
+            ),
+            "watch_is_not_ai_generation": (
+                "watch自动回复使用--reply-text固定文案或config通用话术；程序"
+                "本身不调用外部大模型，不得宣称已自动完成事实核查或个性化生成"
+            ),
             "send_scope": (
                 "send处理当前active_comment_ids：发送send、持久化archive、"
                 "忽略skip；在线复核针对send的pending项和需要对账的sending项"
@@ -647,6 +796,10 @@ def cmd_ai_help(args):
             "confirmation_binding": (
                 "--confirmed本身不够；send必须同时提交draft返回的batch_id和"
                 "preview_hash。草稿被其他AI更新后旧确认立即失效"
+            ),
+            "draft_regeneration": (
+                "重复draft不会无条件刷新确认值；预览规范化哈希完全相同时"
+                "binding_reused=true并沿用原批次，实际内容变化才要求重新确认"
             ),
             "inflight_retry": (
                 "send_status=sending不是普通pending；它表示平台写结果可能"
@@ -695,6 +848,10 @@ def cmd_ai_help(args):
                 "prepare": (
                     "python3 main.py ai-reply --note-id <id> --action prepare"
                 ),
+                "map": (
+                    "ai-reply --action map --candidate-index <序号>"
+                    "（其余参数见ai-help --command ai-reply）"
+                ),
                 "draft": (
                     "python3 main.py ai-reply --note-id <id> --action draft"
                 ),
@@ -704,25 +861,27 @@ def cmd_ai_help(args):
                     "--preview-hash <preview_hash>"
                 ),
                 "rule": (
-                    "展示draft.preview并取得确认；发送时原样提交draft返回的"
-                    "batch_id和preview_hash"
+                    "map到remaining_count=0；展示draft.preview并取得确认；"
+                    "发送时原样提交draft返回的batch_id和preview_hash"
+                ),
+                "resume": "跨会话先用--action status；它不返回发送确认绑定",
+                "retry": (
+                    "failed仅在用户授权后用--action retry --comment-id <id> "
+                    "--retry-authorized重置，之后重新走预览确认"
                 ),
             },
             "critical_rules": [
-                "文章大列表按pagination.next_command读完缓存页；笔记ID对应note_id",
                 "scan候选不等于可回复，draft和send继续在线核验",
                 "prepare快速预算内未定位的深层楼中楼计入deferred_count，不生成草稿",
                 "同一笔记工作流由跨进程锁串行化；workflow_busy时等待",
-                "旧批次或内容变化返回stale_preview，必须重新预览确认",
+                "重复draft仅在预览变化时生成新绑定；相同内容复用原确认值",
+                "status用于跨AI恢复但不暴露发送确认绑定；不要另建第二状态源",
                 "执行流程只按audit.json报告；无审计不得从最终状态倒推历史",
                 "平台写入前先保存sending；uncertain_send_state禁止自动重发",
-                "全量读取和批量发送复用单一登录会话；账号级错误暂停剩余批次",
                 "楼中楼数据不完整、验证码或网络核验失败时硬停止",
                 "send失败默认写入skipped；sent/failed/archived不自动重试",
                 "评论ID和xsec_token不得显示给用户",
-                "评论列表和草稿的原评论必须完整显示，不得截断",
                 "每条候选先完成逻辑分析、事实核查和吹牛判定，再决定动作和回复",
-                "明确事实真伪结论必须带可核对来源；个人经历不得武断判假",
             ],
             "state": {
                 "database": ".cache/state.sqlite3（0600，权威状态源）",
@@ -748,10 +907,6 @@ def cmd_ai_help(args):
                 "batch_fields": [
                     "batch_id", "revision", "preview_hash", "status",
                 ],
-                "sensitive_token": (
-                    "SQLite敏感令牌索引（数据库0600）；xsec_index.json仅为"
-                    "兼容快照"
-                ),
             },
             "error_actions": {
                 "workflow_busy": "等待当前进程结束后重试，不并行启动",

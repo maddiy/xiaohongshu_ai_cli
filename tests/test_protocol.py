@@ -1,6 +1,7 @@
 """命令清单和AI协议测试。"""
 
 from tests.support import *
+from lib.state_db import DB_SCHEMA_VERSION
 
 
 class ProtocolTests(unittest.TestCase):
@@ -18,14 +19,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(set(subparsers.choices), set(COMMAND_NAMES))
         self.assertEqual(set(main.COMMAND_HANDLERS), set(COMMAND_NAMES))
         self.assertEqual(set(COMMAND_EFFECTS), set(COMMAND_NAMES))
-        self.assertEqual(len(COMMAND_NAMES), 14)
+        self.assertEqual(len(COMMAND_NAMES), 16)
 
     def test_ai_help_reports_authoritative_program_facts(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             main.cmd_ai_help(argparse.Namespace())
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["command_count"], 14)
+        self.assertEqual(payload["command_count"], 16)
         self.assertEqual(payload["commands"], list(COMMAND_NAMES))
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
         self.assertEqual(payload["system_name"], "小红书AI智能运营系统")
@@ -59,6 +60,22 @@ class ProtocolTests(unittest.TestCase):
             columns["用户"]["preferred_display_width"],
         )
         self.assertEqual(payload["defaults"]["cache_ttl_minutes"], 30)
+        self.assertGreater(
+            payload["defaults"]["persistent_helper_response_timeout_seconds"],
+            0,
+        )
+        self.assertGreater(
+            payload["defaults"]["comment_helper_max_seconds"],
+            payload["defaults"]["comment_helper_request_timeout_seconds"],
+        )
+        self.assertEqual(
+            payload["defaults"]["state_db_schema_version"],
+            DB_SCHEMA_VERSION,
+        )
+        self.assertIn(
+            f"DB schema {DB_SCHEMA_VERSION}",
+            payload["storage"]["database_schema"],
+        )
         self.assertIn("以本次命令运行结果为准", payload["verification"]["test_count"])
         self.assertIn("lib/__init__.py", payload["source_inventory"]["files"])
         self.assertEqual(
@@ -71,12 +88,17 @@ class ProtocolTests(unittest.TestCase):
             + len(payload["project_inventory"]["tests"])
             + len(payload["project_inventory"]["test_support"])
             + len(payload["project_inventory"]["documentation"])
-            + len(payload["project_inventory"]["tooling"]),
+            + len(payload["project_inventory"]["tooling"])
+            + len(payload["project_inventory"]["web_assets"]),
         )
         self.assertIn("lib/state_io.py", payload["source_inventory"]["files"])
         self.assertIn(
             "tests/test_protocol.py",
             payload["project_inventory"]["tests"],
+        )
+        self.assertEqual(
+            payload["project_inventory"]["web_assets"],
+            ["web/index.html", "web/app.js", "web/styles.css"],
         )
         self.assertNotIn(
             "tests/support.py",
@@ -115,8 +137,16 @@ class ProtocolTests(unittest.TestCase):
             payload["output_contract"]["draft_confirmation"],
         )
         self.assertIn(
+            "不要求AI直接编辑reply_map.json",
+            payload["output_contract"]["structured_mapping"],
+        )
+        self.assertIn(
             "force_refresh=true",
             payload["online_verification_stages"]["prepare"],
+        )
+        self.assertIn(
+            "不访问平台",
+            payload["online_verification_stages"]["map"],
         )
         self.assertIn(
             "停用旧active_comment_ids",
@@ -175,6 +205,10 @@ class ProtocolTests(unittest.TestCase):
             payload["common_misunderstandings"]["history_merge"],
         )
         self.assertIn(
+            "binding_reused=true",
+            payload["common_misunderstandings"]["draft_regeneration"],
+        )
+        self.assertIn(
             "只校验本次scan候选",
             payload["common_misunderstandings"]["mapping_validation_scope"],
         )
@@ -203,6 +237,12 @@ class ProtocolTests(unittest.TestCase):
             "不能证明",
             payload["test_inventory"]["history_rule"],
         )
+        self.assertTrue(payload["safety"]["watch_is_manual_foreground_only"])
+        self.assertTrue(payload["safety"]["watch_first_poll_is_baseline_only"])
+        self.assertEqual(payload["safety"]["web_bind"], "127.0.0.1")
+        self.assertFalse(payload["safety"]["web_remote_access"])
+        self.assertIn("--confirmed", payload["workflows"]["watch"][3])
+        self.assertIn("127.0.0.1", payload["workflows"]["web"][1])
 
     def test_ai_help_can_report_one_exact_command(self):
         args = build_parser().parse_args([
@@ -249,18 +289,13 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], AI_SCHEMA_VERSION)
         self.assertIn("--batch-id", payload["reply_workflow"]["send"])
         self.assertIn("--preview-hash", payload["reply_workflow"]["send"])
-        self.assertIn(
-            "workflow_busy",
-            payload["error_actions"],
-        )
-        self.assertIn(
-            "uncertain_send_state",
-            payload["error_actions"],
-        )
-        self.assertIn(
-            "batch_id",
-            payload["state"]["batch_fields"],
-        )
+        self.assertIn("--action map", payload["reply_workflow"]["map"])
+        self.assertIn("--candidate-index", payload["reply_workflow"]["map"])
+        self.assertIn("--action status", payload["reply_workflow"]["resume"])
+        self.assertIn("--retry-authorized", payload["reply_workflow"]["retry"])
+        self.assertIn("workflow_busy", payload["error_actions"])
+        self.assertIn("uncertain_send_state", payload["error_actions"])
+        self.assertIn("batch_id", payload["state"]["batch_fields"])
         self.assertIn("对象键顺序无关", payload["state"]["canonical_hash"])
         self.assertLess(len(output.getvalue().encode("utf-8")), 4000)
         self.assertNotIn("architecture", payload)
@@ -276,3 +311,21 @@ class ProtocolTests(unittest.TestCase):
             payload["entrypoints"]["full"],
             "python3 main.py ai-help",
         )
+
+    def test_ai_help_inventory_includes_short_guides_and_state_module(self):
+        args = argparse.Namespace(
+            summary=False, command_name=None, tests=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            from lib.cli_protocol import cmd_ai_help
+            cmd_ai_help(args)
+        payload = json.loads(output.getvalue())
+        self.assertIn(
+            "QUICKSTART.md", payload["project_inventory"]["documentation"]
+        )
+        self.assertIn(
+            "TROUBLESHOOTING.md",
+            payload["project_inventory"]["documentation"],
+        )
+        self.assertIn("lib/cli_ai_state.py", payload["source_inventory"]["files"])

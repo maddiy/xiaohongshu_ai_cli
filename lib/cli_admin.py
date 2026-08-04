@@ -24,6 +24,7 @@ from .state_io import (
     migrate_legacy_json,
     read_json_state,
 )
+from .state_db import DB_SCHEMA_VERSION, StateDBError, state_db
 
 
 def cmd_skipped(args):
@@ -118,7 +119,21 @@ def cmd_doctor(args):
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     release = _release_consistency(project_root)
-    migration = migrate_legacy_json()
+    try:
+        migration = migrate_legacy_json()
+        current_db_schema = state_db().get_setting(
+            "db_schema_version", ""
+        )
+    except StateDBError as error:
+        # doctor必须在状态库损坏、锁超时或版本过高时仍给出结构化修复信息，
+        # 不能让原生SQLite异常中断整份诊断报告。
+        migration = {
+            "imported": 0,
+            "deleted": 0,
+            "skipped": 0,
+            "errors": [str(error)],
+        }
+        current_db_schema = ""
     xhs_path = shutil.which("xhs") or ""
     xhs_version = ""
     if xhs_path:
@@ -174,8 +189,13 @@ def cmd_doctor(args):
             "value": os.path.abspath(WORK_DIR),
         },
         "sqlite_state": {
-            "ok": not migration["errors"],
+            "ok": (
+                not migration["errors"]
+                and current_db_schema == str(DB_SCHEMA_VERSION)
+            ),
             "value": STATE_DB_FILE,
+            "schema_version": current_db_schema,
+            "expected_schema_version": DB_SCHEMA_VERSION,
             "legacy_imported": migration["imported"],
             "legacy_deleted": migration["deleted"],
             "legacy_skipped": migration["skipped"],

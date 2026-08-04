@@ -72,7 +72,9 @@ class StateAuditTests(unittest.TestCase):
                 "drafts": os.path.join(temp_dir, "drafts.json"),
                 "audit": os.path.join(temp_dir, "audit.json"),
             }
-            actions = ("prepare", "draft", "draft", "send", "prepare")
+            actions = (
+                "prepare", "map", "draft", "draft", "send", "prepare",
+            )
             for action in actions:
                 args = argparse.Namespace(
                     note_id="n1", action=action, full_scan=False, limit=20,
@@ -92,12 +94,33 @@ class StateAuditTests(unittest.TestCase):
         first_workflow = starts[0]["workflow_id"]
         self.assertTrue(all(
             event["workflow_id"] == first_workflow
-            for event in starts[:4]
+            for event in starts[:5]
         ))
-        self.assertNotEqual(starts[4]["workflow_id"], first_workflow)
+        self.assertNotEqual(starts[5]["workflow_id"], first_workflow)
         self.assertEqual(
-            audit["current_workflow_id"], starts[4]["workflow_id"]
+            audit["current_workflow_id"], starts[5]["workflow_id"]
         )
+
+    def test_map_audit_records_structure_but_not_generated_text(self):
+        args = argparse.Namespace(
+            action="map",
+            comment_id="c1",
+            decision="send",
+            reply_text="不应进入审计的回复正文",
+            logic_verdict="sound",
+            logic_reason="不应进入审计的逻辑依据",
+            fact_verdict="supported",
+            fact_reason="不应进入审计的事实依据",
+            fact_source=[["来源", "https://example.com"]],
+            boast_verdict="none",
+            boast_reason="不应进入审计的判定依据",
+        )
+        inputs = cli_ai._audit_inputs(args, {"reply_map": "unused"})
+        serialized = json.dumps(inputs, ensure_ascii=False)
+        self.assertEqual(inputs["reply_length"], len(args.reply_text))
+        self.assertEqual(inputs["fact_source_count"], 1)
+        self.assertNotIn(args.reply_text, serialized)
+        self.assertNotIn(args.logic_reason, serialized)
 
     def test_paths_returns_recent_workflow_audit_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:

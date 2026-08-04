@@ -1,16 +1,37 @@
 """XHSClient的平台评论树读取和楼中楼核验能力。"""
 
 import json
+import math
 import os
 import subprocess
 import time
 
-from config import LOGIN_COOKIE_SOURCE
+from config import (
+    COMMENT_HELPER_MAX_SECONDS,
+    COMMENT_HELPER_PARENT_GRACE_SECONDS,
+    COMMENT_HELPER_REQUEST_TIMEOUT,
+    COMMENT_LOOKUP_MAX_PAGES,
+    LOGIN_COOKIE_SOURCE,
+)
 from .xhs_client_proxy import XHSClient
 
 
 class XHSCommentsMixin:
     """评论分页、候选定位和楼中楼读取。"""
+
+    @staticmethod
+    def _comment_helper_budgets(max_pages, group_count=0):
+        """返回helper内部预算和父进程上限，保证helper先主动收敛。"""
+        internal = min(
+            COMMENT_HELPER_MAX_SECONDS,
+            max(45.0, 30.0 + max_pages * 3.0 + group_count / 5.0),
+        )
+        parent = math.ceil(
+            internal
+            + COMMENT_HELPER_REQUEST_TIMEOUT * 2
+            + COMMENT_HELPER_PARENT_GRACE_SECONDS
+        )
+        return internal, parent
 
     @staticmethod
     def get_all_comments(
@@ -24,6 +45,9 @@ class XHSCommentsMixin:
             os.path.dirname(__file__), "xhs_comments_helper.py"
         )
         if tool_python and os.path.exists(helper):
+            helper_budget, parent_timeout = (
+                XHSClient._comment_helper_budgets(500)
+            )
             data = XHSClient._run_xhs([
                 tool_python,
                 helper,
@@ -36,7 +60,9 @@ class XHSCommentsMixin:
                 "[]",
                 "1" if include_sub_comments else "0",
                 "",
-            ], timeout=300)
+                f"{helper_budget:g}",
+                f"{COMMENT_HELPER_REQUEST_TIMEOUT:g}",
+            ], timeout=parent_timeout)
             if not data.get("ok"):
                 error_info = data.get("error", {})
                 detail = (
@@ -85,7 +111,7 @@ class XHSCommentsMixin:
         note_id,
         target_ids,
         xsec_token="",
-        max_pages=50,
+        max_pages=COMMENT_LOOKUP_MAX_PAGES,
         with_status=False,
         target_groups=None,
         target_anchors=None,
@@ -110,8 +136,8 @@ class XHSCommentsMixin:
             os.path.dirname(__file__), "xhs_comments_helper.py"
         )
         if xsec_token and groups and tool_python and os.path.exists(helper):
-            helper_timeout = min(
-                300, max(45, 30 + max_pages * 3 + len(groups) // 5)
+            helper_budget, parent_timeout = (
+                XHSClient._comment_helper_budgets(max_pages, len(groups))
             )
             data = XHSClient._run_xhs([
                 tool_python,
@@ -137,7 +163,9 @@ class XHSCommentsMixin:
                 ),
                 "1" if expand_unresolved else "0",
                 "",
-            ], timeout=helper_timeout)
+                f"{helper_budget:g}",
+                f"{COMMENT_HELPER_REQUEST_TIMEOUT:g}",
+            ], timeout=parent_timeout)
             if not data.get("ok"):
                 error_info = data.get("error", {})
                 detail = (

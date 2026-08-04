@@ -135,6 +135,41 @@ class AIReplyWorkflowTests(unittest.TestCase):
         self.assertIsNone(args.batch_id)
         self.assertIsNone(args.preview_hash)
 
+    def test_ai_reply_parser_exposes_structured_map_fields(self):
+        args = build_parser().parse_args([
+            "ai-reply", "--note-id", "n1", "--action", "map",
+            "--comment-id", "c1", "--decision", "send",
+            "--reply-text", '包含"引号"的回复',
+            "--logic-verdict", "partly_sound",
+            "--logic-reason", "依据",
+            "--fact-verdict", "supported",
+            "--fact-reason", "资料支持",
+            "--fact-source", "来源一", "https://example.com/one",
+            "--fact-source", "来源二", "https://example.com/two",
+            "--boast-verdict", "none",
+            "--boast-reason", "没有夸大",
+        ])
+        self.assertEqual(args.action, "map")
+        self.assertEqual(args.comment_id, "c1")
+        self.assertEqual(args.reply_text, '包含"引号"的回复')
+        self.assertEqual(len(args.fact_source), 2)
+
+    def test_ai_reply_parser_exposes_status_retry_and_candidate_index(self):
+        map_args = build_parser().parse_args([
+            "ai-reply", "--note-id", "n1", "--action", "map",
+            "--candidate-index", "2",
+        ])
+        retry_args = build_parser().parse_args([
+            "ai-reply", "--note-id", "n1", "--action", "retry",
+            "--comment-id", "c1", "--retry-authorized",
+        ])
+        status_args = build_parser().parse_args([
+            "ai-reply", "--note-id", "n1", "--action", "status",
+        ])
+        self.assertEqual(map_args.candidate_index, 2)
+        self.assertTrue(retry_args.retry_authorized)
+        self.assertEqual(status_args.action, "status")
+
     @patch("lib.cli_ai.CommentScanner")
     def test_ai_draft_creates_confirmation_bound_batch(
         self, scanner_class
@@ -210,6 +245,68 @@ class AIReplyWorkflowTests(unittest.TestCase):
             saved["drafts"][0]["review"]["boast_check"]["verdict"],
             "none",
         )
+
+    @patch("lib.cli_ai.CommentScanner")
+    def test_ai_draft_reuses_binding_only_when_preview_is_unchanged(
+        self, scanner_class
+    ):
+        candidate = {
+            "comment_id": "c1", "nickname": "用户", "content": "评论",
+        }
+        scanner_class.return_value.verify_candidates_online.return_value = (
+            [candidate], []
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": [candidate],
+                    "unreplied_subs": [],
+                }, file)
+            mapping = {
+                "c1": {
+                    "reply": "回复", "action": "send",
+                    "review": _valid_review(),
+                },
+            }
+            with open(paths["reply_map"], "w", encoding="utf-8") as file:
+                json.dump(mapping, file)
+            args = argparse.Namespace(note_id="n1", replies=None)
+
+            first_output = io.StringIO()
+            with contextlib.redirect_stdout(first_output):
+                cli_ai._draft(args, paths)
+            first = json.loads(first_output.getvalue())
+
+            second_output = io.StringIO()
+            with contextlib.redirect_stdout(second_output):
+                cli_ai._draft(args, paths)
+            second = json.loads(second_output.getvalue())
+            self.assertTrue(second["binding_reused"])
+            self.assertFalse(second["new_confirmation_required"])
+            self.assertEqual(second["batch_id"], first["batch_id"])
+            self.assertEqual(second["preview_hash"], first["preview_hash"])
+            self.assertEqual(second["revision"], first["revision"])
+
+            mapping["c1"]["reply"] = "修改后的回复"
+            with open(paths["reply_map"], "w", encoding="utf-8") as file:
+                json.dump(mapping, file)
+            third_output = io.StringIO()
+            with contextlib.redirect_stdout(third_output):
+                cli_ai._draft(args, paths)
+            third = json.loads(third_output.getvalue())
+        self.assertFalse(third["binding_reused"])
+        self.assertTrue(third["new_confirmation_required"])
+        self.assertNotEqual(third["batch_id"], second["batch_id"])
+        self.assertNotEqual(third["preview_hash"], second["preview_hash"])
+        self.assertEqual(third["revision"], second["revision"] + 1)
 
     @patch("lib.cli_ai.CommentScanner")
     def test_ai_send_rejects_confirmation_for_old_batch(

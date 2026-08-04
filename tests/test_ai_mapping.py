@@ -4,6 +4,162 @@ from tests.support import *
 
 
 class AIReplyMappingTests(unittest.TestCase):
+    @staticmethod
+    def _map_args(reply_text='他说"可以"'):
+        return argparse.Namespace(
+            note_id="n1",
+            replies=None,
+            comment_id="c1",
+            candidate_index=None,
+            decision="send",
+            reply_text=reply_text,
+            logic_verdict="partly_sound",
+            logic_reason='论据支持"部分结论"',
+            fact_verdict="unverifiable",
+            fact_reason="缺少独立资料",
+            fact_source=[],
+            boast_verdict="none",
+            boast_reason="没有自我夸大",
+        )
+
+    def test_structured_map_writes_valid_json_and_preserves_quotes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": [{
+                        "comment_id": "c1",
+                        "nickname": "用户",
+                        "content": "评论",
+                    }],
+                    "unreplied_subs": [],
+                }, file)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._map(self._map_args(), paths)
+            payload = json.loads(output.getvalue())
+            with open(paths["reply_map"], encoding="utf-8") as file:
+                mapping = json.load(file)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["changed"])
+        self.assertEqual(payload["remaining_count"], 0)
+        self.assertEqual(mapping["c1"]["reply"], '他说"可以"')
+        self.assertEqual(
+            mapping["c1"]["review"]["logic"]["reason"],
+            '论据支持"部分结论"',
+        )
+
+    def test_structured_map_accepts_candidate_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": [
+                        {"comment_id": "c1"}, {"comment_id": "c2"},
+                    ],
+                    "unreplied_subs": [],
+                }, file)
+            args = self._map_args()
+            args.comment_id = None
+            args.candidate_index = 2
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._map(args, paths)
+            payload = json.loads(output.getvalue())
+            with open(paths["reply_map"], encoding="utf-8") as file:
+                mapping = json.load(file)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["comment_id"], "c2")
+        self.assertEqual(payload["candidate_index"], 2)
+        self.assertIn("c2", mapping)
+
+    def test_structured_map_uses_persisted_candidate_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "reply_status_verified": True,
+                    "unreplied_level1": [{
+                        "comment_id": "c2", "candidate_index": 7,
+                    }],
+                    "unreplied_subs": [],
+                }, file)
+            args = self._map_args()
+            args.comment_id = None
+            args.candidate_index = 7
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli_ai._map(args, paths)
+            payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["comment_id"], "c2")
+        self.assertEqual(payload["candidate_index"], 7)
+
+    def test_structured_map_only_invalidates_batch_when_entry_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+            }
+            with open(paths["scan"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "note_id": "n1",
+                    "reply_status_verified": True,
+                    "unreplied_level1": [{"comment_id": "c1"}],
+                    "unreplied_subs": [],
+                }, file)
+            first_output = io.StringIO()
+            with contextlib.redirect_stdout(first_output):
+                cli_ai._map(self._map_args(), paths)
+            with open(paths["drafts"], "w", encoding="utf-8") as file:
+                json.dump({
+                    "active_comment_ids": ["c1"],
+                    "active_batch": {"status": "previewed"},
+                    "drafts": [],
+                }, file)
+
+            unchanged_output = io.StringIO()
+            with contextlib.redirect_stdout(unchanged_output):
+                cli_ai._map(self._map_args(), paths)
+            unchanged = json.loads(unchanged_output.getvalue())
+            with open(paths["drafts"], encoding="utf-8") as file:
+                still_active = json.load(file)
+            self.assertFalse(unchanged["changed"])
+            self.assertFalse(unchanged["batch_invalidated"])
+            self.assertEqual(still_active["active_comment_ids"], ["c1"])
+
+            changed_output = io.StringIO()
+            with contextlib.redirect_stdout(changed_output):
+                cli_ai._map(self._map_args("新的回复"), paths)
+            changed = json.loads(changed_output.getvalue())
+            with open(paths["drafts"], encoding="utf-8") as file:
+                inactive = json.load(file)
+        self.assertTrue(changed["changed"])
+        self.assertTrue(changed["batch_invalidated"])
+        self.assertEqual(inactive["active_comment_ids"], [])
+        self.assertEqual(inactive["active_batch"]["status"], "superseded")
+
     def test_reply_map_validation_rejects_unsafe_send_entries(self):
         errors = cli_ai._validate_reply_map({
             "c1": {

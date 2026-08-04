@@ -6,6 +6,12 @@ import re
 
 from .state_io import read_workflow_state
 from .cli_support import NON_RESEND_STATUSES, write_json
+from .reply_schema import (
+    BOAST_VERDICTS,
+    FACT_VERDICTS,
+    LOGIC_VERDICTS,
+    REPLY_ACTIONS,
+)
 
 
 DRAFT_COLUMNS = ["序号", "用户", "原评论", "拟回复", "操作"]
@@ -30,23 +36,16 @@ AUDIT_RESULT_FIELDS = (
     "paused", "pause_reason", "remaining", "attempt_id", "mismatch",
     "current_revision", "current_batch_status", "diagnostic", "next",
     "reply_map_repaired", "quote_replacements",
+    "changed", "batch_invalidated", "mapped_count", "remaining_count",
+    "binding_reused", "new_confirmation_required",
+    "candidate_count", "active_count", "failed_count", "state_reset",
+    "skipped_removed", "mapping_remaining_count", "batch_status",
 )
 
 AI_TEXT_VALUE_LINE = re.compile(
     r'^(\s*"(?:reply|reason)"\s*:\s*")(.*)("\s*,?\s*)(\r?\n)?$'
 )
 
-LOGIC_VERDICTS = {
-    "sound", "partly_sound", "weak", "fallacious",
-    "non_argument", "unclear",
-}
-FACT_VERDICTS = {
-    "supported", "mixed", "contradicted", "unverifiable",
-    "not_applicable",
-}
-BOAST_VERDICTS = {
-    "none", "possible", "likely", "unverifiable", "not_applicable",
-}
 REVIEW_VERDICT_LABELS = {
     "logic": {
         "sound": "逻辑成立",
@@ -323,7 +322,7 @@ def _validate_reply_map(reply_map, candidate_ids):
         return ["顶层必须是 JSON 对象，以 comment_id 为键"]
 
     errors = []
-    allowed_actions = {"send", "skip", "archive"}
+    allowed_actions = set(REPLY_ACTIONS)
     for comment_id in candidate_ids:
         if comment_id not in reply_map:
             errors.append(

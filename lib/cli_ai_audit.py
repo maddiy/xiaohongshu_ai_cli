@@ -69,6 +69,36 @@ def _audit_inputs(args, paths):
             except OSError:
                 pass
         return {"reply_map": evidence}
+    if action == "map":
+        return {
+            "comment_id": str(getattr(args, "comment_id", "") or ""),
+            "candidate_index": getattr(args, "candidate_index", None),
+            "decision": str(getattr(args, "decision", "") or ""),
+            "logic_verdict": str(
+                getattr(args, "logic_verdict", "") or ""
+            ),
+            "fact_verdict": str(
+                getattr(args, "fact_verdict", "") or ""
+            ),
+            "boast_verdict": str(
+                getattr(args, "boast_verdict", "") or ""
+            ),
+            "fact_source_count": len(
+                getattr(args, "fact_source", None) or []
+            ),
+            "reply_length": len(
+                str(getattr(args, "reply_text", "") or "")
+            ),
+        }
+    if action == "status":
+        return {}
+    if action == "retry":
+        return {
+            "comment_id": str(getattr(args, "comment_id", "") or ""),
+            "retry_authorized": bool(
+                getattr(args, "retry_authorized", False)
+            ),
+        }
     return {
         "confirmed": bool(getattr(args, "confirmed", False)),
         "batch_id": str(getattr(args, "batch_id", "") or ""),
@@ -82,6 +112,7 @@ def _audit_result(payload):
         key: _audit_value(payload[key])
         for key in AUDIT_RESULT_FIELDS if key in payload
     }
+
 
 def _record_send_attempt(
     drafts, supplied_batch_id, supplied_preview_hash, outcome,
@@ -109,4 +140,3 @@ def _record_send_attempt(
     attempts.append(attempt)
     drafts["send_attempts"] = attempts[-SEND_ATTEMPT_LIMIT:]
     return attempt
-

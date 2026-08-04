@@ -4,17 +4,20 @@
 """
 import json
 import os
+import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
-from typing import Optional
+from typing import Any, Optional, TextIO
 
 from config import (
     BATCH_REPLY_DELAY,
     CACHE_DIR,
     CACHE_TTL_MINUTES,
     LOGIN_COOKIE_SOURCE,
+    PERSISTENT_HELPER_RESPONSE_TIMEOUT,
 )
 from .state_io import (
     atomic_write_json,
@@ -32,12 +35,14 @@ from .xhs_client_state import XHSStateMixin
 class _PersistentReplySession:
     """复用一个 xhs 登录会话发送多条回复，并逐条返回结构化结果。"""
 
-    def __init__(self, client, note_id):
+    def __init__(self, client: Any, note_id: str):
         self.client = client
         self.note_id = note_id
-        self.process = None
+        self.process: Optional[subprocess.Popen] = None
+        self.stderr_file: Optional[TextIO] = None
+        self.response_timeout = PERSISTENT_HELPER_RESPONSE_TIMEOUT
 
-    def __enter__(self):
+    def __enter__(self) -> "_PersistentReplySession":
         tool_python = self.client._find_xhs_tool_python()
         helper = os.path.join(
             os.path.dirname(__file__), "xhs_reply_helper.py"
@@ -45,6 +50,9 @@ class _PersistentReplySession:
         if not tool_python or not os.path.exists(helper):
             return self
         try:
+            self.stderr_file = tempfile.TemporaryFile(
+                mode="w+t", encoding="utf-8"
+            )
             self.process = subprocess.Popen(
                 [
                     tool_python,
@@ -55,55 +63,122 @@ class _PersistentReplySession:
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=self.stderr_file,
                 text=True,
                 bufsize=1,
             )
         except OSError:
             self.process = None
+            if self.stderr_file is not None:
+                self.stderr_file.close()
+                self.stderr_file = None
         return self
 
-    def __exit__(self, *_args):
+    def _terminate_process(self) -> None:
         if self.process is None:
             return
         try:
-            self.process.stdin.close()
-        except (AttributeError, OSError):
-            pass
-        try:
-            self.process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-        try:
-            self.process.stdout.close()
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
         except (AttributeError, OSError):
             pass
 
-    def reply(self, comment_id, content):
+    def _stderr_tail(self, limit: int = 400) -> str:
+        """只回读临时诊断尾部；发现凭据字段名时隐藏原文。"""
+        if self.stderr_file is None or self.stderr_file.closed:
+            return ""
+        try:
+            self.stderr_file.flush()
+            end = self.stderr_file.seek(0, os.SEEK_END)
+            self.stderr_file.seek(max(0, end - limit))
+            text = self.stderr_file.read().strip()
+            self.stderr_file.seek(0, os.SEEK_END)
+        except (OSError, ValueError):
+            return ""
+        if any(marker in text.casefold() for marker in (
+            "xsec_token", "cookie", "authorization", "set-cookie",
+        )):
+            return "[诊断包含敏感凭据字段，已隐藏]"
+        return text[-limit:]
+
+    def _readline_with_timeout(self) -> Optional[str]:
+        if self.process is None or self.process.stdout is None:
+            return ""
+        stream = self.process.stdout
+        try:
+            ready, _, _ = select.select(
+                [stream], [], [], max(float(self.response_timeout), 0.1)
+            )
+        except (TypeError, ValueError, OSError):
+            # 测试替身或非POSIX流没有可select的文件描述符；真实helper管道
+            # 在支持环境中总是走上面的有界等待。
+            return stream.readline()
+        if not ready:
+            return None
+        return stream.readline()
+
+    def _exchange(self, request: dict, label: str) -> tuple:
+        if self.process is None or self.process.stdin is None:
+            return None, f"{label}需要持久会话"
+        encoded = json.dumps(
+            request, ensure_ascii=False, separators=(",", ":")
+        )
+        try:
+            self.process.stdin.write(encoded + "\n")
+            self.process.stdin.flush()
+            line = self._readline_with_timeout()
+        except (AttributeError, BrokenPipeError, OSError):
+            line = ""
+        if line is None:
+            self._terminate_process()
+            diagnostic = self._stderr_tail()
+            detail = f"{label}响应超时（{self.response_timeout:g}秒）"
+            if diagnostic:
+                detail += f"；helper诊断: {diagnostic}"
+            return None, detail
+        if not line:
+            diagnostic = self._stderr_tail()
+            detail = f"{label}意外结束"
+            if diagnostic:
+                detail += f"；helper诊断: {diagnostic}"
+            return None, detail
+        try:
+            return json.loads(line), ""
+        except json.JSONDecodeError:
+            return None, f"{label}返回了无效数据"
+
+    def __exit__(self, *_args: Any) -> None:
+        if self.process is not None:
+            try:
+                self.process.stdin.close()
+            except (AttributeError, OSError):
+                pass
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._terminate_process()
+            try:
+                self.process.stdout.close()
+            except (AttributeError, OSError):
+                pass
+        if self.stderr_file is not None:
+            self.stderr_file.close()
+            self.stderr_file = None
+
+    def reply(self, comment_id: str, content: str) -> tuple:
         """保持与 XHSClient.reply 相同的三元组返回约定。"""
         if self.process is None:
             return self.client.reply(self.note_id, comment_id, content)
-        request = json.dumps(
+        payload, session_error = self._exchange(
             {"comment_id": comment_id, "content": content},
-            ensure_ascii=False,
-            separators=(",", ":"),
+            "批量回复会话",
         )
-        try:
-            self.process.stdin.write(request + "\n")
-            self.process.stdin.flush()
-            line = self.process.stdout.readline()
-        except (AttributeError, BrokenPipeError, OSError):
-            line = ""
-        if not line:
-            return False, "批量回复会话意外结束", "session_error"
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            return False, "批量回复会话返回了无效数据", "session_error"
+        if payload is None:
+            return False, session_error, "session_error"
         if payload.get("ok"):
             return True, "", ""
         error = payload.get("error", {})
@@ -123,41 +198,19 @@ class _PersistentReplySession:
         )
         return False, detail[:200], error_type
 
-    def comment(self, content, sequence=None):
+    def comment(
+        self, content: str, sequence: Optional[int] = None
+    ) -> tuple:
         """在当前笔记发布顶层评论，复用同一个登录会话。"""
         if self.process is None:
             return False, "批量评论需要持久会话", "session_error", ""
-        request = json.dumps(
-            {
-                "action": "comment",
-                "sequence": sequence,
-                "content": content,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        try:
-            self.process.stdin.write(request + "\n")
-            self.process.stdin.flush()
-            line = self.process.stdout.readline()
-        except (AttributeError, BrokenPipeError, OSError):
-            line = ""
-        if not line:
-            return (
-                False,
-                "批量评论会话意外结束",
-                "session_error",
-                "",
-            )
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            return (
-                False,
-                "批量评论会话返回了无效数据",
-                "session_error",
-                "",
-            )
+        payload, session_error = self._exchange({
+            "action": "comment",
+            "sequence": sequence,
+            "content": content,
+        }, "批量评论会话")
+        if payload is None:
+            return False, session_error, "session_error", ""
         if payload.get("ok"):
             return True, "", "", str(payload.get("comment_id", "") or "")
         error = payload.get("error", {})

@@ -1,6 +1,7 @@
 """持久登录会话和批量请求测试。"""
 
 from tests.support import *
+from config import COMMENT_HELPER_REQUEST_TIMEOUT
 
 
 class PersistentSessionTests(unittest.TestCase):
@@ -73,7 +74,57 @@ class PersistentSessionTests(unittest.TestCase):
         command = run_xhs.call_args.args[0]
         self.assertTrue(command[1].endswith("xhs_comments_helper.py"))
         self.assertEqual(command[9], "1")
-        self.assertEqual(run_xhs.call_args.kwargs["timeout"], 300)
+        helper_budget = float(command[11])
+        request_timeout = float(command[12])
+        parent_timeout = run_xhs.call_args.kwargs["timeout"]
+        self.assertEqual(request_timeout, COMMENT_HELPER_REQUEST_TIMEOUT)
+        self.assertGreater(
+            parent_timeout, helper_budget + request_timeout * 2
+        )
+
+    @patch("lib.xhs_client.select.select", return_value=([], [], []))
+    @patch("lib.xhs_client.subprocess.Popen")
+    @patch("lib.xhs_client.os.path.exists", return_value=True)
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    def test_persistent_session_times_out_and_terminates_helper(
+        self, _tool_python, _exists, popen, _select
+    ):
+        process = popen.return_value
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        client = XHSClient()
+        with client.reply_session("n1") as session:
+            session.response_timeout = 0.1
+            result = session.reply("c1", "回复")
+        self.assertFalse(result[0])
+        self.assertEqual(result[2], "session_error")
+        self.assertIn("响应超时", result[1])
+        process.terminate.assert_called()
+        process.stdout.readline.assert_not_called()
+
+    @patch("lib.xhs_client.select.select")
+    @patch("lib.xhs_client.subprocess.Popen")
+    @patch("lib.xhs_client.os.path.exists", return_value=True)
+    @patch(
+        "lib.xhs_client.XHSClient._find_xhs_tool_python",
+        return_value="/tool/python",
+    )
+    def test_persistent_session_returns_redacted_stderr_tail(
+        self, _tool_python, _exists, popen, select_mock
+    ):
+        process = popen.return_value
+        process.stdout.readline.return_value = ""
+        process.wait.return_value = 0
+        select_mock.return_value = ([process.stdout], [], [])
+        client = XHSClient()
+        with client.reply_session("n1") as session:
+            session.stderr_file.write("cookie=secret-value")
+            result = session.reply("c1", "回复")
+        self.assertIn("已隐藏", result[1])
+        self.assertNotIn("secret-value", result[1])
 
     @patch("lib.replier.time.sleep")
     def test_batch_stops_after_account_level_error(self, _sleep):

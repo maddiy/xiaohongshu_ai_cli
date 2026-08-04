@@ -1,7 +1,19 @@
 """命令行参数定义；与业务命令解耦，便于单独测试和扩展。"""
 
 import argparse
-from config import APP_VERSION, SYSTEM_NAME
+from config import (
+    APP_VERSION,
+    SYSTEM_NAME,
+    WATCH_NOTIFICATION_LIMIT,
+    WATCH_POLL_INTERVAL_SECONDS,
+    WEB_PORT,
+)
+from .reply_schema import (
+    BOAST_VERDICTS,
+    FACT_VERDICTS,
+    LOGIC_VERDICTS,
+    REPLY_ACTIONS,
+)
 
 
 COMMAND_NAMES = (
@@ -19,6 +31,8 @@ COMMAND_NAMES = (
     "ai-help",
     "paths",
     "ai-reply",
+    "watch",
+    "web",
 )
 
 COMMAND_EFFECTS = {
@@ -97,13 +111,41 @@ COMMAND_EFFECTS = {
         "output": "始终为单一 JSON",
     },
     "ai-reply": {
-        "platform": "prepare/draft 读取并核验；send 发送回复",
+        "platform": (
+            "prepare/draft读取并核验；map/status/retry不访问；send发送回复"
+        ),
         "local": (
-            "持有同笔记跨进程锁，读写带批次指纹的固定工作流文件；"
+            "持有同笔记跨进程锁；map结构化写入回复映射；"
+            "status读取状态摘要；retry经用户授权后重置单条失败终态；"
+            "读写带批次指纹的固定工作流文件；"
             "以0600权限记录有界命令审计；"
             "失败时更新 skipped.json；在线核验可能更新敏感令牌索引"
         ),
         "output": "始终为单一紧凑 JSON",
+    },
+    "watch": {
+        "platform": (
+            "读取评论通知；仅--auto-reply --confirmed同时提供时发送回复"
+        ),
+        "local": (
+            "在SQLite保存按过滤条件隔离的基线、已见评论和发送状态；"
+            "仅命令进程运行期间启用，Ctrl+C后停止"
+        ),
+        "output": "终端文本；--json时为逐事件JSON Lines",
+    },
+    "web": {
+        "platform": (
+            "根据页面操作认证、读取文章和评论、分析评论或启动自动回复监控；"
+            "评论行回复按钮生成定向提示词并直接复制，忽略按钮更新本地排除列表；"
+            "这两个按钮均不访问平台；网页不提供笔记发布"
+        ),
+        "local": (
+            "仅监听127.0.0.1；文章和评论以每页10条展示本地分页快照；"
+            "回复排除列表默认每页15条；"
+            "逐条回复按钮只在本地生成并复制AI提示词；逐条忽略的原因固定为人工忽略；"
+            "页面复用SQLite工作流状态；显式启动的监控随Web进程停止"
+        ),
+        "output": "启动地址和本地Web页面",
     },
 }
 
@@ -146,6 +188,8 @@ def build_parser():
   python3 main.py post --input note.json --dry-run
   python3 main.py doctor
   python3 main.py ai-help
+  python3 main.py watch --once --json
+  python3 main.py web
 """,
     )
     parser.add_argument(
@@ -297,13 +341,69 @@ def build_parser():
         help="内联最近几条工作流审计事件（默认0，最大100）",
     )
 
+    watch = subparsers.add_parser(
+        "watch", help="手动开启新评论监控；Ctrl+C停止"
+    )
+    watch.add_argument("--note-id", help="只监控指定笔记ID")
+    watch.add_argument(
+        "--user", help="只监控精确昵称或用户ID；可与--note-id组合"
+    )
+    watch.add_argument(
+        "--interval", type=float, default=WATCH_POLL_INTERVAL_SECONDS,
+        help="轮询间隔秒数，最少10秒（默认60）",
+    )
+    watch.add_argument(
+        "--limit", type=int, default=WATCH_NOTIFICATION_LIMIT,
+        help="每轮读取的最新评论通知数量（默认50，最大200）",
+    )
+    watch.add_argument(
+        "--auto-reply", action="store_true",
+        help="对在线核验后的新评论自动回复；必须同时提供--confirmed",
+    )
+    watch.add_argument(
+        "--confirmed", action="store_true",
+        help="确认用户已明确授权监控期间自动发送回复",
+    )
+    watch.add_argument(
+        "--reply-text",
+        help="固定回复正文；省略时从config.py通用话术中选择",
+    )
+    watch.add_argument(
+        "--once", action="store_true",
+        help="只检查一次后退出；首次仍只建立基线",
+    )
+    watch.add_argument(
+        "--reset", action="store_true",
+        help="删除当前过滤条件检查点并重新建立基线，不处理已有通知",
+    )
+    watch.add_argument(
+        "--status", action="store_true",
+        help="只读本地检查点状态，不访问平台、不启动监控",
+    )
+    watch.add_argument(
+        "--json", action="store_true",
+        help="每个监控事件输出一行紧凑JSON",
+    )
+
+    web = subparsers.add_parser(
+        "web", help="启动仅本机可访问的完整运营控制页面"
+    )
+    web.add_argument(
+        "--port", type=int, default=WEB_PORT,
+        help="本地监听端口（默认8765；使用0可自动选择空闲端口）",
+    )
+
     ai_reply = subparsers.add_parser(
         "ai-reply", help="AI 专用紧凑回复工作流（仅输出 JSON）"
     )
     ai_reply.add_argument("--note-id", required=True, help="笔记ID")
     ai_reply.add_argument(
-        "--action", required=True, choices=["prepare", "draft", "send"],
-        help="prepare=扫描，draft=生成预览，send=发送",
+        "--action", required=True,
+        choices=["prepare", "map", "draft", "send", "status", "retry"],
+        help=(
+            "prepare=扫描，map=结构化写映射，draft=生成预览，send=发送，"
+            "status=状态摘要，retry=授权重置单条失败终态"
+        ),
     )
     ai_reply.add_argument(
         "--replies", metavar="FILE",
@@ -328,6 +428,50 @@ def build_parser():
     ai_reply.add_argument(
         "--full-scan", action="store_true",
         help="扫描全部历史评论和楼中楼；默认只处理最新评论",
+    )
+    ai_reply.add_argument(
+        "--comment-id", help="map动作要写入的候选评论ID",
+    )
+    ai_reply.add_argument(
+        "--candidate-index", type=int,
+        help="map动作的候选序号；与--comment-id二选一",
+    )
+    ai_reply.add_argument(
+        "--retry-authorized", action="store_true",
+        help="确认用户已明确授权重试该失败评论，仅retry动作使用",
+    )
+    ai_reply.add_argument(
+        "--decision", choices=REPLY_ACTIONS,
+        help="map动作的回复决策：send、skip或archive",
+    )
+    ai_reply.add_argument(
+        "--reply-text", default="", help="map动作的回复正文；send时必填",
+    )
+    ai_reply.add_argument(
+        "--logic-verdict", choices=LOGIC_VERDICTS,
+        help="map动作的逻辑分析结论",
+    )
+    ai_reply.add_argument(
+        "--logic-reason", help="map动作的逻辑分析依据",
+    )
+    ai_reply.add_argument(
+        "--fact-verdict", choices=FACT_VERDICTS,
+        help="map动作的事实核查结论",
+    )
+    ai_reply.add_argument(
+        "--fact-reason", help="map动作的事实核查依据",
+    )
+    ai_reply.add_argument(
+        "--fact-source", nargs=2, action="append", default=[],
+        metavar=("TITLE", "URL"),
+        help="map动作的事实来源，可重复：--fact-source 标题 URL",
+    )
+    ai_reply.add_argument(
+        "--boast-verdict", choices=BOAST_VERDICTS,
+        help="map动作的吹牛判定结论",
+    )
+    ai_reply.add_argument(
+        "--boast-reason", help="map动作的吹牛判定依据",
     )
     if set(subparsers.choices) != set(COMMAND_NAMES):
         raise RuntimeError("参数定义与 COMMAND_NAMES 不一致")

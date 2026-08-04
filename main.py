@@ -41,6 +41,8 @@ from lib.cli_admin import (
     cmd_skipped,
 )
 from lib.cli_ai import cmd_ai_reply
+from lib.cli_watch import cmd_watch
+from lib.web_app import cmd_web
 from lib.state_io import json_state_exists, read_json_state
 
 
@@ -531,6 +533,8 @@ COMMAND_HANDLERS = {
     "ai-help": cmd_ai_help,
     "paths": cmd_paths,
     "ai-reply": cmd_ai_reply,
+    "watch": cmd_watch,
+    "web": cmd_web,
 }
 
 

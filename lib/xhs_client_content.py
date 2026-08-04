@@ -214,10 +214,13 @@ class XHSContentMixin:
             if not comment_id or comment_id in seen_comment_ids[note_id]:
                 continue
             seen_comment_ids[note_id].add(comment_id)
+            user_info = notification.get("user_info", {})
             by_note[note_id]["new_comments"].append({
                 "comment_id": comment_id,
-                "nickname": notification.get("user_info", {}).get(
-                    "nickname", "?"
+                "nickname": user_info.get("nickname", "?"),
+                # 仅供watch精确匹配用户；紧凑扫描和界面输出不会展示该字段。
+                "user_id": str(
+                    user_info.get("user_id") or user_info.get("id") or ""
                 ),
                 "content": comment_info.get("content", ""),
                 "time": notification.get("time", 0),

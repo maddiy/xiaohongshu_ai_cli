@@ -6,10 +6,10 @@
 
 import os
 import subprocess
-from typing import Optional
+from typing import List, Optional
 
 
-def validate_note(title: str, body: str, images: list) -> None:
+def validate_note(title: str, body: str, images: List[str]) -> None:
     """校验发布参数，错误时抛出适合直接展示给中文用户的异常。"""
     if not title.strip():
         raise ValueError("标题不能为空")
@@ -24,25 +24,41 @@ def validate_note(title: str, body: str, images: list) -> None:
             raise FileNotFoundError(f"图片不存在: {img}")
 
 
-def build_command(title: str, body: str, images: list,
-                  topics: Optional[list] = None,
-                  private: bool = False) -> list:
+def build_command(
+    title: str,
+    body: str,
+    images: List[str],
+    topics: Optional[List[str]] = None,
+    private: bool = False,
+) -> List[str]:
     """构造 xhs 命令，供 CLI、AI 工具和测试共同复用。"""
     validate_note(title, body, images)
     full_body = body
     if topics:
-        normalized_topics = [str(t).strip().lstrip("#") for t in topics if str(t).strip()]
+        normalized_topics = [
+            str(topic).strip().lstrip("#")
+            for topic in topics if str(topic).strip()
+        ]
         if normalized_topics:
             full_body = f"{body}\n\n{' '.join('#' + t for t in normalized_topics)}"
 
-    cmd = ["xhs", "post", "--title", title, "--body", full_body, "--images", *images]
+    cmd = [
+        "xhs", "post", "--title", title, "--body", full_body,
+        "--images", *images,
+    ]
     if private:
         cmd.append("--private")
     return cmd
 
 
-def publish(title: str, body: str, images: list, topics: Optional[list] = None,
-            private: bool = False, dry_run: bool = False) -> bool:
+def publish(
+    title: str,
+    body: str,
+    images: List[str],
+    topics: Optional[List[str]] = None,
+    private: bool = False,
+    dry_run: bool = False,
+) -> bool:
     """发布小红书笔记
 
     Args:
@@ -68,7 +84,16 @@ def publish(title: str, body: str, images: list, topics: Optional[list] = None,
         print("预览完成，未发布。")
         return True
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        print("发布失败: 平台请求超过60秒，结果未知，请先到客户端核对")
+        return False
+    except OSError as error:
+        print(f"发布失败: 无法启动xhs命令: {error}")
+        return False
     output = result.stdout + result.stderr
     if result.returncode != 0:
         print(f"发布失败: {output[:200]}")

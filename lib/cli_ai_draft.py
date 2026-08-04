@@ -40,6 +40,14 @@ from .scanner import CommentScanner
 def _draft(args, paths):
     scan_path = paths["scan"]
     reply_path = os.path.abspath(args.replies or paths["reply_map"])
+    previous_drafts = {}
+    if json_state_exists(paths["drafts"]):
+        try:
+            previous_drafts = _load_json(
+                paths["drafts"], role="program_state"
+            )
+        except (OSError, json.JSONDecodeError):
+            previous_drafts = {}
     # 即使本次草稿失败也停用旧活动批次，防止调用方误把旧预览当作新批发送。
     _clear_active_batch(paths["drafts"])
     if not json_state_exists(scan_path):
@@ -225,18 +233,45 @@ def _draft(args, paths):
     if not isinstance(existing_drafts, dict):
         existing_drafts = {}
     active_items = _active_items(drafts)
-    revision = int(existing_drafts.get("workflow_revision", 0) or 0) + 1
-    batch_id = new_batch_id()
     current_preview_hash = preview_hash(active_items)
+    previous_batch = (
+        previous_drafts.get("active_batch", {})
+        if isinstance(previous_drafts, dict) else {}
+    )
+    previous_items = (
+        _active_items(previous_drafts)
+        if isinstance(previous_drafts, dict) else []
+    )
+    binding_reused = bool(
+        isinstance(previous_batch, dict)
+        and previous_batch.get("status") == "previewed"
+        and previous_batch.get("batch_id")
+        and int(previous_batch.get("revision", 0) or 0)
+        == int(previous_drafts.get("workflow_revision", 0) or 0)
+        and previous_batch.get("preview_hash") == current_preview_hash
+        and preview_hash(previous_items) == current_preview_hash
+    )
+    if binding_reused:
+        revision = int(previous_batch.get("revision", 0) or 0)
+        batch_id = str(previous_batch["batch_id"])
+        created_at = previous_batch.get("created_at") or (
+            datetime.datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
+        )
+    else:
+        revision = int(existing_drafts.get("workflow_revision", 0) or 0) + 1
+        batch_id = new_batch_id()
+        created_at = datetime.datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
     drafts["workflow_revision"] = revision
     drafts["active_batch"] = {
         "batch_id": batch_id,
         "revision": revision,
         "preview_hash": current_preview_hash,
         "status": "previewed",
-        "created_at": datetime.datetime.now().astimezone().isoformat(
-            timespec="seconds"
-        ),
+        "created_at": created_at,
     }
     write_json(drafts, paths["drafts"])
     pending = _pending(drafts)
@@ -262,6 +297,8 @@ def _draft(args, paths):
         "batch_id": batch_id,
         "revision": revision,
         "preview_hash": current_preview_hash,
+        "binding_reused": binding_reused,
+        "new_confirmation_required": not binding_reused,
         "columns": DRAFT_COLUMNS,
         "preview": _inline_rows(preview_rows),
         "preview_total": len(preview_rows),
@@ -280,9 +317,16 @@ def _draft(args, paths):
         "reviews_truncated": len(review_rows) > INLINE_ROW_LIMIT,
         "reviews_source": paths["drafts"],
         "next": (
-            "向用户展示 preview；明确确认后运行 "
-            "ai-reply --action send --confirmed "
-            f"--batch-id {batch_id} --preview-hash {current_preview_hash}"
+            (
+                "预览内容未变化，沿用原batch_id和preview_hash；若用户已经"
+                "确认该批次可直接继续send，否则展示preview后取得确认；运行 "
+                "ai-reply --action send --confirmed "
+                f"--batch-id {batch_id} --preview-hash {current_preview_hash}"
+                if binding_reused else
+                "向用户展示 preview；明确确认后运行 "
+                "ai-reply --action send --confirmed "
+                f"--batch-id {batch_id} --preview-hash {current_preview_hash}"
+            )
             if pending or archives else "本批全部为本次跳过，无需发送"
         ),
         "paths": paths,

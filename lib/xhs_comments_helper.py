@@ -3,6 +3,7 @@
 
 import json
 import sys
+import time
 
 from xhs_cli.client import XhsClient
 from xhs_cli.cookies import get_cookies
@@ -44,7 +45,18 @@ def _dedupe_comments(comments):
     return ordered
 
 
-def _expand_thread(client, note_id, comment, xsec_token):
+def _check_budget(deadline, request_timeout, pages_fetched, time_budget):
+    """在新请求前保证helper还能自行返回，不把收敛交给父进程强杀。"""
+    if time.monotonic() + request_timeout * 2 + 1 >= deadline:
+        raise TimeoutError(
+            "评论helper达到主动时间预算"
+            f"（{time_budget:g}秒，已读取{pages_fetched}页）"
+        )
+
+
+def _expand_thread(
+    client, note_id, comment, xsec_token, ensure_budget=lambda: None
+):
     """在当前会话内补全候选楼层，避免再启动一个子进程。"""
     inline_subs = comment.get("sub_comments", [])
     expected = int(comment.get("sub_comment_count", 0) or 0)
@@ -55,6 +67,7 @@ def _expand_thread(client, note_id, comment, xsec_token):
     cursor = ""
     seen_cursors = set()
     while True:
+        ensure_budget()
         page = client._main_api_get(
             "/api/sns/web/v2/comment/sub/page",
             {
@@ -85,11 +98,12 @@ def _expand_thread(client, note_id, comment, xsec_token):
 
 
 def main():
-    if len(sys.argv) != 10:
+    if len(sys.argv) != 12:
         raise SystemExit(
             "usage: helper NOTE_ID XSEC_TOKEN COOKIE_SOURCE "
             "MAX_PAGES TARGET_GROUPS_JSON TARGET_IDS_JSON "
-            "TARGET_ANCHORS_JSON EXPAND_UNRESOLVED START_CURSOR"
+            "TARGET_ANCHORS_JSON EXPAND_UNRESOLVED START_CURSOR "
+            "TIME_BUDGET_SECONDS REQUEST_TIMEOUT_SECONDS"
         )
     note_id, xsec_token, cookie_source = sys.argv[1:4]
     max_pages = int(sys.argv[4])
@@ -100,18 +114,29 @@ def main():
     target_anchors = json.loads(sys.argv[7])
     expand_unresolved = sys.argv[8] == "1"
     cursor = sys.argv[9]
+    time_budget = max(float(sys.argv[10]), 1.0)
+    request_timeout = max(float(sys.argv[11]), 1.0)
+    deadline = time.monotonic() + time_budget
     comments = []
     seen_cursors = set()
     search_complete = False
     pages_fetched = 0
     expanded_threads = 0
+
+    def ensure_budget():
+        # max_retries=1时给当前请求预留两次request_timeout；这样helper会在
+        # 父进程上限前主动输出结构化错误，而不是被父进程直接杀死。
+        _check_budget(
+            deadline, request_timeout, pages_fetched, time_budget
+        )
+
     try:
         _, cookies = get_cookies(cookie_source)
         # 默认客户端单次网络请求可等待30秒并重试3次，少量候选也可能因此
         # 卡住数分钟。核验助手采用短超时、失败即返回，由上层安全停止。
         with XhsClient(
             cookies,
-            timeout=8.0,
+            timeout=request_timeout,
             request_delay=0.2,
             max_retries=1,
         ) as client:
@@ -130,6 +155,7 @@ def main():
                         if index < len(target_anchors) else []
                     )
                     for anchor in anchors:
+                        ensure_budget()
                         page = client.get_comments(
                             note_id,
                             xsec_token=xsec_token,
@@ -150,6 +176,7 @@ def main():
                 search_complete = True
             else:
                 for _ in range(max_pages):
+                    ensure_budget()
                     page = client.get_comments(
                         note_id,
                         cursor=cursor,
@@ -188,7 +215,7 @@ def main():
                 if not (_loaded_ids([comment]) & context_ids):
                     continue
                 if _expand_thread(
-                    client, note_id, comment, xsec_token
+                    client, note_id, comment, xsec_token, ensure_budget
                 ):
                     expanded_threads += 1
                 checked_threads.add(id(comment))
@@ -226,7 +253,8 @@ def main():
                         continue
                     try:
                         if _expand_thread(
-                            client, note_id, comment, xsec_token
+                            client, note_id, comment, xsec_token,
+                            ensure_budget,
                         ):
                             expanded_threads += 1
                     except Exception as error:
@@ -265,6 +293,11 @@ def main():
             "error": {
                 "code": error_code_for_exception(error),
                 "message": str(error),
+            },
+            "progress": {
+                "pages_fetched": pages_fetched,
+                "expanded_threads": expanded_threads,
+                "time_budget_seconds": time_budget,
             },
         }, ensure_ascii=False))
         raise SystemExit(1)

@@ -16,7 +16,7 @@ python3 main.py ai-help --summary
 JSON校验和全部测试，成功时只输出紧凑摘要。
 
 - 应用版本：`python3 main.py --version`
-- 当前发布版本为`5.2.0`，AI输出协议为schema`10`；运行时以
+- 当前发布版本为`6.9.0`，AI输出协议为schema`24`；运行时以
   `ai-help --summary`为唯一权威来源。
 - 必须检查`ai-help --summary.release_consistency`：文档或隐私检查失败时停止；
   `repository.status`为`working_tree_not_published`、`working_tree_dirty`或
@@ -24,7 +24,7 @@ JSON校验和全部测试，成功时只输出紧凑摘要。
 - 账号ID不写在仓库或`config.py`中；程序首次运行时通过
   `xhs whoami --json`自动识别并仅保存到本地SQLite；无浏览器环境可用
   `XHS_AUTHOR_USER_ID`环境变量覆盖，不得把值写回公开文件。
-- 当前共有14个子命令，没有快捷别名；准确清单以`ai-help --summary`为准。
+- 当前共有16个子命令，没有快捷别名；准确清单以`ai-help --summary`为准。
 - 需要某条命令的精确参数、副作用和输出时运行
   `python3 main.py ai-help --command <命令>`，不要手工抄写参数表。
 - 需要当前测试名称时运行`python3 main.py ai-help --tests`。它只描述当前
@@ -33,6 +33,8 @@ JSON校验和全部测试，成功时只输出紧凑摘要。
 - 生产源码看`source_inventory`，完整相关文件看`project_inventory`，不手工
   统计文件数或行数。
 - 所有命令从项目根目录运行。
+- 首次使用先看`QUICKSTART.md`；结构化错误的处理方法看
+  `TROUBLESHOOTING.md`。
 - 公共Python入口固定为`from lib.xhs_client import XHSClient`和
   `from lib.cli_ai import cmd_ai_reply`；`xhs_client_*`与`cli_ai_*`是内部
   职责模块，其他AI不得绕过门面直接调用，以免依赖实现细节。
@@ -57,9 +59,14 @@ JSON校验和全部测试，成功时只输出紧凑摘要。
 - `ai-reply prepare --full-scan`会忽略评论TTL缓存并拉取完整楼中楼。
 - 全量评论读取和批量回复都复用单一登录会话；禁止退回每页或每条重启
   `xhs`进程的低效调用。遇到限流、验证码或登录失效时暂停剩余批次。
+- 持久回复helper的单条响应有超时看门狗；超时返回`session_error`并终止
+  helper。评论分页helper必须在内部时间预算到达时先主动返回结构化错误，
+  父进程只保留单次在途请求和退出清理的宽限时间。
 - `ai-reply`的大列表最多内联20行；看到`*_truncated=true`时从对应
   `*_source`固定状态文件读取完整数据，不得把内联片段当作全部结果。
   该上限只限制内联行数，不允许截断任何一行的评论正文。
+- `watch`和`web`都必须由用户手动启动，进程退出后不会在后台继续监控。
+  首次启动或`--reset`只记录当前通知作为基线，不回复已有评论。
 
 ## 查看文章
 
@@ -104,6 +111,55 @@ python3 main.py comments --json
   不得改为固定截断。
 - 用户只要求查看时，到此停止，不运行回复流程。
 
+## 手动监控新评论
+
+监控全部新评论、指定文章或指定用户分别使用：
+
+```bash
+python3 main.py watch
+python3 main.py watch --note-id <笔记ID>
+python3 main.py watch --user <精确昵称或用户ID>
+```
+
+`--note-id`和`--user`可组合。默认只发现并展示新评论，不发送回复；按
+`Ctrl+C`停止。`--json`输出逐事件JSON Lines，不是单一JSON文档。
+每轮通知接口返回的完整正文都会累计写入SQLite并刷新
+`.cache/comments.json`，过滤条件只影响发现和回复，不缩小本地归档范围。
+自动回复必须由用户明确授权并同时提供：
+
+```bash
+python3 main.py watch --auto-reply --confirmed
+```
+
+可用`--reply-text '<固定回复>'`指定正文；省略时使用`config.py`中的通用
+话术。该自动模式不调用外部大模型，不得宣称已逐条完成事实核查或个性化
+生成。程序仍会排除本地终态、取得同笔记工作流锁并在发送前在线核验；
+限流、验证码、登录失效、会话错误或核验失败时停止。会话结果不确定时保存
+`sending`并禁止自动重发。
+
+只检查一次用`--once`；查看本地检查点用`--status`。检查点存在不代表监控
+正在运行。相同过滤条件不能同时启动两个监控。
+
+本地Web控制台：
+
+```bash
+python3 main.py web
+```
+
+默认打开`http://127.0.0.1:8765`。主导航分为工作台、最新文章、最新评论、
+自动监控和回复排除列表，不显示其他系统工具。最新文章内进入评论分析，
+最新评论内逐条生成AI回复提示词或人工忽略；文章和评论默认每页10条，可翻阅本地完整分页快照，
+两处笔记ID均提供无文字复制图标。回复排除列表默认每页15条，关键词输入后
+自动搜索，也可点击搜索按钮；支持稳定翻页、重置搜索、单条删除和清空。
+每条评论都有“回复”和“忽略”按钮。“回复”仅为该条评论生成定向中文AI提示词
+并直接复制到剪贴板，只显示复制结果短提示；内部评论ID用于精确定位但不在页面
+展示。提示词要求接手的AI把其他候选设为`skip`，只为目标评论展示草稿并等待
+用户确认；网页不扫描、生成草稿或直接发送。“忽略”从本地评论归档读取完整原文，
+加入回复排除列表并把原因固定为“人工忽略”；已有排除记录不覆盖。网页不提供
+笔记发布，命令行`post`继续保留。
+服务只监听本机并校验页面CSRF令牌；不得改成公网监听或把页面令牌、Cookie、
+`xsec_token`暴露给其他主机。
+
 ## AI回复流程
 
 ### 1. 准备候选
@@ -120,9 +176,29 @@ python3 main.py ai-reply --note-id <笔记ID> --action prepare
 排除在本批之外；不要为它生成回复。用户明确要求处理全部评论时改用
 `--full-scan`。
 
-### 2. 写回复映射
+### 2. 结构化写入回复映射
 
-将内容写入返回的`paths.reply_map`：
+优先使用`map`动作逐条写入，程序负责JSON编码、转义、校验和原子保存；AI
+无需直接编辑`reply_map.json`：
+
+```bash
+python3 main.py ai-reply --note-id <笔记ID> --action map \
+  --candidate-index <候选序号> --decision send --reply-text '<回复正文>' \
+  --logic-verdict partly_sound --logic-reason '<逻辑依据>' \
+  --fact-verdict unverifiable --fact-reason '<事实核查依据>' \
+  --boast-verdict none --boast-reason '<吹牛判定依据>'
+```
+
+事实判定为`supported`、`mixed`或`contradicted`时，至少追加一次
+`--fact-source '<来源标题>' '<HTTP(S) URL>'`；该参数可重复。每次`map`
+返回`remaining_candidate_indexes`和兼容用`remaining_comment_ids`，依次处理到
+`remaining_count=0`后再运行`draft`。
+`--candidate-index`对应prepare候选中的`candidate_index`，优先用它减少长ID
+复制错误；兼容调用方仍可改用`--comment-id`，两者不能同时使用。
+同一条映射内容未变化时不会重写文件或停用草稿；内容实际变化时会停用旧
+活动批次，防止误发旧预览。
+
+兼容旧AI和批量导入时，也可以将以下内容写入返回的`paths.reply_map`：
 
 ```json
 {
@@ -202,13 +278,17 @@ python3 main.py ai-reply --note-id <笔记ID> --action draft
 或为节省token而截断。
 同时保存返回的`batch_id`和`preview_hash`；它们绑定了用户实际审核的
 草稿内容，发送时必须原样提交。
+重复运行`draft`时，如果活动候选、回复、动作和`review`完全相同，程序返回
+`binding_reused=true`并沿用原`batch_id`、`revision`和`preview_hash`；已经
+取得的用户确认继续有效。只有预览内容实际变化时才返回
+`new_confirmation_required=true`并生成新绑定，必须重新展示和确认。
 `comment_id`只供AI写映射和程序定位，不得显示在面向用户的评论、草稿或
 执行流程表格中。
 `draft`开始时也会停用旧`active_comment_ids`，但不会删除历史草稿和终态；
 成功后才把本次候选设为新的活动批次。
 历史合并会保留全部旧条目：同ID终态不覆盖，同ID非终态可更新，未再次
 进入新批的旧条目仍保留，但由`active_comment_ids`隔离，不会误发。
-新批次必须依次完成prepare、写映射、draft、用户确认和send；但CLI依靠
+新批次必须依次完成prepare、map或写映射、draft、用户确认和send；但CLI依靠
 状态文件校验，已有合法活动批次可以稍后继续send，不能描述成命令在物理上
 绝对无法跳转。
 
@@ -232,10 +312,32 @@ python3 main.py ai-reply \
 `prepare`会停用上一批草稿，`draft`写入`active_comment_ids`，`send`只发送
 本次活动批次。
 
+### 5. 跨AI恢复与失败重试
+
+```bash
+python3 main.py ai-reply --note-id <笔记ID> --action status
+```
+
+`status`只读取本地状态并输出候选、映射、活动批次和终态计数，不返回可直接
+用于发送的`batch_id`或`preview_hash`。活动批次存在时应重新运行`draft`展示
+预览；内容不变会复用确认绑定。
+
+只有用户明确授权重试某条`failed`评论后，AI才可执行：
+
+```bash
+python3 main.py ai-reply --note-id <笔记ID> --action retry \
+  --comment-id <评论ID> --retry-authorized
+```
+
+`retry`会移出全局排除列表、重置该条失败终态并停用旧批次，但不会立即发送；
+必须重新完成prepare、map、draft、用户确认和send。`sending`结果不确定，不能
+用retry重置。
+
 ## 固定状态文件
 
 ```text
 .cache/state.sqlite3
+.cache/watch/                    # 监控锁；检查点和发送状态保存在SQLite
 .cache/workflows/<笔记ID>/
 ├── scan.json
 ├── reply_map.json
@@ -250,17 +352,20 @@ python3 main.py ai-reply \
 `.cache/state.sqlite3`是0600权限的权威状态源；JSON路径是AI交换入口或兼容
 快照。首次`doctor`幂等导入旧JSON，SQLite哈希核对成功后删除历史迁移源；
 当前AI交换快照保留。程序判断终态、身份、
-批次、排除列表、缓存和令牌时以SQLite为准；AI仍通过`paths.reply_map`写入
-合法JSON，`draft`会把该入口同步到SQLite。
+批次、排除列表、缓存和令牌时以SQLite为准；AI优先通过`--action map`
+结构化写入，兼容调用方仍可向`paths.reply_map`写合法JSON，`draft`会把该
+入口同步到SQLite。
 状态读取职责不可混用：`reply_map.json`是`ai_input`，AI编辑的JSON快照优先；
 `scan.json`、`drafts.json`和`audit.json`是`program_state`，SQLite优先并可
 自动恢复兼容快照。预览指纹与SQLite哈希使用同一套递归规范化JSON编码；
 对象键顺序不影响哈希，列表顺序仍影响哈希。
+SQLite schema使用顺序迁移链；当前DB schema为v2。主库、`-wal`和`-shm`
+都必须保持0600权限；发现数据库版本高于程序支持时停止，不得降级打开。
 `audit.json`为0600权限的有界命令审计，记录每次`ai-reply`的started及
 completed/failed事件、参数摘要、结果和错误，不保存评论正文、回复正文或
 认证凭据。使用`paths --note-id <ID> --audit-limit 20`读取最近20条；超过20条
 时读取`workflow_audit.path`。普通`paths`默认不内联事件，避免浪费token。
-先按`workflow_id`筛选同一轮prepare、draft重试和send，再以相同`command_id`
+先按`workflow_id`筛选同一轮prepare、map、draft重试和send，再以相同`command_id`
 配对started与completed/failed；新prepare生成新`workflow_id`。旧版事件没有
 该字段时不得跨越其他prepare拼接。没有历史审计记录时只能说明当前状态，
 不得从文件修改时间或最终草稿反推曾经执行的命令和报错。审计启用前的动作
@@ -333,8 +438,12 @@ completed/failed事件、参数摘要、结果和错误，不保存评论正文�
 - 不输出Cookie、`xsec_token`或其他登录凭据。
 - SQLite中的xsec索引及`.cache/xsec_index.json`兼容快照都是敏感令牌缓存，
   不是回复工作流状态。
+- watch的SQLite检查点只代表已经观察过哪些通知，不代表后台服务正在运行；
+  自动回复必须在每次启动时再次明确提供`--auto-reply --confirmed`。
+- Web页面固定监听`127.0.0.1`；所有控制类POST请求必须通过CSRF校验。
 - 浏览器可正常使用、账号身份检查成功，不代表楼中楼API没有独立风控。
-- 发布文章和发送回复前都必须先预览并取得确认。
+- CLI发布文章和CLI回复必须先展示预览并取得确认；Web评论行的“回复”只生成
+  可复制的定向AI提示词，不得从网页回复入口直接发送；“忽略”只更新本地排除列表。
 - `articles`对平台是只读操作，但可能更新本地0600敏感`xsec_index.json`。
 - `comments`对平台是只读操作，但会累计更新本地
   `.cache/comments.json`；评论正文不截断。

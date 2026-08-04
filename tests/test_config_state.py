@@ -1,6 +1,9 @@
 """版本、隐私、SQLite和账号身份测试。"""
 
 from tests.support import *
+import sqlite3
+
+from lib.state_db import DB_SCHEMA_VERSION, StateDBError
 
 
 class ConfigStateTests(unittest.TestCase):
@@ -78,6 +81,102 @@ class ConfigStateTests(unittest.TestCase):
                 database.get_setting("author_user_id"), "author-user"
             )
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_sqlite_migrates_schema_and_records_history(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "state.sqlite3")
+            initial = StateDB(path)
+            initial.put_document("sample", {"value": 1})
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "UPDATE metadata SET value='1' "
+                    "WHERE key='db_schema_version'"
+                )
+                connection.execute("DROP TABLE schema_migrations")
+            upgraded = StateDB(path)
+            self.assertEqual(
+                upgraded.get_setting("db_schema_version"),
+                str(DB_SCHEMA_VERSION),
+            )
+            with sqlite3.connect(path) as connection:
+                versions = [
+                    row[0] for row in connection.execute(
+                        "SELECT version FROM schema_migrations "
+                        "ORDER BY version"
+                    )
+                ]
+            self.assertEqual(versions, [1, 2])
+            self.assertEqual(
+                upgraded.get_document("sample"), {"value": 1}
+            )
+
+    def test_sqlite_rejects_newer_unknown_schema(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "state.sqlite3")
+            StateDB(path).set_setting("sample", "value")
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "UPDATE metadata SET value='999' "
+                    "WHERE key='db_schema_version'"
+                )
+            with self.assertRaisesRegex(StateDBError, "高于程序支持"):
+                StateDB(path).get_setting("sample")
+
+    def test_sqlite_wal_and_shm_permissions_are_private(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "state.sqlite3")
+            database = StateDB(path)
+            held_connection = database._connect()
+            try:
+                database.put_document("sample", {"value": 1})
+                sidecars = [
+                    candidate for candidate in (
+                        path, f"{path}-wal", f"{path}-shm"
+                    ) if os.path.exists(candidate)
+                ]
+                self.assertGreaterEqual(len(sidecars), 2)
+                for candidate in sidecars:
+                    self.assertEqual(
+                        stat.S_IMODE(os.stat(candidate).st_mode), 0o600
+                    )
+            finally:
+                held_connection.close()
+
+    @patch("lib.state_db.sqlite3.connect")
+    def test_sqlite_operational_error_is_wrapped(self, connect):
+        connect.side_effect = sqlite3.OperationalError("database is locked")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = StateDB(os.path.join(temp_dir, "state.sqlite3"))
+            with self.assertRaisesRegex(
+                StateDBError, "SQLite状态库连接或迁移失败"
+            ):
+                database.get_setting("sample")
+
+    @patch("lib.cli_admin.shutil.which", return_value="")
+    @patch("lib.cli_admin._release_consistency")
+    @patch("lib.cli_admin.migrate_legacy_json")
+    def test_doctor_reports_state_database_error_as_json(
+        self, migrate, release, _which
+    ):
+        migrate.side_effect = StateDBError("SQLite schema版本999高于程序支持")
+        release.return_value = {
+            "versions": {
+                "ok": True,
+                "app_version": APP_VERSION,
+                "schema_version": AI_SCHEMA_VERSION,
+                "errors": [],
+            },
+            "public_identity": {"ok": True, "findings": []},
+            "repository": {"ok": True, "status": "published"},
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            main.cmd_doctor(argparse.Namespace(json=True))
+        payload = json.loads(output.getvalue())
+        sqlite_check = payload["checks"]["sqlite_state"]
+        self.assertFalse(payload["ok"])
+        self.assertFalse(sqlite_check["ok"])
+        self.assertIn("版本999", sqlite_check["migration_errors"][0])
 
     def test_program_state_repairs_divergent_snapshot_from_sqlite(self):
         with tempfile.TemporaryDirectory() as temp_dir:

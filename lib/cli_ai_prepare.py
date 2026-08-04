@@ -94,7 +94,6 @@ def _prepare(args, paths):
         return
     filter_scan_local_state(result)
     output = compact_scan_result(result)
-    write_json(output, paths["scan"])
     if not output.get("reply_status_verified", False):
         print_json(_workflow_error(
             "prepare",
@@ -106,6 +105,10 @@ def _prepare(args, paths):
         output.get("unreplied_level1", [])
         + output.get("unreplied_subs", [])
     )
+    # 序号随scan快照保存，AI可用短序号调用map，无需复制长comment_id。
+    for index, item in enumerate(candidates, start=1):
+        item["candidate_index"] = index
+    write_json(output, paths["scan"])
     print_json({
         "ok": True,
         "action": "prepare",
@@ -121,8 +124,8 @@ def _prepare(args, paths):
         "deferred_count": output.get("deferred_online", 0),
         "next": (
             (
-                "将回复映射写入 paths.reply_map，再运行 "
-                "ai-reply --action draft"
+                "逐条运行ai-reply --action map；remaining_count=0后运行draft。"
+                "兼容调用方也可写入paths.reply_map"
                 + (
                     "；另有深层楼中楼超过快速核验预算，未进入本批；"
                     "确需处理全部评论时使用 --full-scan"

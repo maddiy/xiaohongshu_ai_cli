@@ -149,8 +149,10 @@ def _run_audited_action(handler, args, paths):
 
 
 from . import cli_ai_draft as _draft_stage
+from . import cli_ai_map as _map_stage
 from . import cli_ai_prepare as _prepare_stage
 from . import cli_ai_send as _send_stage
+from . import cli_ai_state as _state_stage
 
 
 _ACTION_RUNTIME_NAMES = (
@@ -208,13 +210,30 @@ def _draft(args, paths):
     return _draft_stage._draft(args, paths)
 
 
+def _map(args, paths):
+    _sync_action_runtime(_map_stage)
+    _map_stage._clear_active_batch = _clear_active_batch
+    return _map_stage._map_reply(args, paths)
+
+
 def _send(args, paths):
     _sync_action_runtime(_send_stage)
     return _send_stage._send(args, paths)
 
 
+def _status(args, paths):
+    _sync_action_runtime(_state_stage)
+    return _state_stage._status(args, paths)
+
+
+def _retry(args, paths):
+    _sync_action_runtime(_state_stage)
+    _state_stage._clear_active_batch = _clear_active_batch
+    return _state_stage._retry(args, paths)
+
+
 def cmd_ai_reply(args):
-    """执行 prepare、draft 或 send，并且只输出一个 JSON 文档。"""
+    """执行AI回复工作流动作，并且只输出一个 JSON 文档。"""
     paths = workflow_paths(args.note_id)
     try:
         with workflow_lock(
@@ -222,8 +241,11 @@ def cmd_ai_reply(args):
         ):
             handler = {
                 "prepare": _prepare,
+                "map": _map,
                 "draft": _draft,
                 "send": _send,
+                "status": _status,
+                "retry": _retry,
             }[args.action]
             _run_audited_action(handler, args, paths)
     except StateLockTimeout as error:

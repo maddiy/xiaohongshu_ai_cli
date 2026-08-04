@@ -1,4 +1,4 @@
-# 小红书AI智能运营系统 v5.2.0
+# 小红书AI智能运营系统 v6.9.0
 
 - 系统名称：`小红书AI智能运营系统`
 
@@ -9,7 +9,9 @@
 **AI 一句话安装使用：** 在任意支持终端和文件操作的 AI 编程助手中打开本项目，然后说“安装并检查本项目，使用浏览器 Cookie 登录小红书，按统一工作目录读取笔记和评论、生成并预览回复或笔记，获得我的确认后再发送或发布”即可。
 
 **其他AI首先读取：** [`AGENTS.md`](AGENTS.md)。该文件是最短、最稳定的
-执行入口；`README.md`用于人工说明，`references/commands.md`用于参数查询。
+执行入口；首次使用看[`QUICKSTART.md`](QUICKSTART.md)，常见错误看
+[`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)，精确参数看
+`references/commands.md`。
 
 ## 可以做什么
 
@@ -29,12 +31,16 @@
 | AI 协议 | `ai-help` | 输出机器可读的标准调用流程 |
 | 工作路径 | `paths` | 返回跨 AI 共用的固定状态文件路径 |
 | AI 回复 | `ai-reply` | 用紧凑 JSON 完成扫描、草稿预览和发送 |
+| 新评论监控 | `watch` | 手动监控全部、指定文章或指定用户的新评论 |
+| 本地网页 | `web` | 分页运营控制台：查看、生成回复提示词、分析和监控 |
 
 ### 代码结构
 
 | 文件 | 职责 |
 |---|---|
 | `AGENTS.md` | 其他 AI 首先读取的最短执行协议 |
+| `QUICKSTART.md` | 最短安装、查看和AI回复流程 |
+| `TROUBLESHOOTING.md` | 结构化错误与安全处理方法 |
 | `main.py` | `COMMAND_HANDLERS`命令分发及传统回复工作流编排 |
 | `config.py` | 应用名称、版本、浏览器、延迟和工作目录配置 |
 | `lib/cli_parser.py` | 唯一命令清单和命令行参数定义 |
@@ -44,14 +50,21 @@
 | `lib/cli_release.py` | 版本、隐私、Git工作区和发布检查 |
 | `lib/cli_ai.py` | AI 回复兼容门面、审计调度和命令入口 |
 | `lib/cli_ai_prepare.py` | 候选准备、旧批次停用和扫描结果保存 |
+| `lib/cli_ai_map.py` | 结构化回复映射写入和旧预览失效控制 |
+| `lib/cli_ai_state.py` | 跨AI状态摘要和显式授权失败重试 |
 | `lib/cli_ai_draft.py` | 映射校验、在线复核和草稿生成 |
 | `lib/cli_ai_send.py` | 确认绑定、在线对账和回复发送 |
 | `lib/cli_ai_support.py` | 回复映射校验、表格数据和错误转换 |
 | `lib/cli_ai_audit.py` | 脱敏审计和发送尝试记录 |
 | `lib/cli_support.py` | 原子存储、状态合并和精简输出 |
 | `lib/cli_comment_view.py` | 评论表格安全转换和通知正文归档 |
+| `lib/comment_watcher.py` | 新评论过滤、SQLite检查点、在线核验和自动回复 |
+| `lib/cli_watch.py` | 手动前台监控命令和安全事件输出 |
+| `lib/web_app.py` | 仅监听本机的完整Web控制接口和监控线程管理 |
+| `lib/web_services.py` | Web回复、分析、排除列表和结构化服务 |
 | `lib/json_codec.py` | SQLite文档、JSON快照和预览指纹共用的规范化JSON编码 |
-| `lib/state_db.py` | SQLite权威状态库、账号身份和旧JSON迁移 |
+| `lib/reply_schema.py` | 回复动作和三项审查枚举的共享模式 |
+| `lib/state_db.py` | SQLite权威状态库、顺序schema迁移、账号身份和旧JSON迁移 |
 | `lib/state_io.py` | 跨进程锁、显式状态读取策略和JSON兼容快照 |
 | `lib/scanner.py` | 全量评论扫描和扫描器组合入口 |
 | `lib/scanner_notifications.py` | 最新评论通知候选收集 |
@@ -72,8 +85,9 @@
 | `scripts/verify.py` | 本地与CI统一质量检查入口 |
 | `pyproject.toml` | 项目元数据和固定依赖声明 |
 | `requirements.txt` | 已验证的`xiaohongshu-cli`安装版本 |
+| `web/` | 本地Web控制台的HTML、CSS和JavaScript |
 
-当前共有14个子命令，没有快捷别名。`schema_version: 10` 表示 AI 输出协议
+当前共有16个子命令，没有快捷别名。`schema_version: 24` 表示 AI 输出协议
 版本，应用版本单独由 `python3 main.py --version` 查看。
 
 拆分后的公共入口保持不变：业务代码继续从`lib.xhs_client`导入
@@ -95,7 +109,7 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 必须使用 `input()`。
 
 `COMMAND_NAMES`校验参数解析器中的命令，`main.COMMAND_HANDLERS`单独校验
-实际处理器；两项检查共同保证14个命令没有漏定义或漏分发。
+实际处理器；两项检查共同保证16个命令没有漏定义或漏分发。
 
 需要核对单条命令时运行
 `python3 main.py ai-help --command <命令>`。参数、默认值、副作用和输出约定
@@ -163,6 +177,7 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 
 ```text
 .cache/state.sqlite3          # 0600，所有运行状态的权威来源
+.cache/watch/                 # 监控锁；检查点和发送状态在SQLite
 .cache/workflows/
 ├── <笔记ID>/
 │   ├── scan.json
@@ -190,6 +205,7 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 | 文件 | 用途 |
 |---|---|
 | `state.sqlite3` | 权威状态库；账号身份、工作流、缓存、归档和敏感令牌统一事务保存 |
+| `.cache/watch/` | 相同过滤条件的跨进程锁；文件长期存在不代表监控正在运行 |
 | `scan.json` | 最近一次扫描结果的AI兼容快照 |
 | `reply_map.json` | AI可编辑的回复映射交换入口；`draft`读取时同步入SQLite |
 | `drafts.json` | 草稿和发送状态的兼容快照 |
@@ -337,6 +353,13 @@ REQUEST_DELAY = 3
 BATCH_REPLY_DELAY = 2.0
 BATCH_REPLY_PAUSE_EVERY = 50
 BATCH_REPLY_PAUSE_SECONDS = 8
+PERSISTENT_HELPER_RESPONSE_TIMEOUT = 45
+COMMENT_HELPER_REQUEST_TIMEOUT = 8
+COMMENT_HELPER_MAX_SECONDS = 260
+COMMENT_LOOKUP_MAX_PAGES = 50
+WATCH_POLL_INTERVAL_SECONDS = 60
+WATCH_NOTIFICATION_LIMIT = 50
+WEB_PORT = 8765
 CACHE_TTL_MINUTES = 30
 ```
 
@@ -349,6 +372,13 @@ CACHE_TTL_MINUTES = 30
 | `BATCH_REPLY_DELAY` | 推荐批量回复会话的最小间隔，可由环境变量调整 |
 | `BATCH_REPLY_PAUSE_EVERY` | 大批量回复每发送多少条主动休息一次 |
 | `BATCH_REPLY_PAUSE_SECONDS` | 每次主动休息的秒数 |
+| `PERSISTENT_HELPER_RESPONSE_TIMEOUT` | 持久回复会话等待单条结果的看门狗秒数，可由环境变量调整 |
+| `COMMENT_HELPER_REQUEST_TIMEOUT` | 评论分页helper单次平台请求的超时秒数 |
+| `COMMENT_HELPER_MAX_SECONDS` | 评论分页helper一次任务的最大内部时间预算 |
+| `COMMENT_LOOKUP_MAX_PAGES` | 在线定位评论时允许读取的最大页数 |
+| `WATCH_POLL_INTERVAL_SECONDS` | 手动新评论监控的默认检查间隔 |
+| `WATCH_NOTIFICATION_LIMIT` | 监控每轮读取的最新评论通知数 |
+| `WEB_PORT` | 本地Web控制台端口；始终只监听127.0.0.1 |
 | `CACHE_TTL_MINUTES` | 评论缓存有效时间 |
 | `XHS_CLI_VERSION` | 已通过评论、楼中楼和持久会话验证的CLI版本 |
 | `STATE_DB_FILE` | SQLite权威状态库位置 |
@@ -426,7 +456,59 @@ python3 main.py comments --limit 50 --json
 JSON文件中英文双引号显示为`\"`属于标准转义，解析JSON后会自动还原；
 归档原文不要再次转义或替换引号；用户表格则直接使用程序生成的`groups`。
 
-### 4. 扫描可回复评论
+### 4. 手动监控新评论和本地网页
+
+监控全部新评论：
+
+```bash
+python3 main.py watch
+```
+
+只监控指定文章或指定用户：
+
+```bash
+python3 main.py watch --note-id <笔记ID>
+python3 main.py watch --user <精确昵称或用户ID>
+```
+
+两个过滤条件可以组合。默认只发现和展示新评论；首次启动只把当前通知保存
+为基线，不处理历史通知。按`Ctrl+C`停止，程序退出后不会在后台运行。
+每轮已读取通知的完整正文都会累计保存到SQLite和`.cache/comments.json`；
+文章或用户过滤只限制监控动作，不会丢掉本轮已经读取的其他通知正文。
+
+只有用户明确授权自动回复时才能执行：
+
+```bash
+python3 main.py watch --auto-reply --confirmed \
+  --reply-text '谢谢你的留言！'
+```
+
+省略`--reply-text`时从`GENERIC_REPLIES`选择通用话术。监控程序本身不会调用
+外部大模型，也不会自动完成逻辑分析、事实核查或吹牛判定；需要针对性AI回复
+时仍使用`ai-reply`预览确认流程。自动发送前会取得同笔记锁并在线核验，遇到
+验证码、限流、登录失效、核验失败或会话异常立即停止。
+
+启动本地Web控制台：
+
+```bash
+python3 main.py web
+```
+
+然后打开`http://127.0.0.1:8765`。主导航分为工作台、最新文章、最新评论、
+自动监控和回复排除列表，不再显示其他系统工具。最新文章内进入评论分析，
+最新评论内逐条生成AI回复提示词或人工忽略；文章和评论默认每页10条，可翻阅本地完整分页快照，
+两处笔记ID均提供无文字复制图标。回复排除列表默认每页15条，关键词输入后
+自动搜索，也可点击搜索按钮；支持稳定翻页、重置搜索、单条删除和清空。
+每条评论都有“回复”和“忽略”按钮。“回复”只根据当前笔记和当前评论生成定向
+中文AI提示词并直接写入剪贴板；提示词含内部评论定位信息，但页面不显示评论ID，
+也不展示提示词、弹窗或独立回复页面。复制后由AI仅处理这一条评论，按
+`ai-reply`安全流程展示草稿并等待确认。“忽略”立即把该评论加入回复排除列表，
+原因固定为“人工忽略”，成功后该行标记并禁用重复操作；已有排除记录不会被
+覆盖。网页不从回复按钮扫描、生成草稿或直接发送，也不提供笔记发布；命令行
+`post`继续保留。页面只监听本机，所有控制请求带有临时CSRF令牌；关闭Web进程
+后页面启动的监控也会停止。
+
+### 5. 扫描可回复评论
 
 `scan` 专门用于回复准备，会过滤已删除、已跳过和本地终态，并在线核验平台回复：
 
@@ -445,7 +527,7 @@ python3 main.py scan \
 
 结果默认保存到 `.cache/workflows/<笔记ID>/scan.json`。
 
-### 5. 生成回复草稿
+### 6. 生成回复草稿
 
 未提供扫描文件时，`drafts` 默认只读取最新20条评论通知。只有明确需要
 处理全部历史评论和楼中楼时才使用 `--full-scan`。
@@ -473,7 +555,7 @@ python3 main.py drafts \
   --batch .cache/workflows/<笔记ID>/reply_map.json
 ```
 
-### 6. 预览并发送
+### 7. 预览并发送
 
 先预览，不会发送：
 
@@ -510,7 +592,12 @@ python3 main.py send --file .cache/workflows/<笔记ID>/drafts.json --resume
 # 1. 默认只扫描最新20条评论通知，同时识别一级评论和楼中楼
 python3 main.py ai-reply --note-id <note_id> --action prepare
 
-# 2. AI 将回复映射写入返回的 paths.reply_map
+# 2. AI用结构化map动作逐条写入；程序负责JSON编码和校验
+python3 main.py ai-reply --note-id <note_id> --action map \
+  --candidate-index <候选序号> --decision send --reply-text '<回复正文>' \
+  --logic-verdict partly_sound --logic-reason '<逻辑依据>' \
+  --fact-verdict unverifiable --fact-reason '<核查依据>' \
+  --boast-verdict none --boast-reason '<判定依据>'
 
 # 3. 再次在线核验并直接返回 preview
 python3 main.py ai-reply --note-id <note_id> --action draft
@@ -524,16 +611,44 @@ python3 main.py ai-reply \
   --preview-hash <draft返回的preview_hash>
 ```
 
-`prepare`和`draft`开始时都会停用旧`active_comment_ids`，但不会删除历史
-草稿或终态；`draft`成功后写入本次新的活动批次，并返回`batch_id`、
-`revision`和`preview_hash`。发送必须原样提交批次号和指纹；草稿被其他AI
-修改后旧确认立即失效。
+`map`每次写一条候选映射，返回`remaining_candidate_indexes`和兼容用
+`remaining_comment_ids`；处理到
+`remaining_count=0`后运行`draft`。可重复添加
+`--fact-source '<标题>' '<URL>'`。程序使用标准JSON写入器保存回复和审查文本，
+英文双引号会自动转义，不再要求AI手工编辑映射文件。`--replies`和直接编辑
+`reply_map.json`仅作为兼容入口保留。候选序号来自prepare返回的
+`candidate_index`；旧调用也可使用`--comment-id`，但两者不能同时使用。
+
+`prepare`和首次生成新草稿时会停用旧`active_comment_ids`，但不会删除历史
+草稿或终态；`draft`成功后写入本次活动批次，并返回`batch_id`、`revision`
+和`preview_hash`。重复运行`draft`且预览内容完全相同时，返回
+`binding_reused=true`并沿用原绑定，已有确认继续有效；回复、动作、审查或
+候选实际变化时才生成新绑定，并返回`new_confirmation_required=true`。
+发送仍必须原样提交批次号和指纹。
 若返回`stale_preview`，`mismatch.batch_id`和`mismatch.preview_hash`会分别
 标明不匹配项，`current_revision`与`current_batch_status`用于排查；响应不会
 返回新的有效确认值。仅凭该错误不能区分新draft覆盖、复制旧参数或参数混用。
 每次send（包括前置校验失败、`stale_preview`、在线复核失败和发送完成）都会
 进入`audit.json`；能够读取草稿时还会把发送尝试保存在`drafts.send_attempts`。
 后续draft会保留该发送尝试历史。审计功能启用前发生的动作不会被追溯补写。
+
+新AI接续任务时可先运行：
+
+```bash
+python3 main.py ai-reply --note-id <note_id> --action status
+```
+
+它会返回候选、映射、活动批次和终态计数，但不会泄露可直接用于send的确认
+绑定；需要继续发送时重新运行draft展示预览。只有用户明确授权某条失败评论
+重试后，才可运行：
+
+```bash
+python3 main.py ai-reply --note-id <note_id> --action retry \
+  --comment-id <comment_id> --retry-authorized
+```
+
+该动作只负责移出排除列表、重置`failed`并停用旧批次，不会直接发送；随后
+必须重新完成prepare、map、draft、确认和send。`sending`状态不允许这样重置。
 默认`prepare`调用`scan_via_notifications`读取最新20条评论通知；使用
 `--full-scan`时改为调用`scan_note`读取整篇笔记、绕过评论缓存并拉取完整
 楼中楼。全量模式不是通知扫描，也不调用`verify_candidates_online`。
@@ -544,7 +659,9 @@ prepare结果通过`scan_method`和`verification_mode`明确本次执行方式�
 默认`prepare`只为在线定位使用最多6页的快速预算。超过预算仍无法定位的
 深层楼中楼不会被猜测或写入草稿，而计入`deferred_count`；其他已安全核验
 的候选继续返回。确需处理这些延后项时使用`--full-scan`。
-`draft`在联网前先检查`reply_map.json`是否存在、JSON语法和顶层对象类型，
+推荐使用`map`结构化写入；它在本地校验字段并原子更新`reply_map.json`，
+映射变化时立即停用旧活动批次，内容相同时不重复写入。兼容入口下，
+`draft`在联网前仍会检查`reply_map.json`是否存在、JSON语法和顶层对象类型，
 并校验本次候选映射中的`action`、`reply`和逐条`review`，避免格式错误浪费
 在线核验请求。AI流程要求每条候选都有对象映射，不接受字符串简写，也不再
 把缺少映射的候选静默设为`skip`。
@@ -599,9 +716,12 @@ prepare结果通过`scan_method`和`verification_mode`明确本次执行方式�
 故障时才回退原生`xhs sub-comments`；遇到验证码或
 `verification_required`会立即停止，避免换一种传输重复请求。严格核验会
 返回请求失败的真实原因。
+持久回复helper的单条响应受超时看门狗保护；超时会终止helper并返回
+`session_error`和脱敏诊断。评论分页helper在内部预算到达时主动返回错误，
+父进程只保留单次在途请求及退出清理的宽限，避免父子超时互相抢跑。
 合并草稿历史时会保留全部旧条目：同ID终态保持不变，同ID非终态可被本次
 草稿更新，未进入本批的旧条目仍保留但受`active_comment_ids`隔离。
-新批次必须遵循prepare、写映射、draft、用户确认、send；CLI依赖状态文件
+新批次必须遵循prepare、map或写映射、draft、用户确认、send；CLI依赖状态文件
 校验，因此已有合法活动批次可以稍后继续send，不能理解为命令物理上绝对
 无法跳转。
 在线核验确认`online_replied`或`online_missing`时只写本地
@@ -703,30 +823,23 @@ python3 main.py scan \
 
 ### AI 回复映射
 
-最简单的格式：
+推荐使用`ai-reply --action map --candidate-index <序号>`结构化写入，避免
+手工处理JSON引号。AI工作流中的每条候选都必须有对象映射和三项`review`：
 
 ```json
 {
-  "<comment_id_1>": "第一条回复",
-  "<comment_id_2>": "第二条回复"
-}
-```
-
-需要控制操作时：
-
-```json
-{
-  "<comment_id_1>": {
+  "<comment_id>": {
     "reply": "准备发送的回复",
-    "action": "send"
-  },
-  "<comment_id_2>": {
-    "reply": "",
-    "action": "skip"
-  },
-  "<comment_id_3>": {
-    "reply": "",
-    "action": "archive"
+    "action": "send",
+    "review": {
+      "logic": {"verdict": "partly_sound", "reason": "逻辑依据"},
+      "fact_check": {
+        "verdict": "unverifiable",
+        "reason": "事实核查依据",
+        "sources": []
+      },
+      "boast_check": {"verdict": "none", "reason": "吹牛判定依据"}
+    }
   }
 }
 ```
@@ -739,8 +852,9 @@ python3 main.py scan \
   `.cache/skipped.json`，但不向平台回复
 
 `skip`和`archive`的`reply`都可以为空；只有`send`要求非空回复。
-本次候选没有出现在映射中时，程序将其视为`skip`，不会发送。其他AI不得
-因为映射缺少某个候选而自动补写通用回复。
+AI工作流中缺少候选映射会在联网前报错，不会静默跳过，也不得自动补写通用
+回复。传统`drafts --batch`为了兼容旧脚本仍可读取字符串简写，但不作为AI
+推荐协议。
 
 ### 回复草稿
 
@@ -847,12 +961,13 @@ python3 main.py skipped --clear
 | `permission_denied` | 对方设置不允许评论，加入排除列表且不重试 |
 | `verification_required` | 停止自动重试，按返回提示处理验证 |
 | `not_authenticated` | 重新登录后接续暂停批次 |
-| `session_error` | 检查本地环境后接续暂停批次 |
+| `session_error` | helper异常结束或响应超时；已停止当前持久会话，检查诊断后再接续 |
 | `unknown_error` | 保存错误信息，检查登录和平台状态 |
 
 无论错误类型是什么，回复失败后都会写入 `.cache/skipped.json`。如需重试，
-必须先获得用户明确授权，再移出排除列表并重置 `drafts.json` 中对应评论的
-`failed` 终态。
+必须先获得用户明确授权，再运行`ai-reply --action retry --comment-id <ID>
+--retry-authorized`；程序会移出排除列表并重置对应`failed`终态，但不会直接
+发送，随后仍须重新完成草稿预览和确认。
 
 如果出现验证码或平台验证，AI必须停止自动操作，不得把它当作普通冷却错误
 连续重试。`ai-reply`会返回`error_type=verification_required`、
@@ -891,6 +1006,8 @@ python3 main.py skipped --clear
 ├── config.py               # 账号与请求配置
 ├── pyproject.toml          # 项目元数据与固定依赖
 ├── requirements.txt       # xiaohongshu-cli兼容版本
+├── QUICKSTART.md           # 最短使用流程
+├── TROUBLESHOOTING.md      # 常见错误排查
 ├── SKILL.md                # AI 助手执行规则
 ├── lib/
 │   ├── xhs_client.py       # XHSClient兼容门面、账号和回复
@@ -900,16 +1017,23 @@ python3 main.py skipped --clear
 │   ├── xhs_client_proxy.py    # 门面延迟绑定
 │   ├── cli_ai.py           # AI回复兼容门面和审计调度
 │   ├── cli_ai_prepare.py   # prepare阶段
+│   ├── cli_ai_map.py       # 结构化映射阶段
 │   ├── cli_ai_draft.py     # draft阶段
 │   ├── cli_ai_send.py      # send阶段
+│   ├── cli_ai_state.py     # 状态摘要与失败重试
 │   ├── cli_ai_support.py   # 映射校验和展示转换
 │   ├── cli_ai_audit.py     # 脱敏审计
 │   ├── cli_comment_view.py # 评论展示和通知正文归档
+│   ├── comment_watcher.py  # 手动新评论监控和安全自动回复
+│   ├── cli_watch.py        # watch命令和监控事件展示
+│   ├── web_app.py          # 仅本机完整Web控制与监控服务
+│   ├── web_services.py     # Web结构化业务服务与发布确认绑定
 │   ├── scanner.py          # 评论扫描与回复状态判断
 │   ├── scanner_online.py   # 在线回复和楼中楼完整性核验
 │   ├── replier.py          # 草稿生成和回复发送
 │   ├── analyzer.py         # 评论统计与情感分类
 │   └── poster.py           # 图文笔记校验与发布
+├── web/                    # 本地Web控制台静态资源
 ├── references/
 │   └── commands.md         # 详细命令和 Python API
 ├── tests/
@@ -928,6 +1052,8 @@ python3 main.py scan --help
 python3 main.py drafts --help
 python3 main.py send --help
 python3 main.py post --help
+python3 main.py watch --help
+python3 main.py web --help
 ```
 
 更详细的命令参考见 [`references/commands.md`](references/commands.md)。
