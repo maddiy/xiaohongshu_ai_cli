@@ -20,6 +20,7 @@
         <a href="#comments" data-page-link="comments"><span>03</span>最新评论</a>
         <a href="#monitor" data-page-link="monitor"><span>04</span>自动监控</a>
         <a href="#skipped" data-page-link="skipped"><span>05</span>回复排除列表</a>
+        <a href="#drafts" data-page-link="drafts"><span>06</span>回复草稿</a>
       </nav>
       <div class="security-card"><span class="pulse-dot" aria-hidden="true"></span><div><strong>本地安全模式</strong><small>仅监听 127.0.0.1，平台写操作需要确认</small></div></div>
       <p class="sidebar-foot">LOCAL OPERATIONS CONSOLE</p>
@@ -54,6 +55,7 @@
               <div class="quick-grid">
                 <button data-open-page="articles"><span>文</span><strong>最新文章</strong><small>复制 ID 或进入评论分析</small></button>
                 <button data-open-page="comments"><span>评</span><strong>最新评论</strong><small>点击回复按钮直接复制提示词</small></button>
+                <button data-open-page="drafts"><span>稿</span><strong>回复草稿</strong><small>查看待发送草稿</small></button>
                 <button data-open-page="monitor"><span>监</span><strong>自动监控</strong><small>发现新评论</small></button>
                 <button data-open-page="skipped"><span>排</span><strong>回复排除列表</strong><small>搜索、分页和删除记录</small></button>
               </div>
@@ -74,7 +76,7 @@
           <article class="panel data-panel">
             <div class="panel-heading data-heading">
               <div class="heading-copy"><span class="section-index">文</span><div><p class="eyebrow">LATEST NOTES</p><h2>最新文章</h2></div></div>
-              <div class="inline-controls"><span class="page-size-label">每页 10 篇</span><button id="refreshArticles" class="ghost">刷新全部文章</button></div>
+              <div class="inline-controls"><label class="sort-label">排序：<select id="articleSort"><option value="time">发布时间</option><option value="views">查看数量</option></select></label><span class="page-size-label">每页 10 篇</span><button id="refreshArticles" class="ghost">刷新最新文章</button></div>
             </div>
             <p class="page-hint">笔记 ID 旁的图标可一键复制；点击“评论分析”会带入当前文章并打开分析页面。</p>
             <div id="articles" class="table-shell loading"><span class="loader"></span>正在读取文章…</div>
@@ -88,7 +90,7 @@
               <div class="heading-copy"><span class="section-index">评</span><div><p class="eyebrow">LATEST COMMENTS</p><h2>最新评论</h2></div></div>
               <div class="inline-controls"><input id="commentNoteId" placeholder="筛选笔记 ID（可选）" aria-label="评论笔记 ID"><span class="page-size-label">每页 10 条</span><button id="refreshComments" class="ghost">读取最新并刷新</button></div>
             </div>
-            <p class="page-hint">分页展示本地累计保存的完整评论正文；每条评论都可单独复制回复提示词，或以“人工忽略”加入回复排除列表。</p>
+            <p class="page-hint">文章标题后的“评论”复制处理该文章全部评论的提示词；每条评论后的“评论”复制单条提示词，“草稿”可直接编辑并安全发送，“忽略”会加入排除列表。</p>
             <div id="comments" class="comment-groups loading"><span class="loader"></span>正在读取评论…</div>
             <nav id="commentPagination" class="pagination hidden" aria-label="评论分页"><button id="commentPrevious" class="ghost">上一页</button><span id="commentPageInfo">第 1 / 1 页</span><button id="commentNext" class="ghost">下一页</button></nav>
           </article>
@@ -129,9 +131,35 @@
             <nav id="skippedPagination" class="pagination hidden" aria-label="排除列表分页"><button id="skippedPrevious" class="ghost">上一页</button><span id="skippedPageInfo">第 1 / 1 页</span><button id="skippedNext" class="ghost">下一页</button></nav>
           </article>
         </section>
+
+        <section id="pageDrafts" class="page-view hidden" data-page="drafts">
+          <article class="panel">
+            <div class="panel-heading"><div class="heading-copy"><span class="section-index">06</span><div><p class="eyebrow">REPLY DRAFTS</p><h2>回复草稿</h2></div></div><div class="heading-actions"><button id="sendAllDrafts" class="primary">全部发送</button><button id="refreshDrafts" class="icon-button" aria-label="刷新草稿列表">↻</button></div></div>
+            <p class="page-hint">展示所有笔记中当前未发送或发送中的回复草稿。终态（已发送、失败、已归档）不会出现在这里。</p>
+            <div id="draftsList" class="result-area loading"><span class="loader"></span>正在读取草稿…</div>
+          </article>
+        </section>
       </main>
     </div>
   </div>
+  <dialog id="replyDraftDialog" class="reply-draft-dialog" aria-labelledby="replyDraftTitle">
+    <div class="draft-dialog-head">
+      <div><p class="eyebrow">REPLY DRAFT</p><h2 id="replyDraftTitle">编辑回复草稿</h2></div>
+      <button id="closeReplyDraft" type="button" class="icon-button" aria-label="关闭回复草稿">×</button>
+    </div>
+    <div class="draft-comment-card">
+      <strong id="replyDraftUser">评论用户</strong>
+      <p id="replyDraftComment"></p>
+    </div>
+    <label class="draft-text-label" for="replyDraftText">回复内容</label>
+    <textarea id="replyDraftText" rows="7" maxlength="1000" placeholder="输入准备发送的回复内容"></textarea>
+    <div class="draft-meta"><span id="replyDraftSource">草稿来源</span><span id="replyDraftCount">0 / 1000</span></div>
+    <p id="replyDraftNotice" class="draft-notice">点击发送即确认发送当前文本；发送前程序仍会在线核验。</p>
+    <div class="draft-dialog-actions">
+      <button id="cancelReplyDraft" type="button" class="ghost">取消</button>
+      <button id="sendReplyDraft" type="button" class="primary">确认并发送</button>
+    </div>
+  </dialog>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" defer></script>
 </body>

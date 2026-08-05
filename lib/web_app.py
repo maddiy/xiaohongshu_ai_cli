@@ -22,11 +22,16 @@ from .comment_watcher import CommentWatchError, CommentWatcher
 from .state_io import StateLockTimeout, json_state_exists, read_json_state
 from .web_services import (
     WebServiceError,
+    list_all_drafts,
     run_analysis,
     run_doctor,
     run_paths,
     run_protocol,
+    reply_draft,
+    send_all_drafts,
+    send_reply_draft,
     skipped_records,
+    update_draft_reply,
     update_skipped,
 )
 from .xhs_client import XHSClient
@@ -196,25 +201,79 @@ def _page_info(total_count: int, page: int, page_size: int) -> dict:
     }
 
 
+def _articles_from_notes(notes: list) -> list:
+    """将 get_my_notes 返回的原始笔记列表转为文章字典列表。"""
+    return [{
+        "index": i,
+        "time": item.get("time", ""),
+        "comments_count": item.get("comments_count", 0),
+        "view_count": item.get("view_count", 0),
+        "title": item.get("title", "") or "无标题",
+        "note_id": item.get("id", ""),
+    } for i, item in enumerate(notes, start=1)]
+
+
+def _merge_articles(fresh: list, cached: list) -> list:
+    """将最新抓取文章插入缓存列表头部，按 note_id 去重，重新编号。"""
+    fresh_ids = {a["note_id"] for a in fresh}
+    merged = fresh + [
+        a for a in cached
+        if isinstance(a, dict) and a.get("note_id") not in fresh_ids
+    ]
+    for i, art in enumerate(merged):
+        art["index"] = i + 1
+    return merged
+
+
+def _sort_articles(articles: list, sort: str) -> list:
+    """按指定字段排序并重新编号。"""
+    if sort == "views":
+        articles = sorted(
+            articles,
+            key=lambda x: x.get("view_count", 0),
+            reverse=True,
+        )
+        for i, art in enumerate(articles):
+            art["index"] = i + 1
+    return articles
+
+
 def _load_articles(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
-                   refresh: bool = False) -> dict:
-    if refresh or not json_state_exists(WEB_ARTICLES_FILE):
+                   refresh: bool = False, sort: str = "time",
+                   full_refresh: bool = False) -> dict:
+    columns = ["序号", "发布时间", "查看数", "评论数", "标题", "笔记ID"]
+    has_cache = json_state_exists(WEB_ARTICLES_FILE)
+    if full_refresh or not has_cache:
+        # 全量拉取（仅首次无缓存时自动触发，或 API 显式传 full_refresh=1）
+        max_pages = None
         with contextlib.redirect_stdout(io.StringIO()):
-            online = XHSClient.get_my_notes(max_pages=None, strict=True)
-        all_articles = [{
-            "index": index,
-            "time": item.get("time", ""),
-            "comments_count": item.get("comments_count", 0),
-            "title": item.get("title", "") or "无标题",
-            "note_id": item.get("id", ""),
-        } for index, item in enumerate(online, start=1)]
+            online = XHSClient.get_my_notes(max_pages=max_pages, strict=True)
+        all_articles = _articles_from_notes(online)
         write_json({
             "ok": True,
-            "columns": ["序号", "发布时间", "评论数", "标题", "笔记ID"],
+            "columns": columns,
             "articles": all_articles,
             "count": len(all_articles),
         }, WEB_ARTICLES_FILE, indent=2)
-        source = "online"
+        source = "online_full" if full_refresh else "online_first"
+    elif refresh:
+        # 增量刷新：只读最新10篇，与本地缓存合并
+        with contextlib.redirect_stdout(io.StringIO()):
+            online = XHSClient.get_my_notes(max_pages=1, strict=True)
+        fresh = _articles_from_notes(online)
+        cached = read_json_state(WEB_ARTICLES_FILE, default={}) or {}
+        cached_articles = [
+            item for item in cached.get("articles", [])
+            if isinstance(item, dict)
+        ]
+        all_articles = _merge_articles(fresh, cached_articles)
+        write_json({
+            "ok": True,
+            "columns": columns,
+            "articles": all_articles,
+            "count": len(all_articles),
+        }, WEB_ARTICLES_FILE, indent=2)
+        source = "online_incremental"
     else:
         cached = read_json_state(WEB_ARTICLES_FILE, default={}) or {}
         all_articles = [
@@ -222,17 +281,20 @@ def _load_articles(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
             if isinstance(item, dict)
         ]
         source = "cache"
+    # 排序
+    all_articles = _sort_articles(all_articles, sort)
     pagination = _page_info(len(all_articles), page, page_size)
     start = (pagination["page"] - 1) * page_size
     articles = all_articles[start:start + page_size]
     return {
         "ok": True,
-        "columns": ["序号", "发布时间", "评论数", "标题", "笔记ID"],
+        "columns": columns,
         "articles": articles,
         "count": len(articles),
         "total_count": len(all_articles),
         "pagination": pagination,
         "source": source,
+        "sort": sort,
     }
 
 
@@ -447,8 +509,9 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                         "app": "小红书AI智能运营系统",
                         "capabilities": [
                             "login", "articles", "comments", "reply_prompt",
-                            "comment_ignore", "analyze", "skipped", "doctor",
-                            "paths", "protocol", "watch",
+                            "reply_draft", "reply_send", "comment_ignore",
+                            "analyze", "skipped", "doctor",
+                            "drafts", "paths", "protocol", "watch",
                         ],
                     })
                 elif parsed.path == "/api/watch/status":
@@ -457,8 +520,11 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                     page = self._query_int(query, "page", 1, 1000000)
                     page_size = self._query_int(query, "page_size", 10, 100)
                     refresh = query.get("refresh", [""])[0] == "1"
+                    sort = query.get("sort", [""])[0] or "time"
+                    full_refresh = query.get("full_refresh", [""])[0] == "1"
                     self._send_json(200, _load_articles(
-                        page=page, page_size=page_size, refresh=refresh
+                        page=page, page_size=page_size, refresh=refresh,
+                        sort=sort, full_refresh=full_refresh,
                     ))
                 elif parsed.path == "/api/comments":
                     page = self._query_int(query, "page", 1, 1000000)
@@ -471,6 +537,11 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                         note_id=note_id,
                         refresh=refresh,
                     ))
+                elif parsed.path == "/api/reply-draft":
+                    self._send_json(200, reply_draft(
+                        note_id=query.get("note_id", [""])[0],
+                        comment_id=query.get("comment_id", [""])[0],
+                    ))
                 elif parsed.path == "/api/skipped":
                     page = self._query_int(query, "page", 1, 1000000)
                     page_size = self._query_int(
@@ -480,8 +551,21 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                     self._send_json(200, skipped_records(
                         search=search, page=page, page_size=page_size
                     ))
+                elif parsed.path == "/api/drafts":
+                    self._send_json(200, list_all_drafts())
                 else:
                     self._send_json(404, {"ok": False, "error": "未找到"})
+            except (CommentWatchError, WebServiceError) as error:
+                response = {
+                    "ok": False,
+                    "error": str(error),
+                    "error_type": getattr(
+                        error, "error_type", "invalid_web_request"
+                    ),
+                }
+                if getattr(error, "details", None) is not None:
+                    response["details"] = error.details
+                self._send_json(400, response)
             except Exception as error:
                 self._send_json(500, {"ok": False, "error": str(error)})
 
@@ -523,6 +607,12 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                     self._send_json(200, run_analysis(payload))
                 elif parsed.path == "/api/skipped":
                     self._send_json(200, update_skipped(payload))
+                elif parsed.path == "/api/drafts/update-reply":
+                    self._send_json(200, update_draft_reply(payload))
+                elif parsed.path == "/api/drafts/send-all":
+                    self._send_json(200, send_all_drafts(payload))
+                elif parsed.path == "/api/reply/send":
+                    self._send_json(200, send_reply_draft(payload))
                 elif parsed.path == "/api/doctor":
                     self._send_json(200, run_doctor())
                 elif parsed.path == "/api/paths":
@@ -534,11 +624,16 @@ def _handler_class(manager: WatchManager, csrf_token: str):
             except CommentWatchError as error:
                 self._send_json(400, {"ok": False, "error": str(error)})
             except WebServiceError as error:
-                self._send_json(400, {
+                response = {
                     "ok": False,
                     "error": str(error),
-                    "error_type": "invalid_web_request",
-                })
+                    "error_type": getattr(
+                        error, "error_type", "invalid_web_request"
+                    ),
+                }
+                if getattr(error, "details", None) is not None:
+                    response["details"] = error.details
+                self._send_json(400, response)
             except Exception as error:
                 self._send_json(500, {"ok": False, "error": str(error)})
 

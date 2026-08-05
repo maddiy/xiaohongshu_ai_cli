@@ -240,6 +240,9 @@ def save_comment_archive(groups, path=None):
                     "nickname": comment.get("nickname", "?"),
                     "content": comment.get("content", ""),
                     "status": comment.get("status", ""),
+                    "target_comment_id": comment.get(
+                        "target_comment_id", ""
+                    ),
                 }
             previous_ids = [
                 str(item.get("comment_id", ""))

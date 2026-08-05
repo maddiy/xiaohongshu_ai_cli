@@ -52,6 +52,7 @@ class XHSContentMixin:
                     "comments_count": int(
                         note.get("comments_count", 0) or 0
                     ),
+                    "view_count": int(note.get("view_count", 0) or 0),
                     "xsec_token": token,
                     "time": note.get("time", ""),
                 })

@@ -110,6 +110,94 @@ class WebServiceTests(unittest.TestCase):
         self.assertEqual(result["reason"], "发送失败：权限不足")
         add_skipped.assert_not_called()
 
+    @patch("lib.web_services.XHSClient.load_skipped", return_value={})
+    @patch("lib.web_services.json_state_exists", return_value=False)
+    @patch("lib.web_services._find_archived_comment")
+    def test_reply_draft_is_editable_and_has_safe_generic_fallback(
+        self, find_comment, _exists, _load_skipped
+    ):
+        find_comment.return_value = {
+            "comment_id": "comment-1",
+            "note_id": "note-1",
+            "note_title": "文章",
+            "nickname": "用户甲",
+            "content": "完整评论正文",
+        }
+        result = web_services.reply_draft("note-1", "comment-1")
+        self.assertTrue(result["can_send"])
+        self.assertEqual(result["draft_source"], "generic")
+        self.assertTrue(result["reply"])
+        self.assertEqual(result["content"], "完整评论正文")
+        self.assertEqual(result["max_reply_length"], 1000)
+
+    @patch("lib.web_services.XHSClient.load_skipped")
+    @patch("lib.web_services.json_state_exists", return_value=False)
+    @patch("lib.web_services._find_archived_comment")
+    def test_reply_draft_blocks_excluded_comment(
+        self, find_comment, _exists, load_skipped
+    ):
+        find_comment.return_value = {
+            "comment_id": "comment-1",
+            "note_id": "note-1",
+            "nickname": "用户甲",
+            "content": "评论",
+        }
+        load_skipped.return_value = {
+            "comment-1": {"reason": "人工忽略"},
+        }
+        result = web_services.reply_draft("note-1", "comment-1")
+        self.assertFalse(result["can_send"])
+        self.assertIn("排除列表", result["blocked_reason"])
+
+    @patch("lib.web_services.Replier.send_drafts")
+    @patch("lib.web_services.CommentScanner.verify_candidates_online")
+    @patch("lib.web_services.XHSClient.load_skipped", return_value={})
+    def test_web_draft_send_online_verifies_and_persists_result(
+        self, _load_skipped, verify, send_drafts
+    ):
+        comment = {
+            "comment_id": "comment-1",
+            "note_id": "note-1",
+            "note_title": "文章",
+            "nickname": "用户甲",
+            "content": "评论正文",
+            "target_comment_id": "root-1",
+        }
+        verify.return_value = ([{
+            "comment_id": "comment-1",
+            "nickname": "用户甲",
+            "content": "评论正文",
+        }], [])
+
+        def send_success(state, state_file=None):
+            state["drafts"][0]["send_status"] = "sent"
+            return {
+                "success": 1, "fail": 0, "skip": 0,
+                "stopped": False,
+            }
+
+        send_drafts.side_effect = send_success
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = {
+                "directory": temp_dir,
+                "scan": os.path.join(temp_dir, "scan.json"),
+                "reply_map": os.path.join(temp_dir, "reply_map.json"),
+                "drafts": os.path.join(temp_dir, "drafts.json"),
+                "audit": os.path.join(temp_dir, "audit.json"),
+            }
+            with patch("lib.web_services.workflow_paths", return_value=paths):
+                result = web_services._send_reply_draft_locked(
+                    "note-1", "comment-1", "编辑后的回复", comment
+                )
+            with open(paths["drafts"], encoding="utf-8") as file:
+                saved = json.load(file)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(saved["drafts"][0]["reply"], "编辑后的回复")
+        self.assertEqual(saved["drafts"][0]["send_status"], "sent")
+        self.assertEqual(saved["active_batch"]["source"], "web_manual_edit")
+        verify.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,18 +4,20 @@ const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 const $ = (selector) => document.querySelector(selector);
 const state = {
   skipped: { page: 1, pageSize: 15, search: "", requestId: 0 },
-  articles: { page: 1, pageSize: 10 },
+  articles: { page: 1, pageSize: 10, sort: "time" },
   comments: { page: 1, pageSize: 10, noteId: "" },
+  replyDraft: { noteId: "", commentId: "", canSend: false, onSent: null },
   loadedPages: new Set(),
 };
 
 const PAGE_META = {
   dashboard: ["OPERATIONS DESK", "智能运营工作台", "快速进入文章、评论、监控和系统管理。"],
-  articles: ["LATEST NOTES", "最新文章", "分页查看全部文章，复制笔记 ID 或进入评论分析。"],
-  comments: ["LATEST COMMENTS", "最新评论", "逐条复制回复提示词，或把评论人工加入回复排除列表。"],
+  articles: ["LATEST NOTES", "最新文章", "默认读取最新10篇，剩余读本地列表。可按查看数排序、复制笔记 ID 或进入评论分析。"],
+  comments: ["LATEST COMMENTS", "最新评论", "按文章或按单条评论复制回复提示词，也可人工忽略单条评论。"],
   analyze: ["COMMENT INSIGHTS", "评论分析", "查看情感分布、回复情况、热门评论和活跃用户。"],
   monitor: ["MONITOR CENTER", "自动监控", "手动开启评论发现或安全自动回复。"],
   skipped: ["REPLY EXCLUSIONS", "回复排除列表", "搜索、分页和删除不再参与自动回复的评论。"],
+  drafts: ["REPLY DRAFTS", "回复草稿", "浏览所有笔记中当前待发送或发送中的回复草稿。"],
 };
 
 class ApiError extends Error {
@@ -149,7 +151,7 @@ function renderArticles(payload) {
   table.setAttribute("aria-label", "最新文章列表");
   const head = document.createElement("thead");
   const header = document.createElement("tr");
-  ["序号", "发布时间", "评论数", "标题", "笔记 ID"].forEach((name) => header.append(textNode("th", name)));
+  ["序号", "发布时间", "评论数", "查看数", "标题", "笔记 ID"].forEach((name) => header.append(textNode("th", name)));
   head.append(header);
   const body = document.createElement("tbody");
   rows.forEach((row) => {
@@ -173,7 +175,7 @@ function renderArticles(payload) {
     });
     noteActions.append(copy, analyze);
     noteCell.append(noteActions);
-    tr.append(cell(row, "index", "compact"), cell(row, "time", "compact"), cell(row, "comments_count", "compact"), cell(row, "title"), noteCell);
+    tr.append(cell(row, "index", "compact"), cell(row, "time", "compact"), cell(row, "comments_count", "compact"), cell(row, "view_count", "compact"), cell(row, "title"), noteCell);
     body.append(tr);
   });
   table.append(head, body);
@@ -209,7 +211,29 @@ function renderCommentGroups(payload, target) {
     copy.title = "复制笔记 ID";
     copy.setAttribute("aria-label", `复制笔记 ID ${group.note_id || ""}`);
     copy.addEventListener("click", () => copyText(group.note_id || "").catch((error) => toast(error.message, true)));
-    actions.append(copy);
+    const replyAll = textNode("button", "评论", "use-button small");
+    replyAll.type = "button";
+    replyAll.title = "复制回复该文章所有评论的 AI 提示词";
+    replyAll.addEventListener("click", async () => {
+      if (!group.note_id) {
+        toast("笔记 ID 为空，无法复制提示词", true);
+        return;
+      }
+      setBusy(replyAll, true, "复制中…");
+      try {
+        await copyText(
+          buildAllCommentsReplyPrompt(
+            group.note_id || "", safeTitle.textContent || "无标题"
+          ),
+          "该文章全部评论的 AI 回复提示词已复制",
+        );
+      } catch (error) {
+        toast(error.message, true);
+      } finally {
+        setBusy(replyAll, false);
+      }
+    });
+    actions.append(copy, replyAll);
     title.append(titleCopy, actions);
     const shell = document.createElement("div");
     shell.className = "group-table-shell";
@@ -228,7 +252,7 @@ function renderCommentGroups(payload, target) {
       actionCell.className = "comment-action-cell";
       const rowActions = document.createElement("span");
       rowActions.className = "comment-row-actions";
-      const reply = textNode("button", "回复", "use-button small");
+      const reply = textNode("button", "评论", "use-button small");
       reply.type = "button";
       reply.disabled = Boolean(actionData.ignored || !actionData.comment_id);
       reply.title = actionData.ignored ? "这条评论已在回复排除列表中" : "复制只回复这条评论的 AI 提示词";
@@ -248,6 +272,37 @@ function renderCommentGroups(payload, target) {
         } finally {
           setBusy(reply, false);
           reply.disabled = Boolean(actionData.ignored || !actionData.comment_id);
+        }
+      });
+      const draft = textNode("button", "草稿", "use-button small");
+      draft.type = "button";
+      draft.disabled = Boolean(actionData.ignored || !actionData.comment_id);
+      draft.title = actionData.ignored
+        ? "这条评论已在回复排除列表中"
+        : "打开可编辑回复草稿";
+      draft.addEventListener("click", async () => {
+        setBusy(draft, true, "读取中…");
+        try {
+          await openReplyDraft(
+            group.note_id || "",
+            actionData.comment_id || "",
+            (result) => {
+              statusCell.textContent = "已回复";
+              tr.classList.add("comment-replied");
+              reply.disabled = true;
+              draft.disabled = true;
+              ignore.disabled = true;
+              actionData.completed = true;
+              toast(result.message || "回复已发送");
+            },
+          );
+        } catch (error) {
+          toast(error.message, true);
+        } finally {
+          setBusy(draft, false);
+          draft.disabled = Boolean(
+            actionData.ignored || actionData.completed || !actionData.comment_id
+          );
         }
       });
       const ignore = textNode(
@@ -285,10 +340,11 @@ function renderCommentGroups(payload, target) {
             ignore.textContent = "已忽略";
             ignore.disabled = true;
             reply.disabled = true;
+            draft.disabled = true;
           }
         }
       });
-      rowActions.append(reply, ignore);
+      rowActions.append(reply, draft, ignore);
       actionCell.append(rowActions);
       if (actionData.ignored) tr.classList.add("comment-ignored");
       tr.append(cell(comment, "index", "compact"), safeDisplayCell(comment.time, "compact"), safeDisplayCell(comment.nickname, "compact"), safeDisplayCell(comment.content, "comment-content"), statusCell, actionCell);
@@ -301,6 +357,68 @@ function renderCommentGroups(payload, target) {
   });
 }
 
+async function openReplyDraft(noteId, commentId, onSent) {
+  if (!noteId || !commentId) throw new ApiError("评论定位信息不完整");
+  const query = new URLSearchParams({ note_id: noteId, comment_id: commentId });
+  const payload = await api(`/api/reply-draft?${query}`);
+  state.replyDraft = {
+    noteId,
+    commentId,
+    canSend: Boolean(payload.can_send),
+    onSent,
+  };
+  $("#replyDraftUser").textContent = payload.nickname || "未知用户";
+  $("#replyDraftComment").textContent = payload.content || "";
+  $("#replyDraftText").value = payload.reply || "";
+  $("#replyDraftText").maxLength = Number(payload.max_reply_length || 1000);
+  const sourceLabels = {
+    existing_draft: "现有回复草稿",
+    reply_map: "AI 回复映射",
+    generic: "通用草稿，请按评论内容修改",
+  };
+  $("#replyDraftSource").textContent = sourceLabels[payload.draft_source] || "回复草稿";
+  $("#replyDraftNotice").textContent = payload.blocked_reason || "点击发送即确认发送当前文本；发送前程序仍会在线核验。";
+  $("#replyDraftNotice").classList.toggle("blocked", !payload.can_send);
+  updateReplyDraftControls();
+  $("#replyDraftDialog").showModal();
+  $("#replyDraftText").focus();
+}
+
+function updateReplyDraftControls() {
+  const text = $("#replyDraftText").value;
+  const maximum = Number($("#replyDraftText").maxLength || 1000);
+  $("#replyDraftCount").textContent = `${text.length} / ${maximum}`;
+  $("#sendReplyDraft").disabled = !state.replyDraft.canSend || !text.trim();
+}
+
+async function sendCurrentReplyDraft() {
+  const button = $("#sendReplyDraft");
+  const reply = $("#replyDraftText").value.trim();
+  if (!reply || !state.replyDraft.canSend) return;
+  setBusy(button, true, "核验并发送中…");
+  try {
+    const result = await api("/api/reply/send", {
+      method: "POST",
+      body: JSON.stringify({
+        note_id: state.replyDraft.noteId,
+        comment_id: state.replyDraft.commentId,
+        reply,
+        confirmed: true,
+      }),
+    });
+    const onSent = state.replyDraft.onSent;
+    $("#replyDraftDialog").close();
+    if (typeof onSent === "function") onSent(result);
+  } catch (error) {
+    $("#replyDraftNotice").textContent = error.message;
+    $("#replyDraftNotice").classList.add("blocked");
+    toast(error.message, true);
+  } finally {
+    setBusy(button, false);
+    updateReplyDraftControls();
+  }
+}
+
 async function refreshArticles(page = state.articles.page, refresh = false) {
   const button = $("#refreshArticles");
   setBusy(button, true, "读取中…");
@@ -308,6 +426,7 @@ async function refreshArticles(page = state.articles.page, refresh = false) {
     const query = new URLSearchParams({
       page: String(page),
       page_size: String(state.articles.pageSize),
+      sort: state.articles.sort,
     });
     if (refresh) query.set("refresh", "1");
     renderArticles(await api(`/api/articles?${query}`));
@@ -333,6 +452,25 @@ async function refreshComments(page = state.comments.page, refresh = false) {
     emptyState($("#comments"), "评论读取失败", error.message);
     toast(error.message, true);
   } finally { setBusy(button, false); }
+}
+
+function buildAllCommentsReplyPrompt(noteId, noteTitle) {
+  const title = String(noteTitle || "无标题").trim() || "无标题";
+  const id = String(noteId || "").trim();
+  return `请在“小红书AI智能运营系统”项目中回复下面这篇笔记的所有评论：
+
+笔记标题：${title}
+笔记 ID：${id}
+
+执行要求：
+1. 我明确要求处理这篇笔记的全部历史评论，请使用 ai-reply prepare --full-scan 完整读取一级评论和楼中楼；不要只处理最新通知。
+2. 先应用本地终态和回复排除列表，再在线核验每条候选；已回复、已删除、发送失败终态、结果不确定或已排除的评论不得生成草稿。
+3. 对每条候选分别完成逻辑分析、事实核查和吹牛判定；需要外部事实支持时使用可靠来源，不得编造事实或链接。
+4. 为所有通过资格判断且适合回复的评论生成自然、简洁、有针对性的中文回复；纯辱骂、无实质观点或同一用户重复正文按规则跳过。
+5. 若终端候选列表被截断，必须读取 candidates_source 中的完整数据，不能把内联片段当作全部候选。
+6. 按程序返回的列名，用 Markdown 表格完整展示全部审查结果和回复草稿；不要向我显示评论 ID。
+7. 展示草稿后等待我的明确确认。未经确认不得发送；确认后必须原样使用当前 batch_id 和 preview_hash 执行发送。
+8. 遇到验证码、登录失效、网络核验失败、楼中楼数据不完整或 uncertain_send_state 时立即停止并说明原因，不得自动重复发送。`;
 }
 
 function buildCommentReplyPrompt(noteId, noteTitle, comment) {
@@ -602,13 +740,314 @@ function applySkippedSearch() {
   refreshSkipped(1);
 }
 
+/* ---- 回复草稿 ---- */
+
+const REVIEW_VERDICT_LABELS = {
+  logic: {
+    sound: "成立", partly_sound: "部分成立", weak: "薄弱",
+    fallacious: "谬误", non_argument: "非论证", unclear: "不明确",
+  },
+  fact_check: {
+    supported: "有依据", mixed: "部分有据", contradicted: "与事实不符",
+    unverifiable: "无法核实", not_applicable: "不适用",
+  },
+  boast_check: {
+    none: "无吹牛", possible: "可能吹牛", likely: "疑似吹牛",
+    unverifiable: "无法判定", not_applicable: "不适用",
+  },
+};
+
+const REVIEW_VERDICT_CLASS = {
+  logic: {
+    sound: "ok", partly_sound: "warn", weak: "muted",
+    fallacious: "err", non_argument: "muted", unclear: "muted",
+  },
+  fact_check: {
+    supported: "ok", mixed: "warn", contradicted: "err",
+    unverifiable: "muted", not_applicable: "muted",
+  },
+  boast_check: {
+    none: "ok", possible: "warn", likely: "err",
+    unverifiable: "muted", not_applicable: "muted",
+  },
+};
+
+function reviewBadge(category, verdict) {
+  const label = (REVIEW_VERDICT_LABELS[category] || {})[verdict] || verdict;
+  const cls = (REVIEW_VERDICT_CLASS[category] || {})[verdict] || "muted";
+  const span = document.createElement("span");
+  span.className = `review-badge ${cls}`;
+  span.textContent = label;
+  return span;
+}
+
+function renderDrafts(payload) {
+  const target = $("#draftsList");
+  target.replaceChildren();
+  target.classList.remove("loading");
+  if (!payload.drafts.length) {
+    return emptyState(target, "暂无待发送草稿", "回复草稿仅显示未终态的条目（待发送或发送中）。已发送、失败、归档的不会出现在这里。");
+  }
+  target.classList.remove("empty-state");
+  const shell = document.createElement("div");
+  shell.className = "table-shell";
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const header = document.createElement("tr");
+  ["序号", "笔记", "用户", "原评论", "拟回复", "审查", "状态", "操作"].forEach((name) => header.append(textNode("th", name)));
+  head.append(header);
+  const body = document.createElement("tbody");
+  payload.drafts.forEach((row, i) => {
+    const tr = document.createElement("tr");
+    tr.dataset.reviewIndex = i;
+    tr.append(
+      textNode("td", String(i + 1), "compact"),
+      textNode("td", row.note_title, "compact"),
+      textNode("td", row.nickname, "compact"),
+      textNode("td", row.content, "comment-content")
+    );
+    // 拟回复 — 双击可编辑
+    const replyTd = document.createElement("td");
+    replyTd.className = "comment-content draft-reply-cell";
+    const replyView = document.createElement("div");
+    replyView.className = "draft-reply-view";
+    replyView.title = "双击编辑回复内容";
+    replyView.textContent = row.reply;
+    replyView.addEventListener("dblclick", () => {
+      startEditDraftReply(replyTd, row.note_id, row.comment_id, row.reply);
+    });
+    replyTd.append(replyView);
+    tr.append(replyTd);
+    // 审查 — 判定徽章，点击展开详情
+    const reviewTd = document.createElement("td");
+    reviewTd.className = "compact review-cell";
+    const review = row.review;
+    if (review && (review.logic || review.fact_check || review.boast_check)) {
+      const wrap = document.createElement("span");
+      wrap.className = "review-badges";
+      if (review.logic && review.logic.verdict) {
+        wrap.append(reviewBadge("logic", review.logic.verdict));
+      }
+      if (review.fact_check && review.fact_check.verdict) {
+        wrap.append(reviewBadge("fact_check", review.fact_check.verdict));
+      }
+      if (review.boast_check && review.boast_check.verdict) {
+        wrap.append(reviewBadge("boast_check", review.boast_check.verdict));
+      }
+      wrap.title = "点击查看审查详情";
+      wrap.style.cursor = "pointer";
+      wrap.addEventListener("click", () => toggleReviewDetail(table, body, tr, i, row.review));
+      reviewTd.append(wrap);
+    } else {
+      reviewTd.append(textNode("span", "—", "muted"));
+    }
+    tr.append(reviewTd);
+    // 状态
+    const statusTd = document.createElement("td");
+    statusTd.className = "compact";
+    if (row.send_status === "sending") {
+      statusTd.append(textNode("span", "发送中", "badge warning"));
+    } else {
+      statusTd.append(textNode("span", "待发送", "badge"));
+    }
+    if (row.is_active) statusTd.append(" ", textNode("span", "活动批次", "badge info"));
+    if (row.in_skipped) statusTd.append(" ", textNode("span", "已排除", "badge danger"));
+    tr.append(statusTd);
+    // 操作 — 发送按钮
+    const actionTd = document.createElement("td");
+    actionTd.className = "compact draft-actions";
+    const sendBtn = document.createElement("button");
+    sendBtn.className = "ghost";
+    sendBtn.textContent = "发送";
+    if (row.in_skipped || row.send_status === "sending") {
+      sendBtn.disabled = true;
+      sendBtn.title = row.in_skipped ? "该评论已在排除列表中" : "发送状态未确定，请勿重复发送";
+    }
+    sendBtn.addEventListener("click", () => {
+      sendSingleDraftByIndex(i, row.note_id, row.comment_id, row.reply);
+    });
+    actionTd.append(sendBtn);
+    tr.append(actionTd);
+    body.append(tr);
+  });
+  table.append(head, body);
+  shell.append(table);
+  target.append(shell);
+}
+
+function toggleReviewDetail(table, body, ownerTr, index, review) {
+  // 关闭已存在的详情行（同一表格内）
+  const existing = table.querySelectorAll(".review-detail-row");
+  const alreadyOpen = Array.from(existing).some((r) => r.dataset.reviewIndex === String(index));
+  existing.forEach((r) => r.remove());
+  if (alreadyOpen) return;
+
+  const detailTr = document.createElement("tr");
+  detailTr.className = "review-detail-row";
+  detailTr.dataset.reviewIndex = index;
+  const detailTd = document.createElement("td");
+  detailTd.colSpan = 8;
+  detailTd.className = "review-detail";
+
+  const items = [
+    { key: "logic", title: "逻辑分析" },
+    { key: "fact_check", title: "事实核查" },
+    { key: "boast_check", title: "吹牛判定" },
+  ];
+
+  items.forEach(({ key, title }) => {
+    const data = review[key];
+    if (!data) return;
+    const div = document.createElement("div");
+    div.className = "review-detail-item";
+    const head = document.createElement("strong");
+    head.className = "review-detail-title";
+    head.append(reviewBadge(key, data.verdict));
+    head.append(" " + title);
+    div.append(head);
+    const reason = document.createElement("p");
+    reason.textContent = data.reason || "";
+    div.append(reason);
+    if (data.sources && data.sources.length) {
+      const srcList = document.createElement("ul");
+      srcList.className = "review-sources";
+      data.sources.forEach((s) => {
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = s.url || "#";
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = s.title || s.url || "来源";
+        li.append(a);
+        srcList.append(li);
+      });
+      div.append(srcList);
+    }
+    detailTd.append(div);
+  });
+
+  detailTr.append(detailTd);
+  ownerTr.after(detailTr);
+}
+
+/* 双击编辑回复草稿正文 */
+function startEditDraftReply(cell, noteId, commentId, currentReply) {
+  const textarea = document.createElement("textarea");
+  textarea.className = "draft-reply-textarea";
+  textarea.value = currentReply;
+  textarea.rows = 3;
+  cell.replaceChildren();
+  cell.append(textarea);
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  const save = async () => {
+    const newReply = textarea.value.trim();
+    if (!newReply || newReply === currentReply) {
+      // 恢复视图
+      restoreReplyView(cell, currentReply, noteId, commentId);
+      return;
+    }
+    try {
+      await api("/api/drafts/update-reply", {
+        method: "POST",
+        body: JSON.stringify({ note_id: noteId, comment_id: commentId, reply: newReply }),
+      });
+      toast("回复草稿已更新");
+      currentReply = newReply;
+    } catch (error) {
+      toast(error.message, true);
+    }
+    restoreReplyView(cell, currentReply, noteId, commentId);
+  };
+  textarea.addEventListener("blur", save);
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      textarea.value = currentReply;
+      textarea.blur();
+    }
+  });
+}
+
+function restoreReplyView(cell, text, noteId, commentId) {
+  const replyView = document.createElement("div");
+  replyView.className = "draft-reply-view";
+  replyView.title = "双击编辑回复内容";
+  replyView.textContent = text;
+  replyView.addEventListener("dblclick", () => {
+    startEditDraftReply(cell, noteId, commentId, text);
+  });
+  cell.replaceChildren();
+  cell.append(replyView);
+}
+
+/* 发送单条草稿 */
+async function sendSingleDraftByIndex(index, noteId, commentId, reply) {
+  if (!confirm(`确定要发送 #${index + 1} 的回复草稿吗？\n\n用户：从草稿列表查看\n回复：${reply.substring(0, 80)}`)) return;
+  try {
+    const result = await api("/api/reply/send", {
+      method: "POST",
+      body: JSON.stringify({ note_id: noteId, comment_id: commentId, reply, confirmed: true }),
+    });
+    toast(result.message || result.error || "已发送");
+    refreshDrafts();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+/* 全部发送 */
+async function sendAllDrafts() {
+  if (!confirm("确定要发送页面上所有待发送草稿吗？已排除或发送中的条目会被跳过。")) return;
+  const btn = $("#sendAllDrafts");
+  setBusy(btn, true, "发送中…");
+  try {
+    const result = await api("/api/drafts/send-all", {
+      method: "POST",
+      body: JSON.stringify({ confirmed: true }),
+    });
+    const { sent, failed, total } = result;
+    const parts = [];
+    if (sent) parts.push(`${sent} 条已发送`);
+    if (failed) parts.push(`${failed} 条失败`);
+    if (sent === 0 && failed === 0) parts.push("无待发草稿");
+    toast(parts.join("，"));
+    refreshDrafts();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+async function refreshDrafts() {
+  const target = $("#draftsList");
+  target.classList.add("loading");
+  try {
+    const payload = await api("/api/drafts");
+    renderDrafts(payload);
+  } catch (error) {
+    target.classList.remove("loading");
+    emptyState(target, "草稿列表读取失败", error.message);
+    toast(error.message, true);
+  }
+}
+
 function setupEvents() {
   $("#refreshArticles").addEventListener("click", () => refreshArticles(1, true));
+  $("#articleSort").addEventListener("change", () => {
+    state.articles.sort = $("#articleSort").value;
+    state.articles.page = 1;
+    refreshArticles(1, false);
+  });
   $("#articlePrevious").addEventListener("click", () => refreshArticles(Math.max(1, state.articles.page - 1)));
   $("#articleNext").addEventListener("click", () => refreshArticles(state.articles.page + 1));
   $("#refreshComments").addEventListener("click", () => refreshComments(1, true));
   $("#commentPrevious").addEventListener("click", () => refreshComments(Math.max(1, state.comments.page - 1)));
   $("#commentNext").addEventListener("click", () => refreshComments(state.comments.page + 1));
+  $("#replyDraftText").addEventListener("input", updateReplyDraftControls);
+  $("#sendReplyDraft").addEventListener("click", sendCurrentReplyDraft);
+  $("#closeReplyDraft").addEventListener("click", () => $("#replyDraftDialog").close());
+  $("#cancelReplyDraft").addEventListener("click", () => $("#replyDraftDialog").close());
   $("#loginButton").addEventListener("click", async () => {
     const button = $("#loginButton");
     setBusy(button, true, "正在读取…");
@@ -620,6 +1059,8 @@ function setupEvents() {
   $("#watchForm").addEventListener("submit", startWatch);
   $("#refreshStatus").addEventListener("click", refreshStatus);
   $("#refreshSkipped").addEventListener("click", () => refreshSkipped());
+  $("#refreshDrafts").addEventListener("click", () => refreshDrafts());
+  $("#sendAllDrafts").addEventListener("click", sendAllDrafts);
   $("#skippedSearchForm").addEventListener("submit", (event) => {
     event.preventDefault();
     applySkippedSearch();
@@ -672,9 +1113,10 @@ function openPage(name, updateHash = true) {
   window.scrollTo({ top: 0, behavior: "auto" });
   if (!state.loadedPages.has(name)) {
     state.loadedPages.add(name);
-    if (name === "articles") refreshArticles(1, true);
+    if (name === "articles") refreshArticles(1, false);
     if (name === "comments") refreshComments(1, true);
     if (name === "skipped") refreshSkipped(1);
+    if (name === "drafts") refreshDrafts();
     if (name === "monitor" || name === "dashboard") refreshStatus();
   }
 }

@@ -118,6 +118,9 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn('id="replyPromptText"', html_source)
         self.assertNotIn('id="copyReplyPrompt"', html_source)
         self.assertNotIn('id="replySendButton"', html_source)
+        self.assertIn('id="replyDraftDialog"', html_source)
+        self.assertIn('id="replyDraftText"', html_source)
+        self.assertIn('id="sendReplyDraft"', html_source)
 
         with open(
             os.path.join(PROJECT_ROOT, "web", "app.js"),
@@ -127,17 +130,27 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('"⧉", "copy-button icon-copy"', javascript)
         self.assertNotIn('"复制", "copy-button"', javascript)
         self.assertIn('openPage("analyze")', javascript)
+        self.assertIn("function buildAllCommentsReplyPrompt", javascript)
         self.assertIn("function buildCommentReplyPrompt", javascript)
         self.assertNotIn("function showReplyPrompt", javascript)
+        self.assertIn('"该文章全部评论的 AI 回复提示词已复制"', javascript)
         self.assertIn('"该条评论的 AI 回复提示词已复制"', javascript)
         self.assertIn("await copyText(", javascript)
+        self.assertIn("ai-reply prepare --full-scan", javascript)
         self.assertIn("笔记 ID：${id}", javascript)
         self.assertIn("评论 ID：${commentId}", javascript)
         self.assertIn('action: "ignore"', javascript)
         self.assertIn('"人工忽略"', javascript)
+        self.assertIn('textNode("button", "草稿", "use-button small")', javascript)
+        self.assertIn("function openReplyDraft", javascript)
+        self.assertIn("function sendCurrentReplyDraft", javascript)
+        self.assertIn('api("/api/reply/send"', javascript)
+        self.assertGreaterEqual(
+            javascript.count('textNode("button", "评论", "use-button small")'),
+            2,
+        )
         self.assertIn('["序号", "时间", "用户", "评论", "状态", "操作"]', javascript)
         self.assertNotIn('openPage("reply")', javascript)
-        self.assertNotIn("/api/reply", javascript)
         self.assertNotIn("function sendReplies", javascript)
         self.assertNotIn("/api/post", javascript)
         self.assertIn("function applySkippedSearch", javascript)
@@ -218,8 +231,8 @@ class WebAppTests(unittest.TestCase):
             "/api/protocol",
             "/api/watch/start",
             "/api/watch/stop",
+            "/api/reply/send",
         ):
             self.assertIn(route, source)
-        self.assertNotIn("/api/reply", source)
         self.assertNotIn("/api/post", source)
         self.assertIn("X-CSRF-Token", source)

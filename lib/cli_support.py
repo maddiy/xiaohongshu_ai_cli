@@ -205,6 +205,9 @@ def build_comment_groups(notifications, note_id=""):
             "nickname": notification.get("user_info", {}).get("nickname", "?"),
             "content": comment.get("content", "") or "[图片]",
             "status": status,
+            "target_comment_id": str(
+                comment.get("target_comment", {}).get("id", "") or ""
+            ),
         })
     return groups
 
