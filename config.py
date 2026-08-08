@@ -8,8 +8,8 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 # 唯一正式名称（APP_NAME 保留为旧代码兼容别名）
 SYSTEM_NAME = "小红书AI智能运营系统"
 APP_NAME = SYSTEM_NAME
-APP_VERSION = "6.13.0"
-AI_SCHEMA_VERSION = "28"
+APP_VERSION = "6.14.0"
+AI_SCHEMA_VERSION = "29"
 XHS_CLI_VERSION = "0.6.4"
 
 # 登录时默认读取的浏览器 Cookie

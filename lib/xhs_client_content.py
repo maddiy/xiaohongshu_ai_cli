@@ -12,14 +12,23 @@ from .state_io import (
     read_json_state,
 )
 from .xhs_client_proxy import XHSClient
+from .note_ocr import enrich_note_with_image_text
 
 
 class XHSContentMixin:
     """笔记列表、xsec索引和评论通知。"""
 
     @staticmethod
-    def get_my_notes(max_pages: int = None, strict: bool = False):
-        """获取我的笔记列表，自动翻页。遇到本地已缓存的笔记ID时停止。"""
+    def get_my_notes(
+        max_pages: int = None,
+        strict: bool = False,
+        include_cached: bool = False,
+    ):
+        """获取我的笔记列表。
+
+        默认遇到本地已有笔记时停止翻页，以降低历史列表读取成本；
+        include_cached=True 时仍返回平台本页已有笔记，用于刷新互动指标。
+        """
         from config import READ_PAGE_DELAY, CACHE_DIR
 
         # 加载本地已缓存的文章ID；命中后停止翻页避免全量拉取
@@ -63,7 +72,7 @@ class XHSContentMixin:
             hit_cached = False
             for note in notes:
                 note_id = note["id"]
-                if note_id in cached_ids:
+                if note_id in cached_ids and not include_cached:
                     hit_cached = True
                     continue
                 token = note.get("xsec_token", "")
@@ -264,6 +273,18 @@ class XHSContentMixin:
             except (json.JSONDecodeError, IOError, TypeError):
                 cache = {}
         entry = cache.get(note_id) or {}
+
+        def save_detail(value: dict) -> None:
+            with file_lock(f"{path}.lock"):
+                existing = {}
+                if json_state_exists(path):
+                    try:
+                        existing = read_json_state(path) or {}
+                    except (json.JSONDecodeError, IOError, TypeError):
+                        pass
+                existing[note_id] = value
+                atomic_write_json(existing, path, mode=0o600)
+
         if (
             not force_refresh
             and isinstance(entry, dict)
@@ -276,7 +297,10 @@ class XHSContentMixin:
                     datetime.datetime.now().astimezone() - read_at
                 ).total_seconds() / 60.0
                 if age_minutes < (CACHE_TTL_MINUTES or 30):
-                    return entry
+                    enriched, changed = enrich_note_with_image_text(entry)
+                    if changed:
+                        save_detail(enriched)
+                    return enriched
             except (ValueError, TypeError):
                 pass
         # 平台读取失败时保留旧缓存并重新抛出
@@ -285,15 +309,8 @@ class XHSContentMixin:
             raise RuntimeError("笔记详情缺少标题，读取失败")
         # 合并保留旧 token（若本次未返回新 token）
         detail.setdefault("xsec_token", entry.get("xsec_token", "") or "")
-        with file_lock(f"{path}.lock"):
-            existing = {}
-            if json_state_exists(path):
-                try:
-                    existing = read_json_state(path) or {}
-                except (json.JSONDecodeError, IOError, TypeError):
-                    pass
-            existing[note_id] = detail
-            atomic_write_json(existing, path, mode=0o600)
+        detail, _changed = enrich_note_with_image_text(detail)
+        save_detail(detail)
         return detail
 
     @staticmethod

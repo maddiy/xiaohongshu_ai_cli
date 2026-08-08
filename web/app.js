@@ -2,20 +2,42 @@
 
 const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 const $ = (selector) => document.querySelector(selector);
+const AUTO_REFRESH_STORAGE_KEY = "xhs.web.autoRefresh";
+
+function loadAutoRefreshPreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(AUTO_REFRESH_STORAGE_KEY) || "{}");
+    return {
+      articles: typeof saved.articles === "boolean" ? saved.articles : true,
+      comments: typeof saved.comments === "boolean" ? saved.comments : true,
+    };
+  } catch (_error) {
+    return { articles: true, comments: true };
+  }
+}
+
 const state = {
   skipped: { page: 1, pageSize: 15, search: "", requestId: 0 },
-  articles: { page: 1, pageSize: 10, sort: "time" },
-  comments: { page: 1, pageSize: 10, noteId: "" },
+  articles: { page: 1, pageSize: 10, sort: "time", search: "", requestId: 0 },
+  comments: { page: 1, pageSize: 10, noteId: "", search: "", requestId: 0 },
   replyDraft: { noteId: "", commentId: "", canSend: false, onSent: null },
+  autoRefresh: loadAutoRefreshPreferences(),
   loadedPages: new Set(),
 };
 
+function saveAutoRefreshPreferences() {
+  try {
+    localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, JSON.stringify(state.autoRefresh));
+  } catch (_error) {
+    toast("浏览器未允许保存设置，本次选择仍然有效", true);
+  }
+}
+
 const PAGE_META = {
-  dashboard: ["OPERATIONS DESK", "智能运营工作台", "快速进入文章、评论、监控和系统管理。"],
+  dashboard: ["OPERATIONS DESK", "智能运营工作台", "快速进入文章、评论、回复草稿和排除列表。"],
   articles: ["LATEST NOTES", "最新文章", "默认读取最新10篇，剩余读本地列表。可按查看数排序、复制笔记 ID 或进入评论分析。"],
   comments: ["LATEST COMMENTS", "最新评论", "按文章或按单条评论复制回复提示词，也可人工忽略单条评论。"],
   analyze: ["COMMENT INSIGHTS", "评论分析", "查看情感分布、回复情况、热门评论和活跃用户。"],
-  monitor: ["MONITOR CENTER", "自动监控", "手动开启评论发现或安全自动回复。"],
   skipped: ["REPLY EXCLUSIONS", "回复排除列表", "搜索、分页和删除不再参与自动回复的评论。"],
   drafts: ["REPLY DRAFTS", "回复草稿", "浏览所有笔记中当前待发送或发送中的回复草稿。"],
 };
@@ -141,17 +163,25 @@ function renderArticles(payload) {
   const rows = payload.articles || [];
   const pagination = payload.pagination || {};
   state.articles.page = Number(pagination.page || 1);
+  state.articles.search = String(payload.search || "");
+  $("#articleSearchStatus").textContent = state.articles.search
+    ? `正在搜索“${state.articles.search}”：找到 ${payload.total_count || 0} 篇`
+    : `显示全部文章，共 ${payload.total_count || 0} 篇`;
   $("#articlePageInfo").textContent = `第 ${state.articles.page} / ${pagination.total_pages || 1} 页 · 共 ${payload.total_count || 0} 篇`;
   $("#articlePrevious").disabled = !pagination.has_previous;
   $("#articleNext").disabled = !pagination.has_next;
   $("#articlePagination").classList.toggle("hidden", Number(payload.total_count || 0) === 0);
-  if (!rows.length) return emptyState(target, "暂无文章", "稍后刷新，或确认账号登录状态。");
+  if (!rows.length) return emptyState(
+    target,
+    state.articles.search ? "没有匹配的文章" : "暂无文章",
+    state.articles.search ? "换一个关键词，或清空搜索框恢复全部文章。" : "稍后刷新，或确认账号登录状态。",
+  );
   target.classList.remove("empty-state");
   const table = document.createElement("table");
   table.setAttribute("aria-label", "最新文章列表");
   const head = document.createElement("thead");
   const header = document.createElement("tr");
-  ["序号", "发布时间", "评论数", "查看数", "标题", "笔记 ID"].forEach((name) => header.append(textNode("th", name)));
+  ["序号", "发布时间", "评论数", "查看数", "标题", "正文缓存", "笔记 ID"].forEach((name) => header.append(textNode("th", name)));
   head.append(header);
   const body = document.createElement("tbody");
   rows.forEach((row) => {
@@ -175,7 +205,15 @@ function renderArticles(payload) {
     });
     noteActions.append(copy, analyze);
     noteCell.append(noteActions);
-    tr.append(cell(row, "index", "compact"), cell(row, "time", "compact"), cell(row, "comments_count", "compact"), cell(row, "view_count", "compact"), cell(row, "title"), noteCell);
+    const cacheCell = document.createElement("td");
+    const cacheStatus = textNode(
+      "span",
+      row.body_cache_status || (row.body_cached ? "已缓存" : "未缓存"),
+      `cache-status ${row.body_cached ? "cached" : "missing"}`,
+    );
+    if (row.body_cached_at) cacheStatus.title = `缓存时间：${row.body_cached_at}`;
+    cacheCell.append(cacheStatus);
+    tr.append(cell(row, "index", "compact"), cell(row, "time", "compact"), cell(row, "comments_count", "compact"), cell(row, "view_count", "compact"), cell(row, "title"), cacheCell, noteCell);
     body.append(tr);
   });
   table.append(head, body);
@@ -188,11 +226,23 @@ function renderCommentGroups(payload, target) {
   const groups = payload.groups || [];
   const pagination = payload.pagination || {};
   state.comments.page = Number(pagination.page || 1);
+  state.comments.search = String(payload.search || "");
+  state.comments.noteId = String(payload.note_id_filter || "");
+  const commentConditions = [];
+  if (state.comments.search) commentConditions.push(`关键词“${state.comments.search}”`);
+  if (state.comments.noteId) commentConditions.push(`笔记 ${state.comments.noteId}`);
+  $("#commentSearchStatus").textContent = commentConditions.length
+    ? `筛选 ${commentConditions.join("、")}：找到 ${payload.total_count || 0} 条`
+    : `显示全部评论，共 ${payload.total_count || 0} 条`;
   $("#commentPageInfo").textContent = `第 ${state.comments.page} / ${pagination.total_pages || 1} 页 · 共 ${payload.total_count || 0} 条`;
   $("#commentPrevious").disabled = !pagination.has_previous;
   $("#commentNext").disabled = !pagination.has_next;
   $("#commentPagination").classList.toggle("hidden", Number(payload.total_count || 0) === 0);
-  if (!groups.length) return emptyState(target, "暂无评论", "当前读取范围内没有新的评论通知。");
+  if (!groups.length) return emptyState(
+    target,
+    commentConditions.length ? "没有匹配的评论" : "暂无评论",
+    commentConditions.length ? "更换或清空搜索条件即可恢复全部评论。" : "当前读取范围内没有新的评论通知。",
+  );
   target.classList.remove("empty-state");
   groups.forEach((group) => {
     const section = document.createElement("section");
@@ -425,6 +475,7 @@ async function sendCurrentReplyDraft() {
 }
 
 async function refreshArticles(page = state.articles.page, refresh = false) {
+  const requestId = ++state.articles.requestId;
   const button = $("#refreshArticles");
   setBusy(button, true, "读取中…");
   try {
@@ -433,8 +484,11 @@ async function refreshArticles(page = state.articles.page, refresh = false) {
       page_size: String(state.articles.pageSize),
       sort: state.articles.sort,
     });
+    if (state.articles.search) query.set("search", state.articles.search);
     if (refresh) query.set("refresh", "1");
-    renderArticles(await api(`/api/articles?${query}`));
+    const payload = await api(`/api/articles?${query}`);
+    if (requestId !== state.articles.requestId) return;
+    renderArticles(payload);
   } catch (error) {
     emptyState($("#articles"), "文章读取失败", error.message);
     toast(error.message, true);
@@ -442,6 +496,7 @@ async function refreshArticles(page = state.articles.page, refresh = false) {
 }
 
 async function refreshComments(page = state.comments.page, refresh = false) {
+  const requestId = ++state.comments.requestId;
   const button = $("#refreshComments");
   setBusy(button, true, "读取中…");
   try {
@@ -451,8 +506,11 @@ async function refreshComments(page = state.comments.page, refresh = false) {
       page_size: String(state.comments.pageSize),
     });
     if (state.comments.noteId) query.set("note_id", state.comments.noteId);
+    if (state.comments.search) query.set("search", state.comments.search);
     if (refresh) query.set("refresh", "1");
-    renderCommentGroups(await api(`/api/comments?${query}`), $("#comments"));
+    const payload = await api(`/api/comments?${query}`);
+    if (requestId !== state.comments.requestId) return;
+    renderCommentGroups(payload, $("#comments"));
   } catch (error) {
     emptyState($("#comments"), "评论读取失败", error.message);
     toast(error.message, true);
@@ -468,9 +526,12 @@ async function loadNoteDesc(noteId) {
       return `（平台读取笔记详情失败：${payload.error || "未知错误"}。如需识别图片正文，请提供该笔记的 xsec_token 或确认笔记可公开访问）`;
     }
     const note = payload.note || {};
-    const desc = String(note.desc || "").trim();
+    const desc = String(note.content_text || note.desc || note.image_text || "").trim();
     const images = Array.isArray(note.images) ? note.images : [];
-    // 正文为空但有图片：正文写在图片里，需接手 AI 读取图片识别
+    if (desc && note.image_text && !note.desc) {
+      return `（以下正文由图片文字识别生成）\n${desc}`;
+    }
+    // OCR不可用或没有判定为文字图片时，保留图片链接交给接手AI识别。
     if (!desc && images.length) {
       const lines = images.map((img, i) => `图${i + 1}（第${img.index + 1}张）：${img.url || ""}`);
       return (
@@ -638,64 +699,6 @@ async function analyzeComments(event) {
   } catch (error) { emptyState($("#analysisResult"), "分析失败", error.message); toast(error.message, true); } finally { setBusy(button, false); }
 }
 
-function monitorLabel(item) {
-  if (item.mode === "note") return `文章：${item.profile.note_id}`;
-  if (item.mode === "user") return `用户：${item.profile.user}`;
-  if (item.mode === "note_and_user") return `文章 ${item.profile.note_id}｜用户 ${item.profile.user}`;
-  return "全部新评论";
-}
-
-function renderMonitors(monitors) {
-  const target = $("#monitorList");
-  target.replaceChildren();
-  if (!monitors.length) return emptyState(target, "还没有启动监控", "选择条件并手动开启后，任务会显示在这里。");
-  target.classList.remove("empty-state");
-  monitors.forEach((item) => {
-    const card = document.createElement("article");
-    card.className = "monitor-item";
-    const header = document.createElement("header");
-    const title = document.createElement("strong");
-    const dot = textNode("span", "", `status-dot ${item.active ? "on" : ""}`);
-    title.append(dot, document.createTextNode(monitorLabel(item)));
-    const stop = textNode("button", item.active ? "停止" : "已停止", "danger small");
-    stop.disabled = !item.active;
-    stop.addEventListener("click", async () => {
-      try {
-        await api("/api/watch/stop", { method: "POST", body: JSON.stringify({ profile_id: item.profile_id }) });
-        toast("监控已停止");
-        await refreshStatus();
-      } catch (error) { toast(error.message, true); }
-    });
-    header.append(title, stop);
-    card.append(header, textNode("p", `${item.interval}秒检查一次｜自动回复${item.auto_reply ? "已开启" : "未开启"}`));
-    target.append(card);
-  });
-}
-
-function renderEvents(events) {
-  const target = $("#eventList");
-  target.replaceChildren();
-  if (!events.length) return emptyState(target, "等待监控事件", "启动监控后，这里会按时间显示运行结果。");
-  target.classList.remove("empty-state");
-  const classes = { baseline: "baseline", heartbeat: "heartbeat", new_comments: "new", stopped: "stopped" };
-  [...events].reverse().forEach((event) => {
-    const card = document.createElement("article");
-    card.className = `event-item ${event.error ? "error" : (classes[event.event] || "info")}`;
-    const labels = { baseline: "基线建立完成", heartbeat: "检查完成，无新评论", new_comments: `发现 ${event.detected_count || 0} 条新评论`, stopped: "监控已停止" };
-    card.append(textNode("strong", labels[event.event] || event.event || "监控事件"), textNode("p", event.error || event.message || event.polled_at || ""));
-    target.append(card);
-  });
-}
-
-async function refreshStatus() {
-  try {
-    const payload = await api("/api/watch/status");
-    $("#activeCount").textContent = `${payload.active_count} 个监控`;
-    renderMonitors(payload.monitors);
-    renderEvents(payload.events);
-  } catch (error) { toast(error.message, true); }
-}
-
 async function refreshDailyStats() {
   const container = document.getElementById("dailyStats");
   if (!container) return;
@@ -823,43 +826,6 @@ function renderDailyStats(container, payload) {
   container.appendChild(chartWrap);
 }
 
-function updateWatchFields() {
-  const mode = $("#watchMode").value;
-  $("#noteField").classList.toggle("hidden", !mode.includes("note"));
-  $("#userField").classList.toggle("hidden", !mode.includes("user"));
-}
-
-function updateAutoFields() {
-  const enabled = $("#autoReply").checked;
-  $("#replyField").classList.toggle("hidden", !enabled);
-  $("#confirmField").classList.toggle("hidden", !enabled);
-  if (!enabled) $("#confirmed").checked = false;
-}
-
-async function startWatch(event) {
-  event.preventDefault();
-  const mode = $("#watchMode").value;
-  const autoReply = $("#autoReply").checked;
-  const payload = {
-    note_id: mode.includes("note") ? $("#noteId").value.trim() : "",
-    user: mode.includes("user") ? $("#userFilter").value.trim() : "",
-    interval: Number($("#interval").value || 60), limit: Number($("#watchLimit").value || 50),
-    auto_reply: autoReply, confirmed: $("#confirmed").checked,
-    reply_text: autoReply ? $("#replyText").value.trim() : "", reset: $("#resetBaseline").checked,
-  };
-  if (mode.includes("note") && !payload.note_id) return toast("请输入笔记 ID", true);
-  if (mode.includes("user") && !payload.user) return toast("请输入精确昵称或用户 ID", true);
-  if (autoReply && !payload.confirmed) return toast("请确认自动回复会写入平台", true);
-  const button = event.submitter;
-  setBusy(button, true, "正在开启…");
-  try {
-    await api("/api/watch/start", { method: "POST", body: JSON.stringify(payload) });
-    toast("监控已手动开启");
-    $("#resetBaseline").checked = false;
-    await refreshStatus();
-  } catch (error) { toast(error.message, true); } finally { setBusy(button, false); }
-}
-
 function renderSkipped(payload) {
   const target = $("#skippedList");
   target.replaceChildren();
@@ -880,7 +846,7 @@ function renderSkipped(payload) {
     return emptyState(
       target,
       state.skipped.search ? "没有匹配的排除记录" : "排除列表为空",
-      state.skipped.search ? "换一个关键词或重置搜索条件。" : "发送失败或永久归档的记录会显示在这里。",
+      state.skipped.search ? "换一个关键词，或清空搜索框恢复全部记录。" : "发送失败或永久归档的记录会显示在这里。",
     );
   }
   target.classList.remove("empty-state");
@@ -939,6 +905,23 @@ async function refreshSkipped(page = state.skipped.page) {
 }
 
 let skippedSearchTimer;
+let articleSearchTimer;
+let commentSearchTimer;
+
+function applyArticleSearch() {
+  clearTimeout(articleSearchTimer);
+  state.articles.search = $("#articleSearch").value.trim();
+  state.articles.page = 1;
+  refreshArticles(1, false);
+}
+
+function applyCommentSearch() {
+  clearTimeout(commentSearchTimer);
+  state.comments.search = $("#commentSearch").value.trim();
+  state.comments.noteId = $("#commentNoteId").value.trim();
+  state.comments.page = 1;
+  refreshComments(1, false);
+}
 
 function applySkippedSearch() {
   clearTimeout(skippedSearchTimer);
@@ -992,6 +975,11 @@ function renderDrafts(payload) {
   const target = $("#draftsList");
   target.replaceChildren();
   target.classList.remove("loading");
+  const deletable = (payload.drafts || []).some(
+    (item) => item.send_status !== "sending"
+  );
+  $("#deleteAllDrafts").disabled = !deletable;
+  $("#sendAllDrafts").disabled = !(payload.drafts || []).length;
   if (!payload.drafts.length) {
     return emptyState(target, "暂无待发送草稿", "回复草稿仅显示未终态的条目（待发送或发送中）。已发送、失败、归档的不会出现在这里。");
   }
@@ -1272,6 +1260,28 @@ async function deleteSingleDraft(noteId, commentId, nickname, button) {
   }
 }
 
+async function deleteAllDrafts() {
+  if (!window.confirm(
+    "确认删除全部待发送草稿吗？\n\n发送中、已发送、失败和已归档记录会保留；该操作不能自动恢复。"
+  )) return;
+  const button = $("#deleteAllDrafts");
+  let refreshAfter = false;
+  setBusy(button, true, "删除中…");
+  try {
+    const result = await api("/api/drafts/delete-all", {
+      method: "POST",
+      body: JSON.stringify({ confirmed: true }),
+    });
+    toast(result.message || `已删除 ${result.deleted || 0} 条草稿`);
+    refreshAfter = true;
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setBusy(button, false);
+  }
+  if (refreshAfter) await refreshDrafts();
+}
+
 /* 全部发送 */
 async function sendAllDrafts() {
   if (!confirm("确定要发送页面上所有待发送草稿吗？已排除或发送中的条目会被跳过。")) return;
@@ -1312,7 +1322,27 @@ async function refreshDrafts() {
 }
 
 function setupEvents() {
+  $("#autoRefreshArticles").checked = state.autoRefresh.articles;
+  $("#autoRefreshComments").checked = state.autoRefresh.comments;
+  $("#autoRefreshArticles").addEventListener("change", (event) => {
+    state.autoRefresh.articles = event.target.checked;
+    saveAutoRefreshPreferences();
+    toast(`文章自动刷新已${event.target.checked ? "开启" : "关闭"}`);
+  });
+  $("#autoRefreshComments").addEventListener("change", (event) => {
+    state.autoRefresh.comments = event.target.checked;
+    saveAutoRefreshPreferences();
+    toast(`评论自动刷新已${event.target.checked ? "开启" : "关闭"}`);
+  });
   $("#refreshArticles").addEventListener("click", () => refreshArticles(1, true));
+  $("#articleSearchForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    applyArticleSearch();
+  });
+  $("#articleSearch").addEventListener("input", () => {
+    clearTimeout(articleSearchTimer);
+    articleSearchTimer = setTimeout(applyArticleSearch, 300);
+  });
   $("#articleSort").addEventListener("change", () => {
     state.articles.sort = $("#articleSort").value;
     state.articles.page = 1;
@@ -1321,6 +1351,16 @@ function setupEvents() {
   $("#articlePrevious").addEventListener("click", () => refreshArticles(Math.max(1, state.articles.page - 1)));
   $("#articleNext").addEventListener("click", () => refreshArticles(state.articles.page + 1));
   $("#refreshComments").addEventListener("click", () => refreshComments(1, true));
+  $("#commentSearchForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    applyCommentSearch();
+  });
+  for (const selector of ["#commentSearch", "#commentNoteId"]) {
+    $(selector).addEventListener("input", () => {
+      clearTimeout(commentSearchTimer);
+      commentSearchTimer = setTimeout(applyCommentSearch, 300);
+    });
+  }
   $("#commentPrevious").addEventListener("click", () => refreshComments(Math.max(1, state.comments.page - 1)));
   $("#commentNext").addEventListener("click", () => refreshComments(state.comments.page + 1));
   $("#replyDraftText").addEventListener("input", updateReplyDraftControls);
@@ -1333,12 +1373,9 @@ function setupEvents() {
     try { toast((await api("/api/login", { method: "POST", body: "{}" })).message); } catch (error) { toast(error.message, true); } finally { setBusy(button, false); }
   });
   $("#analyzeForm").addEventListener("submit", analyzeComments);
-  $("#watchMode").addEventListener("change", updateWatchFields);
-  $("#autoReply").addEventListener("change", updateAutoFields);
-  $("#watchForm").addEventListener("submit", startWatch);
-  $("#refreshStatus").addEventListener("click", refreshStatus);
   $("#refreshSkipped").addEventListener("click", () => refreshSkipped());
   $("#refreshDrafts").addEventListener("click", () => refreshDrafts());
+  $("#deleteAllDrafts").addEventListener("click", deleteAllDrafts);
   $("#sendAllDrafts").addEventListener("click", sendAllDrafts);
   $("#skippedSearchForm").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1347,13 +1384,6 @@ function setupEvents() {
   $("#skippedSearch").addEventListener("input", () => {
     clearTimeout(skippedSearchTimer);
     skippedSearchTimer = setTimeout(applySkippedSearch, 300);
-  });
-  $("#resetSkippedSearch").addEventListener("click", () => {
-    clearTimeout(skippedSearchTimer);
-    $("#skippedSearch").value = "";
-    state.skipped.search = "";
-    state.skipped.page = 1;
-    refreshSkipped(1);
   });
   $("#skippedPageSize").addEventListener("change", () => {
     state.skipped.pageSize = Number($("#skippedPageSize").value || 15);
@@ -1395,13 +1425,19 @@ function openPage(name, updateHash = true) {
     history.pushState(null, "", `#${name}`);
   }
   window.scrollTo({ top: 0, behavior: "auto" });
+  // 工作台开关决定进入内容页面时访问平台还是只读取本地缓存。
+  if (name === "articles") {
+    state.loadedPages.add(name);
+    refreshArticles(1, state.autoRefresh.articles);
+  }
+  if (name === "comments") {
+    state.loadedPages.add(name);
+    refreshComments(1, state.autoRefresh.comments);
+  }
   if (!state.loadedPages.has(name)) {
     state.loadedPages.add(name);
-    if (name === "articles") refreshArticles(1, false);
-    if (name === "comments") refreshComments(1, true);
     if (name === "skipped") refreshSkipped(1);
     if (name === "drafts") refreshDrafts();
-    if (name === "monitor" || name === "dashboard") refreshStatus();
     if (name === "dashboard") refreshDailyStats();
   }
 }
@@ -1418,10 +1454,7 @@ function setupNavigation() {
 function initialize() {
   setupEvents();
   setupNavigation();
-  updateWatchFields();
-  updateAutoFields();
   openPage(window.location.hash.slice(1) || "dashboard", false);
-  setInterval(refreshStatus, 5000);
 }
 
 initialize();

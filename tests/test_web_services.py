@@ -274,6 +274,51 @@ class WebServiceTests(unittest.TestCase):
                 operation(payload)
             self.assertEqual(caught.exception.error_type, "terminal_reply_state")
 
+    @patch("lib.web_services.write_json")
+    @patch("lib.web_services.read_workflow_state")
+    @patch("lib.web_services.json_state_exists", return_value=True)
+    @patch("lib.web_services.workflow_lock", return_value=nullcontext())
+    @patch("lib.web_services.workflow_paths", return_value={
+        "drafts": "/tmp/note-1-drafts.json",
+    })
+    @patch("lib.web_services.list_all_drafts")
+    def test_delete_all_drafts_removes_pending_and_preserves_protected(
+        self, list_drafts, _paths, _lock, _exists, read_state, write_json
+    ):
+        list_drafts.side_effect = [{
+            "drafts": [
+                {"note_id": "note-1", "comment_id": "pending", "send_status": ""},
+                {"note_id": "note-1", "comment_id": "sending", "send_status": "sending"},
+            ],
+            "total_count": 2,
+        }, {"drafts": [], "total_count": 1}]
+        state = {
+            "drafts": [
+                {"comment_id": "pending", "send_status": "", "action": "send"},
+                {"comment_id": "sending", "send_status": "sending", "action": "send"},
+                {"comment_id": "sent", "send_status": "sent", "action": "send"},
+            ],
+            "active_comment_ids": ["pending"],
+            "active_batch": {"status": "previewed"},
+        }
+        read_state.return_value = state
+
+        result = web_services.delete_all_drafts({"confirmed": True})
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["protected"], 1)
+        self.assertEqual(
+            [item["comment_id"] for item in state["drafts"]],
+            ["sending", "sent"],
+        )
+        self.assertEqual(state["active_comment_ids"], [])
+        write_json.assert_called_once()
+
+    def test_delete_all_drafts_requires_explicit_confirmation(self):
+        with self.assertRaises(web_services.WebServiceError) as caught:
+            web_services.delete_all_drafts({"confirmed": False})
+        self.assertEqual(caught.exception.error_type, "confirmation_required")
+
     @patch("lib.web_services.send_reply_draft")
     @patch("lib.web_services.list_all_drafts")
     def test_send_all_stops_before_writes_for_uncertain_item(

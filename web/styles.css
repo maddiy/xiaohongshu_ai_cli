@@ -453,6 +453,9 @@ main { padding: 0 clamp(1.25rem, 4vw, 3.4rem) 4rem; }
 
 .hero-grid { display: grid; grid-template-columns: minmax(0, 1.58fr) minmax(18rem, .72fr); gap: 1rem; align-items: start; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(17rem, .55fr); gap: 1rem; align-items: stretch; }
+.refresh-settings-panel { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 2rem; min-height: auto; }
+.refresh-settings-panel .hint { max-width: 42rem; margin: .55rem 0 0; line-height: 1.6; }
+.refresh-switches { display: grid; grid-template-columns: repeat(2, minmax(13rem, 1fr)); gap: 1.5rem; flex: 0 1 34rem; }
 .welcome-panel, .boundary-panel { min-height: 24rem; }
 .welcome-panel { display: flex; flex-direction: column; justify-content: center; }
 .welcome-panel > .hint { max-width: 38rem; margin: .7rem 0 1.3rem; line-height: 1.65; }
@@ -843,6 +846,8 @@ td.note-id { padding-top: .7rem; }
   .workspace { margin-left: 205px; }
   .hero-grid { grid-template-columns: 1fr; }
   .dashboard-grid { grid-template-columns: 1fr; }
+  .refresh-settings-panel { grid-column: auto; align-items: flex-start; flex-direction: column; }
+  .refresh-switches { width: 100%; flex: none; }
   .hero-grid .panel + .panel { margin-top: 1rem; }
   .activity-panel { position: static; min-height: auto; }
   .event-list { max-height: 20rem; }
@@ -933,6 +938,9 @@ td.note-id { padding-top: .7rem; }
 .review-sources { margin: .25rem 0 0 0; padding-left: 1.2rem; list-style: disc; }
 .review-sources li { font-size: .78rem; line-height: 1.5; }
 .review-sources a { color: #176b8f; text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
+.cache-status { display: inline-flex; align-items: center; padding: .2rem .48rem; border: 1px solid var(--line); border-radius: 999px; font-size: .68rem; font-weight: 650; white-space: nowrap; }
+.cache-status.cached { color: #557d75; border-color: #dceae7; background: #edf5f3; }
+.cache-status.missing { color: #7d878e; background: #f4f6f7; }
 
 /* 淡雅主题最终层：放在组件样式之后，统一覆盖旧版深色视觉。 */
 body { background: var(--canvas); }

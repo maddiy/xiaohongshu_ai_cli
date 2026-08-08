@@ -6,38 +6,13 @@ import inspect
 import threading
 
 from lib.web_app import (
-    WatchManager,
     _handler_class,
     _load_articles,
     _load_comments,
+    _merge_articles,
     _prefetch_missing_note_details,
     create_web_server,
 )
-
-
-class _ManagedFakeWatcher:
-    def __init__(self, note_id="", user="", auto_reply=False,
-                 confirmed=False, reply_text="", interval=60, limit=50):
-        self.note_id = note_id
-        self.user = user
-        self.auto_reply = auto_reply
-        self.confirmed = confirmed
-        self.reply_text = reply_text
-        self.interval = interval
-        self.limit = limit
-        self.profile = {"note_id": note_id, "user": user}
-        self.profile_id = f"profile-{note_id}-{user}"
-        self.mode = "note" if note_id else ("user" if user else "all")
-
-    def run(self, stop_event, reset=False, on_event=None):
-        on_event({
-            "ok": True,
-            "event": "baseline",
-            "baseline_count": 0,
-            "items": [],
-            "active": True,
-        })
-        stop_event.wait(2)
 
 
 class WebAppTests(unittest.TestCase):
@@ -118,26 +93,12 @@ class WebAppTests(unittest.TestCase):
         get_detail.assert_not_called()
         self.assertEqual(groups[0]["note_title"], "缓存标题")
 
-    def test_watch_manager_starts_and_stops_manual_monitor(self):
-        manager = WatchManager(watcher_factory=_ManagedFakeWatcher)
-        started = manager.start({
-            "note_id": "n1",
-            "auto_reply": True,
-            "confirmed": True,
-        })
-        self.assertEqual(started["profile_id"], "profile-n1-")
-        self.assertTrue(started["active"])
-        stopped = manager.stop(started["profile_id"])
-        self.assertFalse(stopped["active"])
-        manager.shutdown()
-
     @patch("lib.web_app.ThreadingHTTPServer")
     def test_server_only_binds_localhost_and_sets_security_headers(
         self, server_class
     ):
-        manager = WatchManager(watcher_factory=_ManagedFakeWatcher)
         server_class.return_value.server_address = ("127.0.0.1", 8765)
-        server, token, manager = create_web_server(port=0, manager=manager)
+        server, token = create_web_server(port=0)
         address = server_class.call_args.args[0]
         self.assertEqual(address, ("127.0.0.1", 0))
         self.assertEqual(len(token), 48)
@@ -202,13 +163,22 @@ class WebAppTests(unittest.TestCase):
             html_source = file.read()
         for page in (
             "dashboard", "articles", "comments", "analyze",
-            "monitor", "skipped",
+            "skipped", "drafts",
         ):
             self.assertIn(f'data-page="{page}"', html_source)
+        self.assertNotIn('data-page="monitor"', html_source)
+        self.assertNotIn('id="watchForm"', html_source)
         self.assertNotIn('data-page="content"', html_source)
         self.assertNotIn('data-page="system"', html_source)
         self.assertIn('id="articlePagination"', html_source)
         self.assertIn('id="commentPagination"', html_source)
+        self.assertIn('id="articleSearchForm"', html_source)
+        self.assertIn('id="articleSearchStatus"', html_source)
+        self.assertIn('id="commentSearchForm"', html_source)
+        self.assertIn('id="commentSearchStatus"', html_source)
+        self.assertNotIn('id="resetArticleSearch"', html_source)
+        self.assertNotIn('id="resetCommentSearch"', html_source)
+        self.assertNotIn('id="resetSkippedSearch"', html_source)
         self.assertIn('id="skippedSearchForm"', html_source)
         self.assertIn('id="skippedSearchStatus"', html_source)
         self.assertIn('id="submitSkippedSearch"', html_source)
@@ -227,6 +197,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('id="replyDraftDialog"', html_source)
         self.assertIn('id="replyDraftText"', html_source)
         self.assertIn('id="sendReplyDraft"', html_source)
+        self.assertIn('id="deleteAllDrafts"', html_source)
         self.assertIn('class="skip-link" href="#mainContent"', html_source)
         self.assertIn('id="mainContent" tabindex="-1"', html_source)
         self.assertIn("提示词按钮不会发送", html_source)
@@ -266,6 +237,8 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("function openReplyDraft", javascript)
         self.assertIn("function sendCurrentReplyDraft", javascript)
         self.assertIn('api("/api/reply/send"', javascript)
+        self.assertIn('api("/api/drafts/delete-all"', javascript)
+        self.assertIn("function deleteAllDrafts", javascript)
         self.assertGreaterEqual(
             javascript.count('textNode("button", "评论", "use-button small")'),
             2,
@@ -275,9 +248,65 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("function sendReplies", javascript)
         self.assertNotIn("/api/post", javascript)
         self.assertIn("function applySkippedSearch", javascript)
+        self.assertIn("function applyArticleSearch", javascript)
+        self.assertIn("function applyCommentSearch", javascript)
+        self.assertIn('"正文缓存"', javascript)
+        self.assertIn("body_cache_status", javascript)
+        self.assertIn("cache-status", javascript)
+        self.assertIn("setTimeout(applyArticleSearch, 300)", javascript)
+        self.assertIn("setTimeout(applyCommentSearch, 300)", javascript)
         self.assertIn("setTimeout(applySkippedSearch, 300)", javascript)
         self.assertIn("requestId !== state.skipped.requestId", javascript)
         self.assertIn("pagination.page_size || 15", javascript)
+        self.assertIn('if (name === "comments") {', javascript)
+        self.assertIn("refreshComments(1, state.autoRefresh.comments);", javascript)
+        self.assertIn('if (name === "articles") {', javascript)
+        self.assertIn(
+            '"#refreshArticles").addEventListener("click", () => refreshArticles(1, true))',
+            javascript,
+        )
+        self.assertIn(
+            'if (name === "articles") {\n    state.loadedPages.add(name);',
+            javascript,
+        )
+        self.assertIn("refreshArticles(1, state.autoRefresh.articles);", javascript)
+        self.assertIn("AUTO_REFRESH_STORAGE_KEY", javascript)
+        self.assertIn('id="autoRefreshArticles"', html_source)
+        self.assertIn('id="autoRefreshComments"', html_source)
+
+    def test_web_comment_refresh_uses_default_twenty_notifications(self):
+        from lib.web_app import WEB_COMMENT_FETCH_LIMIT
+        self.assertEqual(WEB_COMMENT_FETCH_LIMIT, 20)
+
+    @patch("lib.web_app.XHSClient.load_skipped", return_value={})
+    @patch("lib.web_app._schedule_note_detail_prefetch")
+    @patch("lib.web_app.save_comment_archive")
+    @patch("lib.web_app.build_comment_groups")
+    @patch("lib.web_app.XHSClient.get_notifications")
+    @patch("lib.web_app.read_json_state")
+    @patch("lib.web_app.json_state_exists", return_value=True)
+    def test_comment_refresh_archives_before_background_note_prefetch(
+        self, _exists, read_state, get_notifications, build_groups,
+        save_archive, schedule_prefetch, _load_skipped
+    ):
+        notifications = [{"item_info": {"id": "n1"}}]
+        groups = [{"note_id": "n1", "note_title": "文章", "comments": []}]
+        get_notifications.return_value = notifications
+        build_groups.return_value = groups
+        save_archive.return_value = {"ok": True}
+        schedule_prefetch.return_value = {
+            "source": "background_scheduled", "scheduled": True,
+        }
+        read_state.return_value = {"groups": []}
+
+        result = _load_comments(refresh=True)
+
+        get_notifications.assert_called_once_with(
+            num=20, notification_type="mentions", strict=True
+        )
+        save_archive.assert_called_once_with(groups)
+        schedule_prefetch.assert_called_once_with(notifications, groups)
+        self.assertTrue(result["note_content_cache"]["scheduled"])
 
     @patch("lib.web_app.read_json_state")
     @patch("lib.web_app.json_state_exists", return_value=True)
@@ -296,6 +325,102 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(result["articles"][0]["note_id"], "n11")
         self.assertTrue(result["pagination"]["has_previous"])
         self.assertTrue(result["pagination"]["has_next"])
+
+    def test_fresh_first_page_replaces_cached_article_metrics(self):
+        merged = _merge_articles(
+            [{
+                "index": 1,
+                "note_id": "n1",
+                "title": "文章一",
+                "comments_count": 18,
+                "view_count": 3200,
+            }],
+            [{
+                "index": 1,
+                "note_id": "n1",
+                "title": "文章一",
+                "comments_count": 3,
+                "view_count": 900,
+            }, {
+                "index": 2,
+                "note_id": "n2",
+                "title": "历史文章",
+                "comments_count": 7,
+                "view_count": 700,
+            }],
+        )
+        self.assertEqual(merged[0]["comments_count"], 18)
+        self.assertEqual(merged[0]["view_count"], 3200)
+        self.assertEqual(merged[1]["note_id"], "n2")
+
+    @patch("lib.web_app.write_json")
+    @patch("lib.web_app.XHSClient.get_my_notes")
+    @patch("lib.web_app.read_json_state")
+    @patch("lib.web_app.json_state_exists", return_value=True)
+    def test_web_refresh_requests_cached_first_page_items_for_new_metrics(
+        self, _exists, read_state, get_notes, _write
+    ):
+        read_state.return_value = {"articles": []}
+        get_notes.return_value = []
+
+        _load_articles(refresh=True)
+
+        get_notes.assert_called_once_with(
+            max_pages=1, strict=True, include_cached=True
+        )
+
+    @patch("lib.web_app.read_json_state")
+    @patch("lib.web_app.json_state_exists", return_value=True)
+    def test_articles_search_matches_title_and_note_id_before_pagination(
+        self, _exists, read_state
+    ):
+        read_state.return_value = {
+            "articles": [
+                {"index": 1, "note_id": "abc-001", "title": "杭州台风"},
+                {"index": 2, "note_id": "abc-002", "title": "美国经济"},
+                {"index": 3, "note_id": "xyz-003", "title": "杭州旅行"},
+            ],
+        }
+        by_title = _load_articles(search="杭州", page=1, page_size=10)
+        self.assertEqual(by_title["total_count"], 2)
+        self.assertEqual(by_title["search"], "杭州")
+        by_terms = _load_articles(search="美国 abc", page=1, page_size=10)
+        self.assertEqual(by_terms["total_count"], 1)
+        self.assertEqual(by_terms["articles"][0]["note_id"], "abc-002")
+
+    @patch("lib.web_app.read_json_state")
+    @patch("lib.web_app.json_state_exists", return_value=True)
+    def test_articles_report_local_body_cache_without_platform_reads(
+        self, _exists, read_state
+    ):
+        def state_for(path, default=None):
+            if path.endswith("articles.json"):
+                return {"articles": [
+                    {"index": 1, "note_id": "cached", "title": "已缓存文章"},
+                    {"index": 2, "note_id": "missing", "title": "未缓存文章"},
+                ]}
+            if path.endswith("note_details.json"):
+                return {"cached": {
+                    "title": "已缓存文章",
+                    "desc": "正文",
+                    "read_at": "2026-08-08T20:00:00+08:00",
+                }}
+            return default
+
+        read_state.side_effect = state_for
+        result = _load_articles(page=1, page_size=10)
+
+        self.assertIn("正文缓存", result["columns"])
+        self.assertTrue(result["articles"][0]["body_cached"])
+        self.assertEqual(
+            result["articles"][0]["body_cache_status"], "已缓存"
+        )
+        self.assertFalse(result["articles"][1]["body_cached"])
+        self.assertEqual(
+            result["articles"][1]["body_cache_status"], "未缓存"
+        )
+        searched = _load_articles(search="已缓存", page=1, page_size=10)
+        self.assertEqual(searched["total_count"], 1)
 
     @patch("lib.web_app.XHSClient.load_skipped")
     @patch("lib.web_app.read_json_state")
@@ -339,10 +464,32 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(first["action_data"]["ignored"])
         self.assertEqual(first["status"], "人工忽略")
 
-    def test_complete_console_routes_are_csrf_protected(self):
-        handler = _handler_class(
-            WatchManager(watcher_factory=_ManagedFakeWatcher), "token"
+    @patch("lib.web_app.XHSClient.load_skipped", return_value={})
+    @patch("lib.web_app.read_json_state")
+    @patch("lib.web_app.json_state_exists", return_value=True)
+    def test_comments_search_matches_article_user_content_and_status(
+        self, _exists, read_state, _load_skipped
+    ):
+        read_state.return_value = {
+            "groups": [{
+                "note_id": "n1",
+                "note_title": "杭州见闻",
+                "comments": [
+                    {"comment_id": "c1", "nickname": "小明", "content": "台风来了", "status": "正常", "time": "2026-08-08"},
+                    {"comment_id": "c2", "nickname": "Daniel", "content": "天气不错", "status": "已回复", "time": "2026-08-07"},
+                ],
+            }],
+        }
+        result = _load_comments(search="杭州 小明 台风")
+        self.assertEqual(result["total_count"], 1)
+        self.assertEqual(result["search"], "杭州 小明 台风")
+        self.assertEqual(
+            result["groups"][0]["comments"][0]["action_data"]["nickname"],
+            "小明",
         )
+
+    def test_complete_console_routes_are_csrf_protected(self):
+        handler = _handler_class("token")
         source = inspect.getsource(handler.do_POST)
         for route in (
             "/api/analyze",
@@ -350,10 +497,10 @@ class WebAppTests(unittest.TestCase):
             "/api/doctor",
             "/api/paths",
             "/api/protocol",
-            "/api/watch/start",
-            "/api/watch/stop",
             "/api/reply/send",
+            "/api/drafts/delete-all",
         ):
             self.assertIn(route, source)
         self.assertNotIn("/api/post", source)
+        self.assertNotIn("/api/watch/", source)
         self.assertIn("X-CSRF-Token", source)

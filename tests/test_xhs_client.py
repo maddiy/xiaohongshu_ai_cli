@@ -4,6 +4,36 @@ from tests.support import *
 
 
 class XHSClientTests(unittest.TestCase):
+    @patch("lib.xhs_client_content.XHSClient._merge_xsec_index")
+    @patch("lib.xhs_client_content.XHSClient._run_xhs")
+    @patch("lib.xhs_client_content.read_json_state")
+    @patch("lib.xhs_client_content.json_state_exists", return_value=True)
+    @patch("lib.xhs_client_content.time.sleep")
+    def test_my_notes_can_include_cached_items_to_refresh_metrics(
+        self, _sleep, _exists, read_state, run_xhs, _merge_index
+    ):
+        read_state.return_value = {
+            "articles": [{"note_id": "n1", "comments_count": 2}],
+        }
+        run_xhs.return_value = {
+            "ok": True,
+            "data": {"notes": [{
+                "id": "n1",
+                "display_title": "文章",
+                "comments_count": 19,
+                "view_count": 2500,
+                "time": "2026-08-08",
+            }]},
+        }
+
+        notes = XHSClient.get_my_notes(
+            max_pages=1, strict=True, include_cached=True
+        )
+
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["comments_count"], 19)
+        self.assertEqual(notes[0]["view_count"], 2500)
+
     def test_notification_scan_online_verifies_candidates(self):
         client = MagicMock()
         client.get_new_comment_notifications.return_value = [{

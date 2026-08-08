@@ -30,9 +30,8 @@
         <a class="active" href="#dashboard" data-page-link="dashboard"><span>01</span>工作台</a>
         <a href="#articles" data-page-link="articles"><span>02</span>最新文章</a>
         <a href="#comments" data-page-link="comments"><span>03</span>最新评论</a>
-        <a href="#monitor" data-page-link="monitor"><span>04</span>自动监控</a>
-        <a href="#skipped" data-page-link="skipped"><span>05</span>回复排除列表</a>
-        <a href="#drafts" data-page-link="drafts"><span>06</span>回复草稿</a>
+        <a href="#skipped" data-page-link="skipped"><span>04</span>回复排除列表</a>
+        <a href="#drafts" data-page-link="drafts"><span>05</span>回复草稿</a>
       </nav>
       <div class="security-card"><span class="pulse-dot" aria-hidden="true"></span><div><strong>本地安全模式</strong><small>仅监听 127.0.0.1，平台写操作需要确认</small></div></div>
       <p class="sidebar-foot">LOCAL OPERATIONS CONSOLE</p>
@@ -43,7 +42,7 @@
         <div>
           <p id="pageEyebrow" class="eyebrow">OPERATIONS DESK</p>
           <h1 id="pageTitle">智能运营工作台</h1>
-          <p id="pageSubtitle" class="subtitle">快速进入文章、评论、监控和回复排除列表。</p>
+          <p id="pageSubtitle" class="subtitle">快速进入文章、评论、回复草稿和排除列表。</p>
         </div>
         <div class="top-actions">
           <div class="connection-pill"><span></span>127.0.0.1 本机连接</div>
@@ -54,7 +53,7 @@
       <main id="mainContent" tabindex="-1">
         <section id="pageDashboard" class="page-view active" data-page="dashboard">
           <div class="status-strip" aria-label="系统状态">
-            <article class="status-card accent"><span class="status-icon">监</span><div><small>正在运行</small><strong id="activeCount">0 个监控</strong></div></article>
+            <article class="status-card accent"><span class="status-icon">本</span><div><small>运行方式</small><strong>本机安全控制台</strong></div></article>
             <article class="status-card"><span class="status-icon">回</span><div><small>回复助手</small><strong>一键生成 AI 提示词</strong></div></article>
             <article class="status-card"><span class="status-icon">存</span><div><small>状态保存</small><strong>SQLite 本地存储</strong></div></article>
             <article class="status-card"><span class="status-icon">安</span><div><small>平台写操作</small><strong>发送前在线复核</strong></div></article>
@@ -72,9 +71,28 @@
               <ul>
                 <li><span>01</span>评论候选不等于可回复，发送前继续在线复核。</li>
                 <li><span>02</span>提示词按钮不会发送；可编辑草稿仅在确认并在线复核后发送。</li>
-                <li><span>03</span>监控必须手动开启，页面关闭后不会后台运行。</li>
+                <li><span>03</span>所有平台写操作均需明确确认，并保留本地审计记录。</li>
               </ul>
             </aside>
+            <article class="panel refresh-settings-panel">
+              <div>
+                <p class="eyebrow">REFRESH PREFERENCES</p>
+                <h2>内容自动刷新</h2>
+                <p class="hint">控制进入内容菜单时是否访问平台；关闭后只读取本地缓存，仍可用页面刷新按钮手动更新。</p>
+              </div>
+              <div class="refresh-switches" role="group" aria-label="内容自动刷新设置">
+                <label class="switch-row">
+                  <input id="autoRefreshArticles" type="checkbox" checked>
+                  <span class="switch" aria-hidden="true"></span>
+                  <span><strong>自动刷新文章</strong><small>进入“最新文章”时读取平台第一页</small></span>
+                </label>
+                <label class="switch-row">
+                  <input id="autoRefreshComments" type="checkbox" checked>
+                  <span class="switch" aria-hidden="true"></span>
+                  <span><strong>自动刷新评论</strong><small>进入“最新评论”时读取最新20条通知</small></span>
+                </label>
+              </div>
+            </article>
           </div>
         </section>
 
@@ -82,9 +100,10 @@
           <article class="panel data-panel">
             <div class="panel-heading data-heading">
               <div class="heading-copy"><span class="section-index">文</span><div><p class="eyebrow">LATEST NOTES</p><h2>最新文章</h2></div></div>
-              <div class="inline-controls"><label class="sort-label">排序：<select id="articleSort"><option value="time">发布时间</option><option value="views">查看数量</option></select></label><span class="page-size-label">每页 10 篇</span><button id="refreshArticles" class="ghost">刷新最新文章</button></div>
+              <form id="articleSearchForm" class="inline-controls"><input id="articleSearch" type="search" autocomplete="off" placeholder="搜索标题或笔记 ID" aria-label="搜索文章"><label class="sort-label">排序：<select id="articleSort"><option value="time">发布时间</option><option value="views">查看数量</option></select></label><button type="submit" class="primary">搜索</button><button id="refreshArticles" type="button" class="ghost">刷新</button></form>
             </div>
             <p class="page-hint">笔记 ID 旁的图标可一键复制；点击“评论分析”会带入当前文章并打开分析页面。</p>
+            <output id="articleSearchStatus" class="search-status" aria-live="polite">显示全部文章</output>
             <div id="articles" class="table-shell loading"><span class="loader"></span>正在读取文章…</div>
             <nav id="articlePagination" class="pagination hidden" aria-label="文章分页"><button id="articlePrevious" class="ghost">上一页</button><span id="articlePageInfo">第 1 / 1 页</span><button id="articleNext" class="ghost">下一页</button></nav>
           </article>
@@ -94,9 +113,10 @@
           <article class="panel data-panel">
             <div class="panel-heading data-heading">
               <div class="heading-copy"><span class="section-index">评</span><div><p class="eyebrow">LATEST COMMENTS</p><h2>最新评论</h2></div></div>
-              <div class="inline-controls"><input id="commentNoteId" placeholder="筛选笔记 ID（可选）" aria-label="评论笔记 ID"><span class="page-size-label">每页 10 条</span><button id="refreshComments" class="ghost">读取最新并刷新</button></div>
+              <form id="commentSearchForm" class="inline-controls"><input id="commentSearch" type="search" autocomplete="off" placeholder="搜索文章、用户或评论" aria-label="搜索评论"><input id="commentNoteId" placeholder="精确笔记 ID（可选）" aria-label="评论笔记 ID"><button type="submit" class="primary">搜索</button><button id="refreshComments" type="button" class="ghost">读取最新</button></form>
             </div>
             <p class="page-hint">文章标题后的“评论”复制处理该文章全部评论的提示词；每条评论后的“评论”复制单条提示词，“草稿”可直接编辑并安全发送，“忽略”会加入排除列表。</p>
+            <output id="commentSearchStatus" class="search-status" aria-live="polite">显示全部评论</output>
             <div id="comments" class="comment-groups loading"><span class="loader"></span>正在读取评论…</div>
             <nav id="commentPagination" class="pagination hidden" aria-label="评论分页"><button id="commentPrevious" class="ghost">上一页</button><span id="commentPageInfo">第 1 / 1 页</span><button id="commentNext" class="ghost">下一页</button></nav>
           </article>
@@ -110,28 +130,11 @@
           </article>
         </section>
 
-        <section id="pageMonitor" class="page-view hidden" data-page="monitor">
-          <div class="hero-grid">
-            <article class="panel monitor-panel">
-              <div class="panel-heading"><div class="heading-copy"><span class="section-index">04</span><div><p class="eyebrow">MONITOR CENTER</p><h2>新评论监控</h2></div></div><span class="manual-badge">手动启停</span></div>
-              <p class="hint lead-hint">第一次只记录当前评论，之后才把新互动交给监控流程。</p>
-              <form id="watchForm">
-                <div class="form-section"><p class="form-kicker">监控对象</p><div class="form-grid"><label>监控范围<select id="watchMode"><option value="all">全部新评论</option><option value="note">指定文章</option><option value="user">指定用户</option><option value="note_and_user">指定文章中的指定用户</option></select></label><label id="noteField" class="conditional hidden">笔记 ID<input id="noteId" autocomplete="off" placeholder="输入笔记 ID"></label><label id="userField" class="conditional hidden">用户<input id="userFilter" autocomplete="off" placeholder="精确昵称或用户 ID"></label></div></div>
-                <div class="form-section compact-section"><p class="form-kicker">检查节奏</p><div class="form-grid two-column"><label>检查间隔<div class="input-unit"><input id="interval" type="number" min="10" value="60"><span>秒</span></div></label><label>每轮通知<div class="input-unit"><input id="watchLimit" type="number" min="1" max="200" value="50"><span>条</span></div></label></div></div>
-                <div class="auto-card"><div class="auto-card-top"><label class="switch-row"><input id="autoReply" type="checkbox"><span class="switch" aria-hidden="true"></span><span><strong>自动回复新评论</strong><small>关闭时只发现和展示，不会写入平台。</small></span></label><span class="risk-label">写操作</span></div><label id="replyField" class="hidden reply-field">固定回复<textarea id="replyText" rows="3" placeholder="留空时使用配置中的通用话术"></textarea></label><label id="confirmField" class="confirm-row hidden"><input id="confirmed" type="checkbox"><span><strong>我确认开启后会自动发送回复</strong><small>每次发送前仍会在线核验；异常时立即停止。</small></span></label></div>
-                <div class="button-row"><button type="submit" class="primary"><span>开启监控</span><b aria-hidden="true">→</b></button><label class="check-inline"><input id="resetBaseline" type="checkbox">重新建立基线</label></div>
-              </form>
-              <div class="list-heading"><strong>监控任务</strong><small>相同条件只允许运行一个</small></div><div id="monitorList" class="monitor-list empty-state">还没有启动监控</div>
-            </article>
-            <aside class="panel activity-panel"><div class="panel-heading"><div class="heading-copy"><span class="section-index">↗</span><div><p class="eyebrow">LIVE ACTIVITY</p><h2>运行动态</h2></div></div><button id="refreshStatus" class="icon-button" aria-label="刷新运行动态">↻</button></div><div class="activity-guide"><span></span><p>监控状态每 5 秒自动同步。安全停止不会自动重试。</p></div><div id="eventList" class="event-list empty-state">等待监控事件</div></aside>
-          </div>
-        </section>
-
         <section id="pageSkipped" class="page-view hidden" data-page="skipped">
           <article class="panel">
-            <div class="panel-heading"><div class="heading-copy"><span class="section-index">05</span><div><p class="eyebrow">REPLY EXCLUSIONS</p><h2>回复排除列表</h2></div></div><button id="clearSkipped" class="danger">清空全部</button></div>
+              <div class="panel-heading"><div class="heading-copy"><span class="section-index">04</span><div><p class="eyebrow">REPLY EXCLUSIONS</p><h2>回复排除列表</h2></div></div><button id="clearSkipped" class="danger">清空全部</button></div>
             <p class="page-hint">默认每页显示15条，支持按用户、评论、原因或笔记 ID 搜索，并可删除单条记录。</p>
-            <form id="skippedSearchForm" class="list-toolbar"><label class="search-field">搜索<input id="skippedSearch" type="search" autocomplete="off" placeholder="用户、评论、原因或笔记 ID" aria-describedby="skippedSearchStatus"></label><label class="mini-field">每页<select id="skippedPageSize"><option value="15" selected>15</option><option value="30">30</option><option value="50">50</option><option value="100">100</option></select><span>条</span></label><button id="submitSkippedSearch" type="submit" class="primary">搜索</button><button id="resetSkippedSearch" type="button" class="ghost">重置</button><button id="refreshSkipped" type="button" class="icon-button" aria-label="刷新排除列表">↻</button></form>
+            <form id="skippedSearchForm" class="list-toolbar"><label class="search-field">搜索<input id="skippedSearch" type="search" autocomplete="off" placeholder="用户、评论、原因或笔记 ID" aria-describedby="skippedSearchStatus"></label><label class="mini-field">每页<select id="skippedPageSize"><option value="15" selected>15</option><option value="30">30</option><option value="50">50</option><option value="100">100</option></select><span>条</span></label><button id="submitSkippedSearch" type="submit" class="primary">搜索</button><button id="refreshSkipped" type="button" class="icon-button" aria-label="刷新排除列表">↻</button></form>
             <output id="skippedSearchStatus" class="search-status" aria-live="polite">显示全部排除记录</output>
             <div id="skippedList" class="result-area loading"><span class="loader"></span>正在读取…</div>
             <nav id="skippedPagination" class="pagination hidden" aria-label="排除列表分页"><button id="skippedPrevious" class="ghost">上一页</button><span id="skippedPageInfo">第 1 / 1 页</span><button id="skippedNext" class="ghost">下一页</button></nav>
@@ -140,7 +143,7 @@
 
         <section id="pageDrafts" class="page-view hidden" data-page="drafts">
           <article class="panel">
-            <div class="panel-heading"><div class="heading-copy"><span class="section-index">06</span><div><p class="eyebrow">REPLY DRAFTS</p><h2>回复草稿</h2></div></div><div class="heading-actions"><button id="sendAllDrafts" class="primary">全部发送</button><button id="refreshDrafts" class="icon-button" aria-label="刷新草稿列表">↻</button></div></div>
+            <div class="panel-heading"><div class="heading-copy"><span class="section-index">05</span><div><p class="eyebrow">REPLY DRAFTS</p><h2>回复草稿</h2></div></div><div class="heading-actions"><button id="deleteAllDrafts" class="danger">全部删除</button><button id="sendAllDrafts" class="primary">全部发送</button><button id="refreshDrafts" class="icon-button" aria-label="刷新草稿列表">↻</button></div></div>
             <p class="page-hint">展示所有笔记中当前未发送或发送中的回复草稿。终态（已发送、失败、已归档）不会出现在这里。</p>
             <div id="draftsList" class="result-area loading"><span class="loader"></span>正在读取草稿…</div>
           </article>

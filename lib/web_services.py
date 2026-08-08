@@ -35,6 +35,7 @@ from .state_io import (
     read_workflow_state,
 )
 from .xhs_client import XHSClient
+from .note_ocr import note_needs_image_ocr
 
 
 class WebServiceError(ValueError):
@@ -135,7 +136,7 @@ def run_analysis(payload: dict) -> dict:
 def skipped_records(search: str = "", page: int = 1,
                     page_size: int = 15) -> dict:
     search_text = _text(search, "搜索词", 200)
-    search_key = " ".join(search_text.split()).casefold()
+    search_terms = [part.casefold() for part in search_text.split() if part]
     page = _integer(page, "页码", 1, 1, 1000000)
     page_size = _integer(page_size, "每页数量", 15, 5, 100)
     skipped = XHSClient.load_skipped(force_reload=True)
@@ -147,7 +148,7 @@ def skipped_records(search: str = "", page: int = 1,
                 "error_type", "error_code", "error_message", "legacy_reason",
             )
         ).split()).casefold()
-        if search_key and search_key not in searchable:
+        if search_terms and not all(term in searchable for term in search_terms):
             continue
         matched.append((comment_id, item))
     matched.sort(
@@ -859,6 +860,82 @@ def delete_draft(payload: dict) -> dict:
         raise _workflow_busy_error(error) from None
 
 
+def delete_all_drafts(payload: dict) -> dict:
+    """删除所有当前可见的非终态草稿；发送中及终态记录始终保留。"""
+    if not payload.get("confirmed"):
+        raise WebServiceError(
+            "全部删除前必须由用户点击确认",
+            error_type="confirmation_required",
+        )
+
+    visible = list_all_drafts().get("drafts", [])
+    targets_by_note = {}
+    protected = 0
+    for draft in visible:
+        status = str(draft.get("send_status", "") or "")
+        if status in NON_RESEND_STATUSES:
+            protected += 1
+            continue
+        note_id = str(draft.get("note_id", "") or "")
+        comment_id = str(draft.get("comment_id", "") or "")
+        if note_id and comment_id:
+            targets_by_note.setdefault(note_id, set()).add(comment_id)
+
+    deleted = 0
+    failed_notes = []
+    for note_id, target_ids in targets_by_note.items():
+        paths = workflow_paths(note_id)
+        try:
+            with workflow_lock(note_id, timeout=5.0):
+                if not json_state_exists(paths["drafts"]):
+                    continue
+                state = read_workflow_state(
+                    paths["drafts"], default={}, role="program_state"
+                ) or {}
+                if not isinstance(state, dict):
+                    failed_notes.append({
+                        "note_id": note_id,
+                        "error_type": "draft_corrupt",
+                    })
+                    continue
+                kept = []
+                note_deleted = 0
+                for item in state.get("drafts", []):
+                    if not isinstance(item, dict):
+                        kept.append(item)
+                        continue
+                    comment_id = str(item.get("comment_id", "") or "")
+                    status = str(item.get("send_status", "") or "")
+                    if comment_id in target_ids and status not in NON_RESEND_STATUSES:
+                        note_deleted += 1
+                        continue
+                    kept.append(item)
+                if note_deleted:
+                    state["drafts"] = kept
+                    _invalidate_draft_confirmation(state)
+                    write_json(state, paths["drafts"])
+                    deleted += note_deleted
+        except StateLockTimeout:
+            failed_notes.append({
+                "note_id": note_id,
+                "error_type": "workflow_busy",
+            })
+
+    remaining = list_all_drafts().get("total_count", 0)
+    return {
+        "ok": not failed_notes,
+        "deleted": deleted,
+        "protected": protected,
+        "failed_notes": failed_notes,
+        "remaining": remaining,
+        "message": (
+            f"已删除{deleted}条草稿"
+            + (f"，保留{protected}条发送中记录" if protected else "")
+            + (f"，{len(failed_notes)}篇笔记处理失败" if failed_notes else "")
+        ),
+    }
+
+
 def send_all_drafts(payload: dict) -> dict:
     """批量发送所有可见草稿，每条复用现有安全流程。"""
     if not payload.get("confirmed"):
@@ -1077,6 +1154,18 @@ def note_detail(payload: dict) -> dict:
     # 的笔记补齐详情；只要本地存在就直接使用，不因 TTL 到期重复访问平台。
     cached = _cached_note_detail(note_id)
     if cached:
+        if note_needs_image_ocr(cached):
+            try:
+                cached = XHSClient.get_note_detail_cached(
+                    note_id, xsec_token="", force_refresh=False
+                )
+            except Exception as error:
+                return {
+                    "ok": True,
+                    "cached": True,
+                    "note": cached,
+                    "warning": f"图片文字识别失败，已使用原缓存: {error}",
+                }
         return {
             "ok": True,
             "cached": True,
