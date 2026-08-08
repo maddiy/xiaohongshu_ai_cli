@@ -113,6 +113,7 @@ class WebAppTests(unittest.TestCase):
             for name, value in header_values
         ))
         self.assertIn("X-CSRF-Token", inspect.getsource(handler.do_POST))
+        self.assertIn("csrf_expired", inspect.getsource(handler.do_POST))
         self.assertIs(server, server_class.return_value)
 
     def test_web_assets_exist_and_do_not_load_remote_scripts(self):
@@ -271,6 +272,8 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertIn("refreshArticles(1, state.autoRefresh.articles);", javascript)
         self.assertIn("AUTO_REFRESH_STORAGE_KEY", javascript)
+        self.assertIn('payload.error_type === "csrf_expired"', javascript)
+        self.assertIn("window.location.reload()", javascript)
         self.assertIn('id="autoRefreshArticles"', html_source)
         self.assertIn('id="autoRefreshComments"', html_source)
 

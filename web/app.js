@@ -69,6 +69,12 @@ async function api(path, options = {}) {
   } catch (_error) {
     throw new ApiError("本地服务返回了无法解析的结果", {}, response.status);
   }
+  if (response.status === 403 && payload.error_type === "csrf_expired") {
+    toast("本地服务已更新，正在刷新页面并恢复操作…");
+    window.setTimeout(() => window.location.reload(), 120);
+    // 页面即将重新加载，保持当前调用挂起，避免旧页面继续渲染失败状态。
+    return new Promise(() => {});
+  }
   if (!response.ok || payload.ok === false) {
     throw new ApiError(payload.error || payload.message || "请求失败", payload, response.status);
   }
@@ -649,7 +655,7 @@ function renderAnalysis(summary) {
   if (!summary) return emptyState(target, "没有可分析的数据");
   const metrics = document.createElement("div");
   metrics.className = "metric-grid";
-  [["一级评论", summary.total_comments], ["独立用户", summary.unique_users], ["评论点赞", summary.total_likes], ["楼中楼", summary.total_subs], ["作者已回复", summary.replied], ["作者未回复", summary.unreplied]].forEach(([label, value]) => {
+  [["一级评论", summary.total_comments], ["独立用户", summary.unique_users], ["总互动", summary.engagement_total], ["平均点赞", summary.average_likes], ["作者已回复", summary.replied], ["作者未回复", summary.unreplied], ["回复率", `${summary.reply_rate || 0}%`], ["提问评论", summary.question_count]].forEach(([label, value]) => {
     const card = document.createElement("article");
     card.className = "metric-card";
     card.append(textNode("small", label), textNode("strong", value || 0));
@@ -669,7 +675,64 @@ function renderAnalysis(summary) {
     item.append(textNode("span", `${label} ${counts[key] || 0}`), meter);
     sentiment.append(item);
   });
-  target.append(sentiment, textNode("h3", "热门评论"));
+  target.append(sentiment);
+
+  const insightGrid = document.createElement("div");
+  insightGrid.className = "analysis-insight-grid";
+  const keywordPanel = document.createElement("section");
+  keywordPanel.className = "analysis-card";
+  keywordPanel.append(textNode("h3", "讨论关键词"));
+  const keywordList = document.createElement("div");
+  keywordList.className = "keyword-list";
+  (summary.keywords || []).forEach((item) => keywordList.append(
+    textNode("span", `${item.term} · ${item.count}`, "keyword-chip")
+  ));
+  if (!keywordList.childElementCount) keywordList.append(textNode("small", "当前样本未形成重复关键词", "hint"));
+  keywordPanel.append(keywordList);
+
+  const trendPanel = document.createElement("section");
+  trendPanel.className = "analysis-card";
+  trendPanel.append(textNode("h3", "评论趋势"));
+  const trend = document.createElement("div");
+  trend.className = "analysis-trend";
+  const timeline = summary.timeline || [];
+  const trendMax = Math.max(1, ...timeline.map((item) => Number(item.count || 0)));
+  timeline.forEach((item) => {
+    const row = document.createElement("div");
+    const bar = document.createElement("i");
+    bar.style.setProperty("--trend-width", `${Math.max(5, Number(item.count || 0) / trendMax * 100)}%`);
+    row.append(textNode("span", item.date), bar, textNode("b", item.count));
+    trend.append(row);
+  });
+  if (!timeline.length) trend.append(textNode("small", "评论没有可用时间字段", "hint"));
+  trendPanel.append(trend);
+  insightGrid.append(keywordPanel, trendPanel);
+  target.append(insightGrid);
+
+  const recommendations = document.createElement("section");
+  recommendations.className = "analysis-card recommendations";
+  recommendations.append(textNode("h3", "运营建议"));
+  const recommendationList = document.createElement("ul");
+  (summary.recommendations || []).forEach((item) => recommendationList.append(textNode("li", item)));
+  recommendations.append(recommendationList);
+  target.append(recommendations, textNode("h3", "优先回复"));
+
+  const priorityShell = document.createElement("div");
+  priorityShell.className = "table-shell";
+  const priorityTable = document.createElement("table");
+  const priorityHead = document.createElement("thead");
+  const priorityHeader = document.createElement("tr");
+  ["序号", "用户", "提问", "点赞", "讨论", "优先分", "评论"].forEach((name) => priorityHeader.append(textNode("th", name)));
+  priorityHead.append(priorityHeader);
+  const priorityBody = document.createElement("tbody");
+  (summary.reply_priorities || []).forEach((row, index) => {
+    const tr = document.createElement("tr");
+    tr.append(textNode("td", index + 1, "compact"), textNode("td", row.nick, "compact"), textNode("td", row.is_question ? "是" : "否", "compact"), textNode("td", row.likes, "compact"), textNode("td", row.sub_count, "compact"), textNode("td", row.priority_score, "compact"), textNode("td", row.content, "comment-content"));
+    priorityBody.append(tr);
+  });
+  priorityTable.append(priorityHead, priorityBody);
+  priorityShell.append(priorityTable);
+  target.append(priorityShell, textNode("h3", "热门评论"));
   const shell = document.createElement("div");
   shell.className = "table-shell";
   const table = document.createElement("table");

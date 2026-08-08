@@ -16,7 +16,7 @@ python3 main.py ai-help --summary
 JSON校验和全部测试，成功时只输出紧凑摘要。
 
 - 应用版本：`python3 main.py --version`
-- 当前发布版本为`6.14.0`，AI输出协议为schema`29`；运行时以
+- 当前发布版本为`6.15.0`，AI输出协议为schema`30`；运行时以
   `ai-help --summary`为唯一权威来源。
 - 必须检查`ai-help --summary.release_consistency`：文档或隐私检查失败时停止；
   `repository.status`为`working_tree_not_published`、`working_tree_dirty`或
@@ -191,7 +191,12 @@ python3 main.py web
 按笔记加锁删除全部待发送草稿，并保留发送中及全部终态记录。批量发送遇到验证码、限流、
 登录失效、会话故障、核验失败或不确定状态时必须暂停剩余项目。
 服务只监听本机并校验页面CSRF令牌；Web不启动或管理监控任务。不得改成公网
-监听或把页面令牌、Cookie、`xsec_token`暴露给其他主机。
+监听或把页面令牌、Cookie、`xsec_token`暴露给其他主机。Web服务重启导致旧页面
+令牌过期时，前端自动刷新一次取得新令牌，不得关闭或绕过CSRF校验。
+
+评论分析使用本地已识别的作者账号ID统计回复覆盖率，并输出情绪分布、总互动、
+平均点赞、提问数量、跨评论关键词、最多14天趋势、未回复优先级和运营建议。
+情绪和关键词均为规则辅助结果，不得描述为可靠的人格、立场或心理判断。
 
 ## AI回复流程
 

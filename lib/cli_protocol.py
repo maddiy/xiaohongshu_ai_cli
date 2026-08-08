@@ -180,7 +180,7 @@ def cmd_ai_help(args):
             "lib/scanner_notifications.py": "最新评论通知候选收集",
             "lib/scanner_online.py": "在线存在性、回复关系和楼中楼完整性核验",
             "lib/replier.py": "草稿生成、发送和失败排除",
-            "lib/analyzer.py": "评论统计与摘要分析",
+            "lib/analyzer.py": "评论统计与增强分析",
             "lib/poster.py": "图文笔记校验、预览和发布",
             "lib/xhs_client.py": "XHSClient兼容门面、账号和回复接口",
             "lib/xhs_client_content.py": "笔记、通知和私有令牌索引",

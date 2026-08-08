@@ -698,7 +698,9 @@ def _handler_class(csrf_token: str):
         def do_POST(self):
             if self.headers.get("X-CSRF-Token", "") != csrf_token:
                 self._send_json(403, {
-                    "ok": False, "error": "页面令牌无效，请刷新页面",
+                    "ok": False,
+                    "error_type": "csrf_expired",
+                    "error": "页面令牌已过期，正在自动刷新",
                 })
                 return
             parsed = urlparse(self.path)

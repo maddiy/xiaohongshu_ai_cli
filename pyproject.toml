@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xiaohongshu-ai-operations"
-version = "6.14.0"
+version = "6.15.0"
 description = "面向中文用户和AI助手的小红书运营命令行系统"
 readme = "README.md"
 requires-python = ">=3.10"
