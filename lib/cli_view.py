@@ -16,7 +16,7 @@ from .cli_support import (
     write_json,
 )
 from .xhs_client import XHSClient
-from .state_io import read_json_state
+from .state_io import json_state_exists, read_json_state
 
 
 ARTICLE_COLUMNS = ["序号", "发布时间", "评论数", "标题", "笔记ID"]
@@ -69,7 +69,7 @@ def cmd_articles(args):
             raw_articles = call_for_output(
                 client.list_articles, limit=args.limit, quiet=args.json
             )
-            articles = [{
+            new_articles = [{
                 "index": index,
                 "note_id": item["id"],
                 "title": item.get("title", "") or "无标题",
@@ -77,6 +77,30 @@ def cmd_articles(args):
                 "time": item.get("time", ""),
             } for index, item in enumerate(raw_articles, start=1)]
             source = "online"
+
+            # 合并本地缓存：新文章在前，旧文章在后，按note_id去重
+            cached_articles = []
+            if json_state_exists(output_path):
+                try:
+                    cached_data = read_json_state(output_path) or {}
+                    cached_articles = cached_data.get("articles", [])
+                except (json.JSONDecodeError, IOError, TypeError):
+                    pass
+            existing_ids = set()
+            for a in cached_articles:
+                nid = a.get("note_id") or a.get("id", "")
+                if nid:
+                    existing_ids.add(nid)
+            articles = list(new_articles)
+            for a in cached_articles:
+                nid = a.get("note_id") or a.get("id", "")
+                if nid not in existing_ids:
+                    articles.append(a)
+                    existing_ids.add(nid)
+            # 重新编号
+            for idx, a in enumerate(articles, start=1):
+                a["index"] = idx
+
             if args.json and (
                 len(articles) > page_size
                 or getattr(args, "output", None)

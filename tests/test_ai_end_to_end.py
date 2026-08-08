@@ -50,12 +50,6 @@ class AIReplyEndToEndTests(unittest.TestCase):
                 "ai-reply", "--note-id", "n1", "--action", "map",
                 "--candidate-index", "1", "--decision", "send",
                 "--reply-text", '保留"英文引号"也能安全写入',
-                "--logic-verdict", "partly_sound",
-                "--logic-reason", "存在可讨论观点",
-                "--fact-verdict", "not_applicable",
-                "--fact-reason", "没有外部事实主张",
-                "--boast-verdict", "none",
-                "--boast-reason", "没有自我夸大",
             ])
             drafted = run([
                 "ai-reply", "--note-id", "n1", "--action", "draft",

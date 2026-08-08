@@ -23,6 +23,7 @@ def cmd_ai_help(args):
         CACHE_TTL_MINUTES,
         COMMENT_HELPER_MAX_SECONDS,
         COMMENT_HELPER_REQUEST_TIMEOUT,
+        COMMENT_HELPER_REQUEST_DELAY,
         COMMENT_LOOKUP_MAX_PAGES,
         LOGIN_COOKIE_SOURCE,
         PERSISTENT_HELPER_RESPONSE_TIMEOUT,
@@ -223,6 +224,9 @@ def cmd_ai_help(args):
             "comment_helper_request_timeout_seconds": (
                 COMMENT_HELPER_REQUEST_TIMEOUT
             ),
+            "comment_helper_request_delay_seconds": (
+                COMMENT_HELPER_REQUEST_DELAY
+            ),
             "comment_helper_max_seconds": COMMENT_HELPER_MAX_SECONDS,
             "comment_lookup_max_pages": COMMENT_LOOKUP_MAX_PAGES,
             "state_db_schema_version": DB_SCHEMA_VERSION,
@@ -339,9 +343,12 @@ def cmd_ai_help(args):
                     },
                 },
             },
-            "reply_map_review_required": (
-                "ai-reply要求每条本次候选都有对象映射和review；缺少映射或"
+            "reply_map_mapping_required": (
+                "ai-reply要求每条本次候选都有对象映射；缺少映射或"
                 "字符串简写均在联网前拒绝"
+            ),
+            "reply_map_review_optional": (
+                "review字段为可选；有则校验结构/枚举/来源URL，无则跳过"
             ),
             "fact_check_sources": (
                 "supported、mixed、contradicted至少需要一个含http(s) URL的"
@@ -575,21 +582,28 @@ def cmd_ai_help(args):
                 "重复send映射"
             ),
             "pre_reply_review": {
-                "required_for": "本次每条候选，包括send、skip和archive",
+                "required_for": "可选；AI内化回复生成规范，无需在映射中显式填写",
                 "dimensions": ["逻辑分析", "事实核查", "吹牛判定"],
-                "program_role": "校验结构、枚举值和事实来源URL格式",
-                "ai_role": "理解语境、完成推理、联网查证并给出审慎判定",
+                "program_role": "有则校验结构、枚举值和事实来源URL格式",
+                "ai_role": "理解语境、完成推理、联网查证，将结果体现在回复正文中",
                 "draft_output": (
-                    "draft返回review_columns、review_column_fields和reviews；"
-                    "reviews含中文label；先展示审查表，再展示preview草稿表"
+                    "有review时draft返回review_columns、review_column_fields和reviews；"
+                    "无review时预览表仅显示回复草稿"
                 ),
+            },
+            "reply_generation_rules": {
+                "逻辑分析": "理解评论论点/证据/推理，回复逻辑自洽",
+                "事实核查": "引用数据必须有可验证公开来源，不编造结论",
+                "吹牛判定": "客观克制，不过度表扬或升级冲突",
+                "客观公正": "中立审视，不因立场或措辞产生偏见",
             },
             "user_visible_ids": (
                 "comment_id仅供AI写映射和程序定位；评论、草稿、执行说明"
                 "面向用户展示时不得显示comment_id"
             ),
             "reply_quality": [
-                "回复前逐条完成逻辑分析、事实核查和吹牛判定",
+                "回复前AI内化逻辑分析、事实核查和吹牛判定",
+                "回复需有理有据、逻辑自洽",
                 "逻辑成立不代表事实为真；事实成立也不代表推理完整",
                 "个人经历通常标记unverifiable，不得武断判为虚假或吹牛",
                 "supported/mixed/contradicted必须提供可点击核对来源",
@@ -664,14 +678,18 @@ def cmd_ai_help(args):
                 "python3 main.py web",
                 f"打开http://{WEB_HOST}:{WEB_PORT}",
                 (
-                    "主导航分为工作台、最新文章、最新评论、自动监控和回复排除"
-                    "列表；不显示其他系统工具；"
+                    "主导航分为工作台、最新文章、最新评论、自动监控、回复排除"
+                    "列表和回复草稿；不显示其他系统工具；"
                     "文章内进入评论分析；评论页可按文章或单条复制提示词，"
                     "也可编辑发送草稿或人工忽略单条评论"
                 ),
                 (
                     "文章和评论默认每页10条并可翻阅完整本地快照；两处笔记ID"
                     "均提供无文字复制图标"
+                ),
+                (
+                    "刷新最新评论时为文章列表外笔记一次性缓存标题和正文；"
+                    "后续回复提示词复用本地正文，不重复访问平台"
                 ),
                 (
                     "文章标题后的评论按钮复制全量评论提示词并要求--full-scan；"

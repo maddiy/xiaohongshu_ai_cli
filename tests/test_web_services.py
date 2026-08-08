@@ -2,10 +2,30 @@
 
 from tests.support import *
 
+from contextlib import nullcontext
+
 from lib import web_services
 
 
 class WebServiceTests(unittest.TestCase):
+    @patch("lib.web_services.XHSClient.get_note_detail_cached")
+    @patch("lib.web_services._cached_note_detail")
+    def test_note_detail_prompt_context_always_reuses_local_cache(
+        self, cached_detail, get_detail
+    ):
+        cached_detail.return_value = {
+            "note_id": "note-1",
+            "title": "本地标题",
+            "desc": "本地正文",
+            "read_at": "很久以前",
+        }
+
+        result = web_services.note_detail({"note_id": "note-1"})
+
+        self.assertTrue(result["cached"])
+        self.assertEqual(result["note"]["desc"], "本地正文")
+        get_detail.assert_not_called()
+
     @patch("lib.web_services._capture_json")
     def test_doctor_report_can_show_failed_checks_without_http_failure(
         self, capture
@@ -197,6 +217,104 @@ class WebServiceTests(unittest.TestCase):
         self.assertEqual(saved["drafts"][0]["send_status"], "sent")
         self.assertEqual(saved["active_batch"]["source"], "web_manual_edit")
         verify.assert_called_once()
+
+    @patch("lib.web_services.write_json")
+    @patch("lib.web_services.read_workflow_state")
+    @patch("lib.web_services.json_state_exists", return_value=True)
+    @patch("lib.web_services.workflow_lock")
+    def test_draft_edit_uses_lock_updates_text_and_invalidates_binding(
+        self, lock, _exists, read_state, write_json
+    ):
+        lock.return_value = nullcontext()
+        state = {
+            "drafts": [{
+                "comment_id": "comment-1", "reply": "旧回复",
+                "action": "send", "send_status": "",
+            }],
+            "active_comment_ids": ["comment-1"],
+            "active_batch": {"status": "active"},
+        }
+        read_state.return_value = state
+        result = web_services.update_draft_reply({
+            "note_id": "note-1",
+            "comment_id": "comment-1",
+            "reply": "修改后的回复",
+        })
+        self.assertTrue(result["updated"])
+        self.assertTrue(result["batch_invalidated"])
+        self.assertEqual(state["drafts"][0]["reply"], "修改后的回复")
+        self.assertEqual(state["active_comment_ids"], [])
+        self.assertEqual(state["active_batch"]["status"], "superseded")
+        write_json.assert_called_once()
+
+    @patch("lib.web_services.read_workflow_state")
+    @patch("lib.web_services.json_state_exists", return_value=True)
+    @patch("lib.web_services.workflow_lock")
+    def test_draft_edit_and_delete_refuse_terminal_records(
+        self, lock, _exists, read_state
+    ):
+        lock.return_value = nullcontext()
+        read_state.return_value = {
+            "drafts": [{
+                "comment_id": "comment-1", "reply": "已发送",
+                "action": "send", "send_status": "sent",
+            }],
+            "active_comment_ids": [],
+        }
+        for operation, payload in (
+            (web_services.update_draft_reply, {
+                "note_id": "note-1", "comment_id": "comment-1",
+                "reply": "不允许修改",
+            }),
+            (web_services.delete_draft, {
+                "note_id": "note-1", "comment_id": "comment-1",
+            }),
+        ):
+            with self.assertRaises(web_services.WebServiceError) as caught:
+                operation(payload)
+            self.assertEqual(caught.exception.error_type, "terminal_reply_state")
+
+    @patch("lib.web_services.send_reply_draft")
+    @patch("lib.web_services.list_all_drafts")
+    def test_send_all_stops_before_writes_for_uncertain_item(
+        self, list_drafts, send_reply
+    ):
+        list_drafts.return_value = {"drafts": [{
+            "note_id": "note-1", "comment_id": "comment-1",
+            "nickname": "用户", "reply": "回复",
+            "send_status": "sending", "in_skipped": False,
+        }]}
+        with self.assertRaises(web_services.WebServiceError) as caught:
+            web_services.send_all_drafts({"confirmed": True})
+        self.assertEqual(caught.exception.error_type, "uncertain_send_state")
+        send_reply.assert_not_called()
+
+    @patch("lib.web_services.send_reply_draft")
+    @patch("lib.web_services.list_all_drafts")
+    def test_send_all_pauses_remaining_on_account_level_error(
+        self, list_drafts, send_reply
+    ):
+        list_drafts.return_value = {"drafts": [
+            {
+                "note_id": "note-1", "comment_id": "comment-1",
+                "nickname": "用户1", "reply": "回复1",
+                "send_status": "", "in_skipped": False,
+            },
+            {
+                "note_id": "note-2", "comment_id": "comment-2",
+                "nickname": "用户2", "reply": "回复2",
+                "send_status": "", "in_skipped": False,
+            },
+        ]}
+        send_reply.return_value = {
+            "ok": False, "sent": 0, "failed": 1,
+            "error_type": "rate_limited", "error": "操作太快",
+        }
+        result = web_services.send_all_drafts({"confirmed": True})
+        self.assertTrue(result["paused"])
+        self.assertEqual(result["pause_reason"], "rate_limited")
+        self.assertEqual(result["remaining"], 1)
+        send_reply.assert_called_once()
 
 
 if __name__ == "__main__":

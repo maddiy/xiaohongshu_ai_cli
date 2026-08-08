@@ -8,8 +8,8 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 # 唯一正式名称（APP_NAME 保留为旧代码兼容别名）
 SYSTEM_NAME = "小红书AI智能运营系统"
 APP_NAME = SYSTEM_NAME
-APP_VERSION = "6.11.0"
-AI_SCHEMA_VERSION = "26"
+APP_VERSION = "6.13.0"
+AI_SCHEMA_VERSION = "28"
 XHS_CLI_VERSION = "0.6.4"
 
 # 登录时默认读取的浏览器 Cookie
@@ -37,6 +37,9 @@ PERSISTENT_HELPER_RESPONSE_TIMEOUT = float(
 COMMENT_HELPER_REQUEST_TIMEOUT = float(
     os.environ.get("XHS_COMMENT_HELPER_REQUEST_TIMEOUT", "8")
 )
+COMMENT_HELPER_REQUEST_DELAY = float(
+    os.environ.get("XHS_COMMENT_HELPER_REQUEST_DELAY", "0.08")
+)
 COMMENT_HELPER_MAX_SECONDS = float(
     os.environ.get("XHS_COMMENT_HELPER_MAX_SECONDS", "260")
 )
@@ -60,7 +63,7 @@ WEB_HOST = "127.0.0.1"
 WEB_PORT = int(os.environ.get("XHS_WEB_PORT", "8765"))
 
 # 只读分页间隔。发送回复仍使用上面的请求间隔。
-READ_PAGE_DELAY = 0.1
+READ_PAGE_DELAY = float(os.environ.get("XHS_READ_PAGE_DELAY", "0.03"))
 
 # 回复策略
 REPLY_STRATEGY = "smart"  # "smart" 逐条手动确认 | "auto" 自动生成回复 | "generic" 使用通用话术
@@ -86,3 +89,7 @@ COMMENTS_FILE = os.path.join(CACHE_DIR, "comments.json")
 
 # 跳过列表（不想回复 / 无法回复的评论存档）
 SKIPPED_FILE = os.path.join(CACHE_DIR, "skipped.json")  # 跳过列表存储路径
+
+# 笔记详情缓存（标题+正文desc+图片数等），供回复提示词结合笔记正文使用。
+# 0600权限；属于本地只读缓存，不是回复工作流状态。
+NOTE_DETAILS_FILE = os.path.join(CACHE_DIR, "note_details.json")

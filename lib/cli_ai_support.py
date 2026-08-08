@@ -259,7 +259,9 @@ def _inline_rows(rows):
 
 
 def _validate_review(comment_id, review):
-    """校验AI对单条评论的逻辑、事实和吹牛审查记录。"""
+    """校验AI对单条评论的逻辑、事实和吹牛审查记录。review缺失时不报错。"""
+    if review is None:
+        return []
     if not isinstance(review, dict):
         return [f"{comment_id}: review 必须是对象"]
 
@@ -271,17 +273,21 @@ def _validate_review(comment_id, review):
     )
     for field, allowed in specifications:
         block = review.get(field)
+        if block is None:
+            continue
         if not isinstance(block, dict):
             errors.append(f"{comment_id}: review.{field} 必须是对象")
             continue
         verdict = block.get("verdict", "")
+        if not verdict:
+            continue
         if verdict not in allowed:
             errors.append(
                 f"{comment_id}: review.{field}.verdict 必须是 "
                 + "、".join(sorted(allowed))
             )
         reason = block.get("reason", "")
-        if not isinstance(reason, str) or not reason.strip():
+        if verdict and (not isinstance(reason, str) or not reason.strip()):
             errors.append(
                 f"{comment_id}: review.{field}.reason 不能为空"
             )
@@ -326,15 +332,14 @@ def _validate_reply_map(reply_map, candidate_ids):
     for comment_id in candidate_ids:
         if comment_id not in reply_map:
             errors.append(
-                f"{comment_id}: 缺少映射；每条候选都必须完成逻辑分析、"
-                "事实核查和吹牛判定"
+                f"{comment_id}: 缺少映射；每条候选都必须有reply和action"
             )
             continue
         entry = reply_map[comment_id]
         if isinstance(entry, str):
             errors.append(
                 f"{comment_id}: AI回复流程不接受字符串简写，必须使用"
-                "包含review的对象"
+                "包含reply和action的对象"
             )
             continue
         if not isinstance(entry, dict):
@@ -351,6 +356,7 @@ def _validate_reply_map(reply_map, candidate_ids):
             not isinstance(reply, str) or not reply.strip()
         ):
             errors.append(f"{comment_id}: action=send 时 reply 不能为空")
+        # review可选：有则校验，无则跳过
         errors.extend(_validate_review(comment_id, entry.get("review")))
     return errors
 
@@ -367,6 +373,12 @@ def _reply_map_validation_error(errors, error_type="invalid_reply_map_mapping",
         "requires_file_fix": True,
         "details": errors,
         "accepted_formats": [
+            {
+                "<comment_id>": {
+                    "reply": "send时非空；skip/archive可为空",
+                    "action": "send|skip|archive",
+                },
+            },
             {
                 "<comment_id>": {
                     "reply": "send时非空；skip/archive可为空",

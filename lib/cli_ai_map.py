@@ -99,21 +99,10 @@ def _map_reply(args, paths):
     elif comment_id in candidate_ids:
         candidate_index = candidate_id_to_index[comment_id]
     decision = str(getattr(args, "decision", "") or "").strip()
-    required_fields = {
-        "--comment-id或--candidate-index": comment_id,
-        "--decision": decision,
-        "--logic-verdict": getattr(args, "logic_verdict", None),
-        "--logic-reason": getattr(args, "logic_reason", None),
-        "--fact-verdict": getattr(args, "fact_verdict", None),
-        "--fact-reason": getattr(args, "fact_reason", None),
-        "--boast-verdict": getattr(args, "boast_verdict", None),
-        "--boast-reason": getattr(args, "boast_reason", None),
-    }
-    missing = [name for name, value in required_fields.items() if not value]
-    if missing:
+    if not comment_id or not decision:
         print_json(_mapping_error(
             "map动作缺少必填字段",
-            details=missing,
+            details=["--comment-id或--candidate-index", "--decision"],
         ))
         return
     if comment_id not in candidate_ids:
@@ -131,7 +120,18 @@ def _map_reply(args, paths):
     entry = {
         "reply": str(getattr(args, "reply_text", "") or ""),
         "action": decision,
-        "review": {
+    }
+    # 审查字段可选：全部提供时才写入结构化审查记录
+    review_fields = {
+        "logic": (args.logic_verdict, args.logic_reason),
+        "fact_check": (args.fact_verdict, args.fact_reason),
+        "boast_check": (args.boast_verdict, args.boast_reason),
+    }
+    if any(
+        verdict or reason
+        for verdict, reason in review_fields.values()
+    ):
+        entry["review"] = {
             "logic": {
                 "verdict": args.logic_verdict,
                 "reason": args.logic_reason,
@@ -145,8 +145,7 @@ def _map_reply(args, paths):
                 "verdict": args.boast_verdict,
                 "reason": args.boast_reason,
             },
-        },
-    }
+        }
     errors = _validate_reply_map({comment_id: entry}, [comment_id])
     if errors:
         print_json(_mapping_error(

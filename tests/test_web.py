@@ -10,6 +10,7 @@ from lib.web_app import (
     _handler_class,
     _load_articles,
     _load_comments,
+    _prefetch_missing_note_details,
     create_web_server,
 )
 
@@ -40,6 +41,83 @@ class _ManagedFakeWatcher:
 
 
 class WebAppTests(unittest.TestCase):
+    @patch("lib.web_app.XHSClient._merge_xsec_index")
+    @patch("lib.web_app.XHSClient.get_note_detail_cached")
+    @patch("lib.web_app.read_json_state")
+    def test_missing_comment_note_is_fetched_once_and_cached_for_prompts(
+        self, read_state, get_detail, merge_tokens
+    ):
+        def state_for(path, default=None):
+            if path.endswith("articles.json"):
+                return {"articles": [{"note_id": "known-note"}]}
+            if path.endswith("note_details.json"):
+                return {}
+            return default
+
+        read_state.side_effect = state_for
+        get_detail.return_value = {
+            "note_id": "missing-note",
+            "title": "补齐后的标题",
+            "desc": "完整笔记正文",
+            "read_at": "2026-08-08T10:00:00+08:00",
+        }
+        notifications = [{
+            "item_info": {
+                "id": "missing-note",
+                "xsec_token": "sensitive-token",
+            },
+        }, {
+            "item_info": {
+                "id": "missing-note",
+                "xsec_token": "sensitive-token",
+            },
+        }]
+        groups = [{
+            "note_id": "missing-note",
+            "note_title": "无标题",
+            "comments": [],
+        }]
+
+        result = _prefetch_missing_note_details(notifications, groups)
+
+        self.assertEqual(result["fetched"], 1)
+        get_detail.assert_called_once_with(
+            "missing-note",
+            xsec_token="sensitive-token",
+            force_refresh=False,
+        )
+        merge_tokens.assert_called_once_with({
+            "missing-note": "sensitive-token",
+        })
+        self.assertEqual(groups[0]["note_title"], "补齐后的标题")
+
+    @patch("lib.web_app.XHSClient._merge_xsec_index")
+    @patch("lib.web_app.XHSClient.get_note_detail_cached")
+    @patch("lib.web_app.read_json_state")
+    def test_existing_note_detail_is_reused_without_platform_request(
+        self, read_state, get_detail, _merge_tokens
+    ):
+        cached = {
+            "note_id": "missing-note",
+            "title": "缓存标题",
+            "desc": "缓存正文",
+        }
+        read_state.side_effect = lambda path, default=None: (
+            {"articles": []} if path.endswith("articles.json")
+            else {"missing-note": cached}
+        )
+        groups = [{
+            "note_id": "missing-note",
+            "note_title": "无标题",
+            "comments": [],
+        }]
+
+        result = _prefetch_missing_note_details([], groups)
+
+        self.assertEqual(result["already_cached"], 1)
+        get_detail.assert_not_called()
+        self.assertEqual(groups[0]["note_title"], "缓存标题")
+
     def test_watch_manager_starts_and_stops_manual_monitor(self):
         manager = WatchManager(watcher_factory=_ManagedFakeWatcher)
         started = manager.start({
@@ -77,7 +155,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIs(server, server_class.return_value)
 
     def test_web_assets_exist_and_do_not_load_remote_scripts(self):
-        for filename in ("index.html", "app.js", "styles.css"):
+        for filename in ("index.html", "app.js", "styles.css", "logo.svg"):
             path = os.path.join(PROJECT_ROOT, "web", filename)
             self.assertTrue(os.path.isfile(path))
         with open(
@@ -86,7 +164,35 @@ class WebAppTests(unittest.TestCase):
         ) as file:
             html_source = file.read()
         self.assertIn("__CSRF_TOKEN__", html_source)
+        self.assertIn('href="/logo.svg"', html_source)
+        self.assertIn('class="brand-mark"', html_source)
+        self.assertIn('viewBox="0 0 64 64"', html_source)
         self.assertNotIn("https://", html_source)
+        handler_source = inspect.getsource(_handler_class)
+        self.assertIn('parsed.path == "/logo.svg"', handler_source)
+        self.assertIn('"image/svg+xml; charset=utf-8"', handler_source)
+
+    def test_daily_bar_chart_values_follow_bar_height(self):
+        with open(
+            os.path.join(PROJECT_ROOT, "web", "app.js"),
+            encoding="utf-8",
+        ) as file:
+            app_source = file.read()
+        with open(
+            os.path.join(PROJECT_ROOT, "web", "styles.css"),
+            encoding="utf-8",
+        ) as file:
+            style_source = file.read()
+
+        self.assertIn('track.style.setProperty("--bar-height"', app_source)
+        self.assertIn("bar.hidden = safeHeight === 0", app_source)
+        self.assertIn("height: var(--bar-height)", style_source)
+        self.assertIn(
+            "bottom: calc(var(--bar-height) + .32rem)", style_source
+        )
+        self.assertIn(
+            ".bar-track .bar[hidden] { display: none; }", style_source
+        )
 
     def test_console_is_split_into_pages_and_has_no_post_ui(self):
         with open(
@@ -121,6 +227,10 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('id="replyDraftDialog"', html_source)
         self.assertIn('id="replyDraftText"', html_source)
         self.assertIn('id="sendReplyDraft"', html_source)
+        self.assertIn('class="skip-link" href="#mainContent"', html_source)
+        self.assertIn('id="mainContent" tabindex="-1"', html_source)
+        self.assertIn("提示词按钮不会发送", html_source)
+        self.assertNotIn("网页只生成 AI 提示词，不直接发送", html_source)
 
         with open(
             os.path.join(PROJECT_ROOT, "web", "app.js"),
@@ -136,9 +246,20 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('"该文章全部评论的 AI 回复提示词已复制"', javascript)
         self.assertIn('"该条评论的 AI 回复提示词已复制"', javascript)
         self.assertIn("await copyText(", javascript)
-        self.assertIn("ai-reply prepare --full-scan", javascript)
+        self.assertIn("--action prepare --full-scan", javascript)
         self.assertIn("笔记 ID：${id}", javascript)
-        self.assertIn("评论 ID：${commentId}", javascript)
+        self.assertIn("目标评论 ID：${commentId}", javascript)
+        self.assertIn("function untrustedPlatformData", javascript)
+        self.assertIn("<UNTRUSTED_PLATFORM_DATA_JSON>", javascript)
+        self.assertIn("不得添加 --full-scan", javascript)
+        self.assertIn("只有目标评论可根据审查结果设为 send", javascript)
+        self.assertIn("不要先遍历全部源码", javascript)
+        self.assertIn("没有外部事实主张时明确写“无需外部核查”", javascript)
+        self.assertIn("最多使用 1 个合适的 emoji", javascript)
+        self.assertIn("只有 send 返回 status=sent 才能报告发送成功", javascript)
+        self.assertIn("(newReply) => { row.reply = newReply; }", javascript)
+        self.assertIn("/^https?:\\/\\//i.test(sourceUrl)", javascript)
+        self.assertIn('link.setAttribute("aria-current", "page")', javascript)
         self.assertIn('action: "ignore"', javascript)
         self.assertIn('"人工忽略"', javascript)
         self.assertIn('textNode("button", "草稿", "use-button small")', javascript)

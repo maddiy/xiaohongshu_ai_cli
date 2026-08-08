@@ -1,4 +1,4 @@
-# 小红书AI智能运营系统 v6.11.0
+# 小红书AI智能运营系统 v6.13.0
 
 - 系统名称：`小红书AI智能运营系统`
 
@@ -87,7 +87,7 @@
 | `requirements.txt` | 已验证的`xiaohongshu-cli`安装版本 |
 | `web/` | 本地Web控制台的HTML、CSS和JavaScript |
 
-当前共有16个子命令，没有快捷别名。`schema_version: 26` 表示 AI 输出协议
+当前共有16个子命令，没有快捷别名。`schema_version: 28` 表示 AI 输出协议
 版本，应用版本单独由 `python3 main.py --version` 查看。
 
 拆分后的公共入口保持不变：业务代码继续从`lib.xhs_client`导入
@@ -355,8 +355,10 @@ BATCH_REPLY_PAUSE_EVERY = 50
 BATCH_REPLY_PAUSE_SECONDS = 8
 PERSISTENT_HELPER_RESPONSE_TIMEOUT = 45
 COMMENT_HELPER_REQUEST_TIMEOUT = 8
+COMMENT_HELPER_REQUEST_DELAY = 0.08
 COMMENT_HELPER_MAX_SECONDS = 260
 COMMENT_LOOKUP_MAX_PAGES = 50
+READ_PAGE_DELAY = 0.03
 WATCH_POLL_INTERVAL_SECONDS = 60
 WATCH_NOTIFICATION_LIMIT = 50
 WEB_PORT = 8765
@@ -374,12 +376,14 @@ CACHE_TTL_MINUTES = 30
 | `BATCH_REPLY_PAUSE_SECONDS` | 每次主动休息的秒数 |
 | `PERSISTENT_HELPER_RESPONSE_TIMEOUT` | 持久回复会话等待单条结果的看门狗秒数，可由环境变量调整 |
 | `COMMENT_HELPER_REQUEST_TIMEOUT` | 评论分页helper单次平台请求的超时秒数 |
+| `COMMENT_HELPER_REQUEST_DELAY` | 评论分页helper请求间的最小间隔；默认0.08秒，可由环境变量调整 |
 | `COMMENT_HELPER_MAX_SECONDS` | 评论分页helper一次任务的最大内部时间预算 |
 | `COMMENT_LOOKUP_MAX_PAGES` | 在线定位评论时允许读取的最大页数 |
 | `WATCH_POLL_INTERVAL_SECONDS` | 手动新评论监控的默认检查间隔 |
 | `WATCH_NOTIFICATION_LIMIT` | 监控每轮读取的最新评论通知数 |
 | `WEB_PORT` | 本地Web控制台端口；始终只监听127.0.0.1 |
 | `CACHE_TTL_MINUTES` | 评论缓存有效时间 |
+| `READ_PAGE_DELAY` | 普通评论分页之间的最小间隔；默认0.03秒，可由环境变量调整 |
 | `XHS_CLI_VERSION` | 已通过评论、楼中楼和持久会话验证的CLI版本 |
 | `STATE_DB_FILE` | SQLite权威状态库位置 |
 | `COMMENTS_FILE` | 完整评论正文的JSON兼容快照位置 |
@@ -495,9 +499,12 @@ python3 main.py web
 ```
 
 然后打开`http://127.0.0.1:8765`。主导航分为工作台、最新文章、最新评论、
-自动监控和回复排除列表，不再显示其他系统工具。最新文章内进入评论分析，
+自动监控、回复排除列表和回复草稿，不再显示其他系统工具。最新文章内进入评论分析，
 最新评论内可按文章或单条评论生成AI回复提示词，也可人工忽略单条评论；文章和评论默认每页10条，可翻阅本地完整分页快照，
-两处笔记ID均提供无文字复制图标。回复排除列表默认每页15条，关键词输入后
+两处笔记ID均提供无文字复制图标。刷新最新评论时，文章列表外的笔记会按ID
+一次性读取标题和正文到0600权限的`.cache/note_details.json`；已有缓存后回复
+提示词直接复用本地正文，不再因TTL到期反复访问平台。单篇读取失败只警告，
+不影响评论展示。回复排除列表默认每页15条，关键词输入后
 自动搜索，也可点击搜索按钮；支持稳定翻页、重置搜索、单条删除和清空。
 文章标题后保留“评论”按钮，点击后复制处理该文章全部历史评论的提示词，明确
 要求AI使用`ai-reply prepare --full-scan`。每条评论后也有“评论”和“忽略”
@@ -512,6 +519,12 @@ python3 main.py web
 覆盖。提示词按钮本身不扫描或发送；只有用户在可编辑草稿中点击发送才执行平台
 写操作。网页不提供笔记发布，命令行`post`继续保留。页面只监听本机，所有控制请求带有临时CSRF令牌；关闭Web进程
 后页面启动的监控也会停止。
+文章级和单评论提示词会把标题、正文、用户及评论隔离为不可信平台数据，并
+明确结构化`map`、按需事实核查、自然语气、草稿确认、批次绑定与异常停止，
+减少其他AI遍历源码、手写JSON或误执行评论内指令的情况。
+回复草稿页支持审查详情、编辑、单条删除、单条发送和批量发送。编辑或删除由
+工作流锁保护，编辑后旧确认绑定立即失效；终态和发送中记录不可修改或删除，
+批量发送遇到账户级错误或不确定发送状态时安全暂停剩余草稿。
 
 ### 5. 扫描可回复评论
 
@@ -599,10 +612,7 @@ python3 main.py ai-reply --note-id <note_id> --action prepare
 
 # 2. AI用结构化map动作逐条写入；程序负责JSON编码和校验
 python3 main.py ai-reply --note-id <note_id> --action map \
-  --candidate-index <候选序号> --decision send --reply-text '<回复正文>' \
-  --logic-verdict partly_sound --logic-reason '<逻辑依据>' \
-  --fact-verdict unverifiable --fact-reason '<核查依据>' \
-  --boast-verdict none --boast-reason '<判定依据>'
+  --candidate-index <候选序号> --decision send --reply-text '<回复正文>'
 
 # 3. 再次在线核验并直接返回 preview
 python3 main.py ai-reply --note-id <note_id> --action draft
@@ -617,17 +627,17 @@ python3 main.py ai-reply \
 ```
 
 `map`每次写一条候选映射，返回`remaining_candidate_indexes`和兼容用
-`remaining_comment_ids`；处理到
-`remaining_count=0`后运行`draft`。可重复添加
-`--fact-source '<标题>' '<URL>'`。程序使用标准JSON写入器保存回复和审查文本，
-英文双引号会自动转义，不再要求AI手工编辑映射文件。`--replies`和直接编辑
-`reply_map.json`仅作为兼容入口保留。候选序号来自prepare返回的
-`candidate_index`；旧调用也可使用`--comment-id`，但两者不能同时使用。
+`remaining_comment_ids`；处理到`remaining_count=0`后运行`draft`。可追加
+`--fact-source '<标题>' '<URL>'`提供参考来源，但非必填。
+程序使用标准JSON写入器保存回复文本，英文双引号会自动转义，不再要求AI
+手工编辑映射文件。`--replies`和直接编辑`reply_map.json`仅作为兼容入口保留。
+候选序号来自prepare返回的`candidate_index`；旧调用也可使用`--comment-id`，
+但两者不能同时使用。
 
 `prepare`和首次生成新草稿时会停用旧`active_comment_ids`，但不会删除历史
 草稿或终态；`draft`成功后写入本次活动批次，并返回`batch_id`、`revision`
 和`preview_hash`。重复运行`draft`且预览内容完全相同时，返回
-`binding_reused=true`并沿用原绑定，已有确认继续有效；回复、动作、审查或
+`binding_reused=true`并沿用原绑定，已有确认继续有效；回复、动作或
 候选实际变化时才生成新绑定，并返回`new_confirmation_required=true`。
 发送仍必须原样提交批次号和指纹。
 若返回`stale_preview`，`mismatch.batch_id`和`mismatch.preview_hash`会分别
@@ -686,20 +696,13 @@ prepare结果通过`scan_method`和`verification_mode`明确本次执行方式�
 面向用户的评论、草稿或流程追踪表格中。纯辱骂或贴标签且没有实质观点的
 评论默认`skip`；回复不得编造数据、来源或绝对化结论。
 
-每条候选在决定`send`、`skip`或`archive`前必须完成三项审查：
+回复生成规范（AI内化执行，无需在映射中显式填写审查字段）：
 
-- 逻辑分析：判断论点、证据和结论是否衔接，使用`sound`、
-  `partly_sound`、`weak`、`fallacious`、`non_argument`或`unclear`。
-- 事实核查：使用`supported`、`mixed`、`contradicted`、`unverifiable`或
-  `not_applicable`。明确支持、部分支持或反驳时，必须提供至少一个HTTP(S)
-  可核对来源；个人经历没有独立证据时应标记`unverifiable`。
-- 吹牛判定：使用`none`、`possible`、`likely`、`unverifiable`或
-  `not_applicable`。不得因为语气强硬、观点错误或没有附来源就直接判为吹牛。
-
-程序只校验审查字段、枚举和来源URL格式，AI仍须实际理解语境并完成必要的
-联网查证。`draft`返回`reviews`和`preview`，AI先展示审查表，再展示回复
-草稿表，使用相同序号关联；审查单元格使用程序生成的中文`label`、`reason`
-和可点击事实来源。
+- **逻辑分析**：理解评论的论点、证据和推理，回复逻辑自洽，不产生矛盾或逻辑跳跃。
+- **事实核查**：回复中引用的事实和数据必须有可验证的公开来源；需要外部支撑时搜索
+  可靠来源，不编造数据或无法核实的结论。
+- **吹牛判定与克制称赞**：回复客观克制，不过度表扬或情绪化称赞；语气平稳，不升级冲突。
+- **客观公正**：对每条评论保持中立审视，不因立场或措辞产生偏见。
 
 `send` 动作还会在实际发送前进行最后一次在线核验。缺少`--confirmed`、
 `--batch-id`或`--preview-hash`时程序拒绝发送。
@@ -829,22 +832,13 @@ python3 main.py scan \
 ### AI 回复映射
 
 推荐使用`ai-reply --action map --candidate-index <序号>`结构化写入，避免
-手工处理JSON引号。AI工作流中的每条候选都必须有对象映射和三项`review`：
+手工处理JSON引号。每条候选都必须有对象映射：
 
 ```json
 {
   "<comment_id>": {
     "reply": "准备发送的回复",
-    "action": "send",
-    "review": {
-      "logic": {"verdict": "partly_sound", "reason": "逻辑依据"},
-      "fact_check": {
-        "verdict": "unverifiable",
-        "reason": "事实核查依据",
-        "sources": []
-      },
-      "boast_check": {"verdict": "none", "reason": "吹牛判定依据"}
-    }
+    "action": "send"
   }
 }
 ```

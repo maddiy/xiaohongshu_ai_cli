@@ -10,7 +10,14 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from config import CACHE_DIR, COMMENTS_FILE, PROJECT_ROOT, WEB_HOST, WEB_PORT
+from config import (
+    CACHE_DIR,
+    COMMENTS_FILE,
+    NOTE_DETAILS_FILE,
+    PROJECT_ROOT,
+    WEB_HOST,
+    WEB_PORT,
+)
 from .cli_comment_view import (
     COMMENT_DISPLAY_RULES,
     build_comment_display_groups,
@@ -22,6 +29,7 @@ from .comment_watcher import CommentWatchError, CommentWatcher
 from .state_io import StateLockTimeout, json_state_exists, read_json_state
 from .web_services import (
     WebServiceError,
+    delete_draft,
     list_all_drafts,
     run_analysis,
     run_doctor,
@@ -330,9 +338,103 @@ def _paginate_comment_groups(groups: list, page: int,
     return [grouped[note_id] for note_id in order], pagination, len(flattened)
 
 
+def _prefetch_missing_note_details(notifications: list,
+                                   groups: list) -> dict:
+    """为文章列表之外的评论笔记一次性补齐详情缓存。
+
+    评论仍应优先展示，因此单篇笔记读取失败只记入 warnings，不中断整页。
+    已存在的详情缓存不受 TTL 影响，避免后续生成提示词时反复访问平台。
+    """
+    articles = read_json_state(WEB_ARTICLES_FILE, default={}) or {}
+    article_ids = {
+        str(item.get("note_id", "") or "")
+        for item in articles.get("articles", [])
+        if isinstance(item, dict) and item.get("note_id")
+    }
+    details = read_json_state(NOTE_DETAILS_FILE, default={}) or {}
+    if not isinstance(details, dict):
+        details = {}
+
+    tokens = {}
+    for notification in notifications:
+        if not isinstance(notification, dict):
+            continue
+        item = notification.get("item_info", {}) or {}
+        note_id = str(item.get("id", "") or "")
+        token = str(item.get("xsec_token", "") or "")
+        if note_id and token:
+            tokens[note_id] = token
+    token_warning = ""
+    if tokens:
+        try:
+            XHSClient._merge_xsec_index(tokens)
+        except Exception as error:
+            # 令牌索引写入异常不应让最新评论整页不可见；详情读取仍可尝试
+            # 使用当前通知携带的令牌，错误随缓存摘要返回。
+            token_warning = f"保存笔记访问令牌失败: {error}"
+
+    group_by_id = {
+        str(group.get("note_id", "") or ""): group
+        for group in groups
+        if isinstance(group, dict) and group.get("note_id")
+    }
+    summary = {
+        "checked": len(group_by_id),
+        "fetched": 0,
+        "already_cached": 0,
+        "present_in_articles": 0,
+        "warnings": [],
+        "cache_path": os.path.abspath(NOTE_DETAILS_FILE),
+    }
+    if token_warning:
+        summary["warnings"].append({
+            "note_id": "",
+            "error": token_warning,
+        })
+    for note_id, group in group_by_id.items():
+        if note_id in article_ids:
+            summary["present_in_articles"] += 1
+            continue
+        cached = details.get(note_id)
+        if isinstance(cached, dict) and cached:
+            summary["already_cached"] += 1
+            detail = cached
+        else:
+            try:
+                detail = XHSClient.get_note_detail_cached(
+                    note_id,
+                    xsec_token=tokens.get(note_id, ""),
+                    force_refresh=False,
+                )
+                summary["fetched"] += 1
+                details[note_id] = detail
+            except Exception as error:
+                summary["warnings"].append({
+                    "note_id": note_id,
+                    "error": str(error),
+                })
+                continue
+        if (
+            str(group.get("note_title", "") or "") in {"", "无标题"}
+            and isinstance(detail, dict)
+            and detail.get("title")
+        ):
+            group["note_title"] = detail["title"]
+    return summary
+
+
 def _load_comments(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
                    note_id: str = "", refresh: bool = False) -> dict:
     archive = None
+    note_content_cache = {
+        "checked": 0,
+        "fetched": 0,
+        "already_cached": 0,
+        "present_in_articles": 0,
+        "warnings": [],
+        "cache_path": os.path.abspath(NOTE_DETAILS_FILE),
+        "source": "not_refreshed",
+    }
     if refresh or not json_state_exists(COMMENTS_FILE):
         with contextlib.redirect_stdout(io.StringIO()):
             notifications = XHSClient.get_notifications(
@@ -342,6 +444,10 @@ def _load_comments(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
             )
             # 先完整归档本轮通知，再把筛选条件应用到网页展示。
             current_groups = build_comment_groups(notifications, "")
+            note_content_cache = _prefetch_missing_note_details(
+                notifications, current_groups
+            )
+            note_content_cache["source"] = "notification_refresh"
             archive = save_comment_archive(current_groups)
     saved = read_json_state(COMMENTS_FILE, default={}) or {}
     groups = [
@@ -411,6 +517,7 @@ def _load_comments(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
         "groups": display_groups,
         "display": web_display,
         "archive": archive,
+        "note_content_cache": note_content_cache,
         "count": sum(len(group["comments"]) for group in raw_groups),
         "total_count": total_count,
         "pagination": pagination,
@@ -475,7 +582,15 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                 data = data.replace(
                     b"__CSRF_TOKEN__", csrf_token.encode("ascii")
                 )
-            self._send_bytes(200, data, content_type)
+            self.send_response(200)
+            self._security_headers()
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+            self.end_headers()
+            self.wfile.write(data)
 
         def _query_int(self, query: dict, name: str, default: int,
                        maximum: int) -> int:
@@ -502,6 +617,8 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                     )
                 elif parsed.path == "/styles.css":
                     self._asset("styles.css", "text/css; charset=utf-8")
+                elif parsed.path == "/logo.svg":
+                    self._asset("logo.svg", "image/svg+xml; charset=utf-8")
                 elif parsed.path == "/api/health":
                     self._send_json(200, {
                         "ok": True,
@@ -553,6 +670,14 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                     ))
                 elif parsed.path == "/api/drafts":
                     self._send_json(200, list_all_drafts())
+                elif parsed.path == "/api/daily-stats":
+                    from .web_services import daily_stats
+                    self._send_json(200, daily_stats())
+                elif parsed.path == "/api/note-detail":
+                    from .web_services import note_detail
+                    self._send_json(200, note_detail(
+                        {"note_id": query.get("note_id", [""])[0]}
+                    ))
                 else:
                     self._send_json(404, {"ok": False, "error": "未找到"})
             except (CommentWatchError, WebServiceError) as error:
@@ -609,6 +734,8 @@ def _handler_class(manager: WatchManager, csrf_token: str):
                     self._send_json(200, update_skipped(payload))
                 elif parsed.path == "/api/drafts/update-reply":
                     self._send_json(200, update_draft_reply(payload))
+                elif parsed.path == "/api/drafts/delete":
+                    self._send_json(200, delete_draft(payload))
                 elif parsed.path == "/api/drafts/send-all":
                     self._send_json(200, send_all_drafts(payload))
                 elif parsed.path == "/api/reply/send":

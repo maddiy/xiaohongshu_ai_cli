@@ -3,15 +3,27 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f6f8fa">
   <meta name="csrf-token" content="__CSRF_TOKEN__">
   <title>小红书AI智能运营系统</title>
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
   <div class="app-shell">
     <aside class="sidebar">
       <a class="brand" href="#dashboard" data-page-link="dashboard" aria-label="回到工作台">
-        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 64 64" focusable="false">
+            <defs><linearGradient id="brandRed" x1="9" y1="7" x2="55" y2="58" gradientUnits="userSpaceOnUse"><stop stop-color="#f06f78"/><stop offset="1" stop-color="#d95561"/></linearGradient></defs>
+            <rect x="3" y="3" width="58" height="58" rx="17" fill="url(#brandRed)"/>
+            <path d="M18.5 21.5 30.8 34 19.4 45.7" fill="none" stroke="#fff" stroke-width="7.2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M45.5 18.8 31 34l13.1 13.3" fill="none" stroke="#fff" stroke-width="7.2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M48.5 11.8v6.4M45.3 15h6.4" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>
+            <circle cx="52.8" cy="23" r="1.7" fill="#fff" opacity=".8"/>
+          </svg>
+        </span>
         <span><strong>小红书 AI</strong><small>智能运营系统</small></span>
       </a>
       <nav class="side-nav" aria-label="功能导航">
@@ -39,7 +51,7 @@
         </div>
       </header>
 
-      <main>
+      <main id="mainContent" tabindex="-1">
         <section id="pageDashboard" class="page-view active" data-page="dashboard">
           <div class="status-strip" aria-label="系统状态">
             <article class="status-card accent"><span class="status-icon">监</span><div><small>正在运行</small><strong id="activeCount">0 个监控</strong></div></article>
@@ -49,23 +61,17 @@
           </div>
           <div class="dashboard-grid">
             <article class="panel welcome-panel">
-              <p class="eyebrow">QUICK ACCESS</p>
-              <h2>今天要处理什么？</h2>
-              <p class="hint">每项功能都在独立页面中运行，不再需要在长页面里上下查找。</p>
-              <div class="quick-grid">
-                <button data-open-page="articles"><span>文</span><strong>最新文章</strong><small>复制 ID 或进入评论分析</small></button>
-                <button data-open-page="comments"><span>评</span><strong>最新评论</strong><small>点击回复按钮直接复制提示词</small></button>
-                <button data-open-page="drafts"><span>稿</span><strong>回复草稿</strong><small>查看待发送草稿</small></button>
-                <button data-open-page="monitor"><span>监</span><strong>自动监控</strong><small>发现新评论</small></button>
-                <button data-open-page="skipped"><span>排</span><strong>回复排除列表</strong><small>搜索、分页和删除记录</small></button>
-              </div>
+              <p class="eyebrow">DAILY OVERVIEW</p>
+              <h2>每日收发统计</h2>
+              <p class="hint">基于本地评论归档和发送记录，展示最近7天数据。</p>
+              <div id="dailyStats" class="daily-stats-container loading"><span class="loader"></span>正在统计数据…</div>
             </article>
             <aside class="panel boundary-panel">
               <p class="eyebrow">SAFETY BOUNDARY</p>
               <h2>操作边界</h2>
               <ul>
                 <li><span>01</span>评论候选不等于可回复，发送前继续在线复核。</li>
-                <li><span>02</span>网页只生成 AI 提示词，不直接发送人工回复。</li>
+                <li><span>02</span>提示词按钮不会发送；可编辑草稿仅在确认并在线复核后发送。</li>
                 <li><span>03</span>监控必须手动开启，页面关闭后不会后台运行。</li>
               </ul>
             </aside>

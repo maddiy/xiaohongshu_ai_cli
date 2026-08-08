@@ -162,12 +162,8 @@ class AIReplyMappingTests(unittest.TestCase):
 
     def test_reply_map_validation_rejects_unsafe_send_entries(self):
         errors = cli_ai._validate_reply_map({
-            "c1": {
-                "reply": "", "action": "send", "review": _valid_review(),
-            },
-            "c2": {
-                "reply": "回复", "action": "sent", "review": _valid_review(),
-            },
+            "c1": {"reply": "", "action": "send"},
+            "c2": {"reply": "回复", "action": "sent"},
         }, ["c1", "c2"])
         self.assertEqual(len(errors), 2)
         self.assertIn("reply 不能为空", errors[0])
@@ -175,20 +171,17 @@ class AIReplyMappingTests(unittest.TestCase):
 
     def test_reply_map_allows_empty_skip_and_archive(self):
         errors = cli_ai._validate_reply_map({
-            "c1": {
-                "reply": "", "action": "skip", "review": _valid_review(),
-            },
-            "c2": {
-                "reply": "", "action": "archive", "review": _valid_review(),
-            },
+            "c1": {"reply": "", "action": "skip"},
+            "c2": {"reply": "", "action": "archive"},
         }, ["c1", "c2"])
         self.assertEqual(errors, [])
 
-    def test_reply_map_requires_review_for_every_candidate(self):
+    def test_reply_map_accepts_entries_without_review(self):
+        # review 现在是可选的，缺少 review 时不应报错
         errors = cli_ai._validate_reply_map({
             "c1": {"reply": "回复", "action": "send"},
         }, ["c1", "c2"])
-        self.assertTrue(any("review 必须是对象" in item for item in errors))
+        self.assertFalse(any("review" in str(item) for item in errors))
         self.assertTrue(any("缺少映射" in item for item in errors))
 
     def test_fact_check_verdict_requires_traceable_source(self):

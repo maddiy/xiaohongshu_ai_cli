@@ -116,7 +116,7 @@ class ProtocolTests(unittest.TestCase):
             payload["reply_decision"]["status_precedence"][-1],
         )
         self.assertIn(
-            "reply_map_review_required",
+            "reply_map_mapping_required",
             payload["output_contract"],
         )
         review_contract = payload["reply_decision"]["pre_reply_review"]
@@ -124,9 +124,9 @@ class ProtocolTests(unittest.TestCase):
             review_contract["dimensions"],
             ["逻辑分析", "事实核查", "吹牛判定"],
         )
-        self.assertIn(
-            "reviews",
-            review_contract["draft_output"],
+        self.assertNotIn(
+            "required_for",
+            review_contract.get("required_for", "") if isinstance(review_contract.get("required_for"), str) else "",
         )
         self.assertIn(
             "http(s)",

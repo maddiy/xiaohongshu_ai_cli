@@ -2,6 +2,7 @@
 """在一个 xhs 会话内完成评论分页，避免每页重复启动 CLI 和读取 Cookie。"""
 
 import json
+import os
 import sys
 import time
 
@@ -137,7 +138,9 @@ def main():
         with XhsClient(
             cookies,
             timeout=request_timeout,
-            request_delay=0.2,
+            request_delay=float(
+                os.environ.get("XHS_COMMENT_HELPER_REQUEST_DELAY", "0.08")
+            ),
             max_retries=1,
         ) as client:
             # 通知通常携带一级评论或目标评论ID。先用top_comment_id直达

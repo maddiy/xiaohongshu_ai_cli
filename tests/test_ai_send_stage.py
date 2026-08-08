@@ -31,7 +31,7 @@ class AISendStageTests(unittest.TestCase):
     def test_send_stage_rejects_stale_preview_and_records_attempt(self):
         item = {
             "comment_id": "c1", "nickname": "用户", "content": "评论",
-            "reply": "回复", "action": "send", "review": _valid_review(),
+            "reply": "回复", "action": "send",
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             paths = self._paths(temp_dir)
@@ -64,7 +64,7 @@ class AISendStageTests(unittest.TestCase):
     ):
         item = {
             "comment_id": "c1", "nickname": "用户", "content": "评论",
-            "reply": "回复", "action": "send", "review": _valid_review(),
+            "reply": "回复", "action": "send",
         }
         scanner_class.return_value.verify_candidates_online.return_value = (
             [item], []

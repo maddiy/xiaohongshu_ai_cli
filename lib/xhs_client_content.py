@@ -1,5 +1,6 @@
 """XHSClient的笔记、令牌索引和通知读取能力。"""
 
+import datetime
 import json
 import os
 import time
@@ -18,8 +19,24 @@ class XHSContentMixin:
 
     @staticmethod
     def get_my_notes(max_pages: int = None, strict: bool = False):
-        """获取我的笔记列表，自动翻页。"""
-        from config import READ_PAGE_DELAY
+        """获取我的笔记列表，自动翻页。遇到本地已缓存的笔记ID时停止。"""
+        from config import READ_PAGE_DELAY, CACHE_DIR
+
+        # 加载本地已缓存的文章ID；命中后停止翻页避免全量拉取
+        cached_ids = set()
+        articles_cache_path = os.path.join(CACHE_DIR, "articles.json")
+        if json_state_exists(articles_cache_path):
+            try:
+                cached_data = read_json_state(articles_cache_path) or {}
+                for article in cached_data.get("articles", []):
+                    note_id = (
+                        article.get("note_id")
+                        or article.get("id", "")
+                    )
+                    if note_id:
+                        cached_ids.add(note_id)
+            except (json.JSONDecodeError, IOError, TypeError):
+                pass
 
         all_notes = []
         xsec_entries = {}
@@ -43,8 +60,12 @@ class XHSContentMixin:
             notes = data["data"]["notes"]
             if not notes:
                 break
+            hit_cached = False
             for note in notes:
                 note_id = note["id"]
+                if note_id in cached_ids:
+                    hit_cached = True
+                    continue
                 token = note.get("xsec_token", "")
                 all_notes.append({
                     "id": note_id,
@@ -61,6 +82,8 @@ class XHSContentMixin:
             page += 1
             if READ_PAGE_DELAY:
                 time.sleep(READ_PAGE_DELAY)
+            if hit_cached:
+                break
         if xsec_entries:
             XHSClient._merge_xsec_index(xsec_entries)
         return all_notes
@@ -146,6 +169,132 @@ class XHSContentMixin:
                     pass
             existing.update(new_entries)
             atomic_write_json(existing, path, mode=0o600)
+
+    @staticmethod
+    def get_note_detail(note_id: str, xsec_token: str = "") -> dict:
+        """读取单篇笔记详情（标题、正文desc、图片数等），不依赖本地缓存。
+
+        通过 xhs read <note_id> --json 读取。note_id 必须有值；
+        xsec_token 可选，能显著提高带风控笔记的读取成功率。
+        返回:
+          {
+            note_id, title, desc, image_count,
+            comment_count, like_count, collected_count, share_count,
+            nickname, xsec_token,
+          }
+        失败时抛出 RuntimeError；调用方决定是否降级。
+        """
+        note_id = str(note_id or "").strip()
+        if not note_id:
+            raise RuntimeError("笔记ID为空，无法读取笔记详情")
+        command = ["xhs", "read", note_id, "--json"]
+        if xsec_token:
+            command += ["--xsec-token", xsec_token]
+        data = XHSClient._run_xhs(command, timeout=30)
+        if not data.get("ok"):
+            err = data.get("error", {})
+            raise RuntimeError(
+                f"读取笔记详情失败: {err.get('message', str(data))}"
+            )
+        items = data.get("data", {}).get("items", []) or []
+        if not items:
+            raise RuntimeError("读取笔记详情返回为空")
+        card = items[0].get("note_card", {}) or {}
+        interact = card.get("interact_info", {}) or {}
+        user = card.get("user", {}) or {}
+        token = xsec_token or card.get("xsec_token", "") or ""
+        # 提取图片 URL：图文笔记正文常写在图片里，需把图片交给 AI 识别。
+        # image_list 元素结构随平台版本变化，这里做防御性多 key 提取。
+        images = []
+        for index, img in enumerate(card.get("image_list", []) or []):
+            if not isinstance(img, dict):
+                continue
+            info = img.get("info_list", [{}])[0] if isinstance(
+                img.get("info_list"), list
+            ) and img.get("info_list") else img
+            info = info if isinstance(info, dict) else {}
+            url = (
+                img.get("url_pre")
+                or img.get("url_default")
+                or img.get("url")
+                or info.get("url_pre")
+                or info.get("url_default")
+                or info.get("url")
+                or ""
+            )
+            if url:
+                images.append({"index": index, "url": url})
+        detail = {
+            "note_id": note_id,
+            "title": card.get("title", "") or "",
+            "desc": card.get("desc", "") or "",
+            "note_type": "video" if card.get("type") == "video" else "image",
+            "image_count": len(card.get("image_list", []) or []),
+            "images": images,
+            "comment_count": interact.get("comment_count", ""),
+            "like_count": interact.get("liked_count", ""),
+            "collected_count": interact.get("collected_count", ""),
+            "share_count": interact.get("share_count", ""),
+            "nickname": user.get("nickname", ""),
+            "xsec_token": token,
+            "read_at": datetime.datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            ),
+        }
+        return detail
+
+    @staticmethod
+    def get_note_detail_cached(
+        note_id: str, xsec_token: str = "", force_refresh: bool = False
+    ) -> dict:
+        """读取笔记详情并缓存到 .cache/note_details.json。
+
+        先查本地缓存；命中且未过时时直接返回。未命中或 force_refresh
+        时调用 get_note_detail 读取平台并原子写入缓存（0600权限）。
+        平台读取失败时不覆盖已有缓存，抛错由调用方决定是否降级。
+        """
+        from config import CACHE_TTL_MINUTES, NOTE_DETAILS_FILE
+
+        note_id = str(note_id or "").strip()
+        cache = {}
+        path = NOTE_DETAILS_FILE
+        if json_state_exists(path):
+            try:
+                cache = read_json_state(path) or {}
+            except (json.JSONDecodeError, IOError, TypeError):
+                cache = {}
+        entry = cache.get(note_id) or {}
+        if (
+            not force_refresh
+            and isinstance(entry, dict)
+            and entry.get("title")
+            and entry.get("read_at")
+        ):
+            try:
+                read_at = datetime.datetime.fromisoformat(entry["read_at"])
+                age_minutes = (
+                    datetime.datetime.now().astimezone() - read_at
+                ).total_seconds() / 60.0
+                if age_minutes < (CACHE_TTL_MINUTES or 30):
+                    return entry
+            except (ValueError, TypeError):
+                pass
+        # 平台读取失败时保留旧缓存并重新抛出
+        detail = XHSClient.get_note_detail(note_id, xsec_token=xsec_token)
+        if not detail.get("title"):
+            raise RuntimeError("笔记详情缺少标题，读取失败")
+        # 合并保留旧 token（若本次未返回新 token）
+        detail.setdefault("xsec_token", entry.get("xsec_token", "") or "")
+        with file_lock(f"{path}.lock"):
+            existing = {}
+            if json_state_exists(path):
+                try:
+                    existing = read_json_state(path) or {}
+                except (json.JSONDecodeError, IOError, TypeError):
+                    pass
+            existing[note_id] = detail
+            atomic_write_json(existing, path, mode=0o600)
+        return detail
 
     @staticmethod
     def get_notifications(

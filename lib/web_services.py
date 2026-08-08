@@ -29,6 +29,7 @@ from .cli_support import (
 from .replier import Replier
 from .scanner import CommentScanner
 from .state_io import (
+    StateLockTimeout,
     json_state_exists,
     read_json_state,
     read_workflow_state,
@@ -542,16 +543,20 @@ def send_reply_draft(payload: dict) -> dict:
                 note_id, comment_id, reply_text, comment
             )
     except Exception as error:
+        reported_error = (
+            _workflow_busy_error(error)
+            if isinstance(error, StateLockTimeout) else error
+        )
         try:
             _web_send_audit(
                 paths, note_id, command_id, workflow_id, "failed",
-                {"error": str(error), "error_type": getattr(
-                    error, "error_type", "web_send_failed"
+                {"error": str(reported_error), "error_type": getattr(
+                    reported_error, "error_type", "web_send_failed"
                 )},
             )
         except Exception:
             pass
-        raise
+        raise reported_error from None
 
     try:
         _web_send_audit(
@@ -699,8 +704,37 @@ def list_all_drafts() -> dict:
     }
 
 
+def _invalidate_draft_confirmation(state: dict) -> bool:
+    """草稿内容变化后停用旧确认绑定，避免CLI误发旧预览。"""
+    changed = bool(state.get("active_comment_ids"))
+    state["active_comment_ids"] = []
+    active_batch = state.get("active_batch")
+    if (
+        isinstance(active_batch, dict)
+        and active_batch.get("status") not in {
+            "completed", "completed_with_failures", "superseded",
+        }
+    ):
+        active_batch["status"] = "superseded"
+        active_batch["superseded_at"] = (
+            datetime.datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
+        )
+        changed = True
+    return changed
+
+
+def _workflow_busy_error(error: Exception) -> WebServiceError:
+    return WebServiceError(
+        f"该笔记正由另一流程处理，请稍后再试：{error}",
+        error_type="workflow_busy",
+        details={"automatic_retry": True, "retry_after_seconds": 5},
+    )
+
+
 def update_draft_reply(payload: dict) -> dict:
-    """更新草稿中的回复正文，不改变发送状态或批次绑定。"""
+    """安全更新非终态草稿，并使旧确认绑定失效。"""
     note_id = _text(payload.get("note_id"), "笔记ID", 128, required=True)
     comment_id = _text(
         payload.get("comment_id"), "评论定位信息", 256, required=True
@@ -710,35 +744,119 @@ def update_draft_reply(payload: dict) -> dict:
     )
 
     paths = workflow_paths(note_id)
-    if not json_state_exists(paths["drafts"]):
-        raise WebServiceError(
-            "该笔记没有草稿文件", error_type="draft_not_found"
-        )
+    try:
+        with workflow_lock(note_id, timeout=5.0):
+            if not json_state_exists(paths["drafts"]):
+                raise WebServiceError(
+                    "该笔记没有草稿文件", error_type="draft_not_found"
+                )
+            state = read_workflow_state(
+                paths["drafts"], default={}, role="program_state"
+            ) or {}
+            if not isinstance(state, dict):
+                raise WebServiceError(
+                    "草稿文件格式错误", error_type="draft_corrupt"
+                )
 
-    state = read_workflow_state(
-        paths["drafts"], default={}, role="program_state"
-    ) or {}
-    if not isinstance(state, dict):
-        raise WebServiceError("草稿文件格式错误", error_type="draft_corrupt")
+            found = None
+            for item in state.get("drafts", []):
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("comment_id", "") or "") == comment_id
+                ):
+                    found = item
+                    break
+            if found is None:
+                raise WebServiceError(
+                    "草稿中找不到该评论",
+                    error_type="comment_not_in_draft",
+                )
+            status = str(found.get("send_status", "") or "")
+            if status in NON_RESEND_STATUSES:
+                raise WebServiceError(
+                    "终态或发送中草稿不能修改",
+                    error_type=(
+                        "uncertain_send_state"
+                        if status == "sending" else "terminal_reply_state"
+                    ),
+                )
+            if str(found.get("action", "send") or "send") != "send":
+                raise WebServiceError(
+                    "只有待发送草稿可以修改",
+                    error_type="draft_not_editable",
+                )
+            if str(found.get("reply", "") or "") == reply_text:
+                return {
+                    "ok": True, "updated": False,
+                    "batch_invalidated": False,
+                }
+            found["reply"] = reply_text
+            found["draft_source"] = "web_manual_edit"
+            invalidated = _invalidate_draft_confirmation(state)
+            write_json(state, paths["drafts"])
+            return {
+                "ok": True, "updated": True,
+                "batch_invalidated": invalidated,
+            }
+    except StateLockTimeout as error:
+        raise _workflow_busy_error(error) from None
 
-    found = False
-    for item in state.get("drafts", []):
-        if (
-            isinstance(item, dict)
-            and str(item.get("comment_id", "") or "") == comment_id
-        ):
-            item["reply"] = reply_text
-            item["draft_source"] = "web_manual_edit"
-            found = True
-            break
 
-    if not found:
-        raise WebServiceError(
-            "草稿中找不到该评论", error_type="comment_not_in_draft"
-        )
+def delete_draft(payload: dict) -> dict:
+    """删除草稿中的指定条目（不改变已发送/已失败的终态记录）。"""
+    note_id = _text(payload.get("note_id"), "笔记ID", 128, required=True)
+    comment_id = _text(
+        payload.get("comment_id"), "评论定位信息", 256, required=True
+    )
 
-    write_json(state, paths["drafts"])
-    return {"ok": True, "updated": True}
+    paths = workflow_paths(note_id)
+    try:
+        with workflow_lock(note_id, timeout=5.0):
+            if not json_state_exists(paths["drafts"]):
+                raise WebServiceError(
+                    "该笔记没有草稿文件", error_type="draft_not_found"
+                )
+            state = read_workflow_state(
+                paths["drafts"], default={}, role="program_state"
+            ) or {}
+            if not isinstance(state, dict):
+                raise WebServiceError(
+                    "草稿文件格式错误", error_type="draft_corrupt"
+                )
+
+            drafts = state.get("drafts", [])
+            found = None
+            for item in drafts:
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("comment_id", "") or "") == comment_id
+                ):
+                    found = item
+                    break
+            if found is None:
+                raise WebServiceError(
+                    "草稿中找不到该评论",
+                    error_type="comment_not_in_draft",
+                )
+            status = str(found.get("send_status", "") or "")
+            if status in NON_RESEND_STATUSES:
+                raise WebServiceError(
+                    "终态或发送中记录不能删除",
+                    error_type=(
+                        "uncertain_send_state"
+                        if status == "sending" else "terminal_reply_state"
+                    ),
+                )
+            state["drafts"] = [
+                item for item in drafts if item is not found
+            ]
+            _invalidate_draft_confirmation(state)
+            write_json(state, paths["drafts"])
+            return {
+                "ok": True, "deleted": True, "comment_id": comment_id,
+            }
+    except StateLockTimeout as error:
+        raise _workflow_busy_error(error) from None
 
 
 def send_all_drafts(payload: dict) -> dict:
@@ -754,19 +872,48 @@ def send_all_drafts(payload: dict) -> dict:
     if not drafts:
         return {"ok": True, "message": "没有可发送的草稿", "sent": 0, "failed": 0}
 
+    uncertain = next((
+        draft for draft in drafts
+        if draft.get("send_status") == "sending"
+    ), None)
+    if uncertain:
+        raise WebServiceError(
+            "存在发送结果不确定的草稿，请先人工核对，批量发送未开始",
+            error_type="uncertain_send_state",
+        )
+
     results = []
     total_sent = 0
     total_failed = 0
+    total_skipped = 0
+    paused = False
+    pause_reason = ""
+    stop_error_types = {
+        "api_error", "audit_unavailable", "not_authenticated",
+        "online_verification_failed", "rate_limited", "session_error",
+        "uncertain_send_state", "verification_required", "workflow_busy",
+    }
 
     for draft in drafts:
         if draft.get("in_skipped"):
             results.append({
                 "comment_id": draft["comment_id"],
                 "nickname": draft["nickname"],
-                "ok": False,
+                "ok": True,
+                "status": "skipped",
                 "error": "该评论已在回复排除列表中",
             })
-            total_failed += 1
+            total_skipped += 1
+            continue
+        if not str(draft.get("reply", "") or "").strip():
+            results.append({
+                "comment_id": draft["comment_id"],
+                "nickname": draft["nickname"],
+                "ok": True,
+                "status": "skipped",
+                "error": "回复正文为空",
+            })
+            total_skipped += 1
             continue
 
         try:
@@ -786,6 +933,10 @@ def send_all_drafts(payload: dict) -> dict:
                 total_sent += 1
             else:
                 total_failed += 1
+                if result.get("error_type") in stop_error_types:
+                    paused = True
+                    pause_reason = str(result.get("error_type") or "")
+                    break
         except WebServiceError as error:
             results.append({
                 "comment_id": draft["comment_id"],
@@ -795,8 +946,9 @@ def send_all_drafts(payload: dict) -> dict:
                 "error": str(error),
             })
             total_failed += 1
-            # 不确定发送状态时停止批量操作
-            if error.error_type == "uncertain_send_state":
+            if error.error_type in stop_error_types:
+                paused = True
+                pause_reason = error.error_type
                 break
         except Exception as error:
             results.append({
@@ -806,11 +958,162 @@ def send_all_drafts(payload: dict) -> dict:
                 "error": str(error),
             })
             total_failed += 1
+            paused = True
+            pause_reason = "unexpected_error"
+            break
 
     return {
-        "ok": total_sent > 0 or total_failed == 0,
+        "ok": not paused and total_failed == 0,
         "sent": total_sent,
         "failed": total_failed,
+        "skipped": total_skipped,
         "total": len(drafts),
+        "processed": len(results),
+        "remaining": max(0, len(drafts) - len(results)),
+        "paused": paused,
+        "pause_reason": pause_reason,
         "results": results,
     }
+
+
+def daily_stats() -> dict:
+    """统计最近7天每天收到和回复的评论数量。"""
+    from collections import defaultdict
+    import datetime as dt
+
+    today = dt.date.today()
+    seven_days_ago = today - dt.timedelta(days=6)
+    dates = [
+        (seven_days_ago + dt.timedelta(days=i)).isoformat()
+        for i in range(7)
+    ]
+    received_by_date: dict[str, int] = defaultdict(int)
+    sent_by_date: dict[str, int] = defaultdict(int)
+
+    # 统计收到的评论
+    try:
+        with open(COMMENTS_FILE, "r", encoding="utf-8") as file:
+            archive = json.load(file)
+    except Exception:
+        archive = None
+
+    if isinstance(archive, dict):
+        for group in archive.get("groups", []) or []:
+            for comment in group.get("comments", []) or []:
+                time_str = comment.get("time", "")
+                if not time_str:
+                    continue
+                try:
+                    comment_date = time_str[:10]
+                    if comment_date in dates or comment_date == today.isoformat():
+                        for date_str in dates:
+                            if comment_date <= date_str:
+                                break
+                    if seven_days_ago.isoformat() <= comment_date <= today.isoformat():
+                        received_by_date[comment_date] += 1
+                except Exception:
+                    continue
+
+    # 统计发送的回复（扫描所有工作流下的 drafts.json）
+    workflows_dir = WORK_DIR  # WORK_DIR 即 .cache/workflows
+    if os.path.isdir(workflows_dir):
+        for note_dir in sorted(os.listdir(workflows_dir)):
+            note_path = os.path.join(workflows_dir, note_dir)
+            if not os.path.isdir(note_path):
+                continue
+            draft_file = os.path.join(note_path, "drafts.json")
+            if not os.path.isfile(draft_file):
+                continue
+            try:
+                draft_data = read_workflow_state(
+                    draft_file, default={}, role="program_state"
+                )
+            except Exception:
+                continue
+            if not isinstance(draft_data, dict):
+                continue
+            for d in draft_data.get("drafts", []) or []:
+                if not isinstance(d, dict):
+                    continue
+                if d.get("send_status") != "sent":
+                    continue
+                sent_at = d.get("sent_at", "")
+                if not sent_at:
+                    continue
+                try:
+                    sent_date = sent_at[:10]
+                    if seven_days_ago.isoformat() <= sent_date <= today.isoformat():
+                        sent_by_date[sent_date] += 1
+                except Exception:
+                    continue
+
+    last_7 = []
+    for d in dates:
+        last_7.append({
+            "date": d,
+            "received": received_by_date.get(d, 0),
+            "sent": sent_by_date.get(d, 0),
+        })
+
+    return {
+        "ok": True,
+        "today": {
+            "date": today.isoformat(),
+            "received": received_by_date.get(today.isoformat(), 0),
+            "sent": sent_by_date.get(today.isoformat(), 0),
+        },
+        "last_7_days": last_7,
+    }
+
+
+def note_detail(payload: dict) -> dict:
+    """返回指定笔记的本地缓存详情（标题+正文desc等），未命中时按需读取并缓存。
+
+    供前端生成回复提示词时结合笔记正文使用。读取平台失败时返回
+    ok=false 和可展示错误；已有缓存命中时直接返回，不访问平台。
+    """
+    note_id = _text(payload.get("note_id"), "笔记ID", 128, required=True)
+    # 回复提示词只需稳定的笔记上下文。最新评论刷新阶段已经为文章列表之外
+    # 的笔记补齐详情；只要本地存在就直接使用，不因 TTL 到期重复访问平台。
+    cached = _cached_note_detail(note_id)
+    if cached:
+        return {
+            "ok": True,
+            "cached": True,
+            "note": cached,
+        }
+    try:
+        detail = XHSClient.get_note_detail_cached(
+            note_id, xsec_token="", force_refresh=False
+        )
+    except Exception as error:
+        # 平台读取失败时尝试返回已有缓存，避免提示词完全缺失正文
+        cached = _cached_note_detail(note_id)
+        if cached:
+            return {
+                "ok": True,
+                "cached": True,
+                "note": cached,
+                "warning": f"平台刷新失败，已使用本地缓存: {error}",
+            }
+        raise WebServiceError(
+            f"读取笔记详情失败: {error}",
+            error_type="note_detail_fetch_failed",
+        )
+    return {
+        "ok": True,
+        "cached": False,
+        "note": detail,
+    }
+
+
+def _cached_note_detail(note_id: str) -> dict:
+    """只读本地笔记详情缓存，不触发平台请求；失败时返回空 dict。"""
+    from config import NOTE_DETAILS_FILE
+
+    try:
+        cache = read_json_state(NOTE_DETAILS_FILE, default={}) or {}
+    except Exception:
+        return {}
+    entry = cache.get(note_id) or {}
+    return entry if isinstance(entry, dict) else {}
