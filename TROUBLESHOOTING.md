@@ -20,6 +20,7 @@ python3 main.py ai-reply --note-id <笔记ID> --action status
 | `retry_confirmation_required` | 重试失败评论但没有用户授权 | 先向用户说明失败原因并取得明确授权 |
 | `audit_unavailable` | 开始事件无法安全写入 | 修复本地状态权限或损坏后再执行；业务动作未运行 |
 | `session_error` | 持久helper异常结束或响应超时 | helper已被终止；检查脱敏诊断，修复后从安全状态接续 |
+| `network_dns_failure` | 小红书接口域名暂时无法解析 | 检查网络、DNS或代理后重试；不代表登录失效，失败时不会更新评论归档或发送回复 |
 | `watch_already_running` | 相同过滤条件已有监控进程 | 使用现有监控或先手动停止，不要启动重复进程 |
 | `watch_error` | 监控参数、通知读取或本地状态异常 | 按错误修复后重新手动启动；程序不会后台重试 |
 

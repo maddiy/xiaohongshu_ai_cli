@@ -1,6 +1,7 @@
 """通知、评论分页、令牌和楼中楼传输测试。"""
 
 from tests.support import *
+from types import SimpleNamespace
 
 
 class XHSClientTests(unittest.TestCase):
@@ -131,6 +132,18 @@ class XHSClientTests(unittest.TestCase):
         result = CommentScanner(client, "author-user").scan_via_notifications(verbose=False)
         self.assertFalse(result["reply_status_verified"])
         self.assertIn("network unavailable", result["scan_error"])
+
+    def test_cli_error_marks_dns_failure_with_actionable_message(self):
+        result = SimpleNamespace(
+            stdout="",
+            stderr=(
+                "api_error: Request failed after 3 retries: [Errno 8] "
+                "nodename nor servname provided, or not known"
+            ),
+        )
+        message = XHSClient._cli_error_message(result)
+        self.assertIn("network_dns_failure", message)
+        self.assertIn("DNS", message)
 
     @patch("lib.xhs_client.XHSClient._run_xhs")
     def test_notifications_strict_mode_does_not_hide_failure(self, run_xhs):

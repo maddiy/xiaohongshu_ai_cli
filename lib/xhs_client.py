@@ -306,7 +306,21 @@ class XHSClient(XHSContentMixin, XHSCommentsMixin, XHSStateMixin):
                         return f"{code}: {message}"
                     if code or message:
                         return code or message
-        return (result.stderr or "").strip() or stdout[:200] or "无错误详情"
+        detail = (result.stderr or "").strip() or stdout[:200] or "无错误详情"
+        # macOS/Python在DNS不可用时会给出这段系统错误。转成稳定、可行动的
+        # 诊断，避免AI把瞬时网络错误误判成登录或评论数据故障。
+        lowered = detail.casefold()
+        if (
+            "nodename nor servname" in lowered
+            or "name or service not known" in lowered
+            or "temporary failure in name resolution" in lowered
+        ):
+            return (
+                "network_dns_failure: 无法解析小红书接口域名；"
+                "请检查网络、DNS或代理后重试（原始错误："
+                f"{detail[:180]}）"
+            )
+        return detail
 
     @staticmethod
     def _run_xhs(cmd: list, timeout: int = 30) -> dict:

@@ -207,7 +207,17 @@ def cmd_comments(args):
         raw_groups = build_comment_groups(notifications, args.note_id or "")
         groups = build_comment_display_groups(raw_groups)
     except RuntimeError as error:
-        print_json({"ok": False, "error": str(error)}) if args.json \
+        message = str(error)
+        error_type = "network_dns_failure" if "network_dns_failure:" in message else "api_error"
+        print_json({
+            "ok": False,
+            "error_type": error_type,
+            "error": message,
+            "next": (
+                "检查网络、DNS或代理后重试；本次未更新本地评论归档"
+                if error_type == "network_dns_failure" else "检查登录状态和网络后重试"
+            ),
+        }) if args.json \
             else print(f"❌ 读取最新评论失败: {error}")
         return
     try:

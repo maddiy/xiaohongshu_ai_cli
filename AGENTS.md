@@ -462,6 +462,8 @@ completed/failed事件、参数摘要、结果和错误，不保存评论正文�
 - `articles`对平台是只读操作，但可能更新本地0600敏感`xsec_index.json`。
 - `comments`对平台是只读操作，但会累计更新本地
   `.cache/comments.json`；评论正文不截断。
+- `comments`返回`network_dns_failure`时，表示接口域名暂时无法解析；检查网络、
+  DNS或代理后重试，不得误判为登录失效或自动切换到旧缓存冒充最新结果。
 - 传统`send --resume`只改变提示文案；终态和排除过滤无论是否添加该参数
   都始终执行。
 
