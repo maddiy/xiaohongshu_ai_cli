@@ -93,3 +93,6 @@ SKIPPED_FILE = os.path.join(CACHE_DIR, "skipped.json")  # 跳过列表存储路�
 # 笔记详情缓存（标题+正文desc+图片数等），供回复提示词结合笔记正文使用。
 # 0600权限；属于本地只读缓存，不是回复工作流状态。
 NOTE_DETAILS_FILE = os.path.join(CACHE_DIR, "note_details.json")
+
+# 笔记 Markdown 缓存目录（每篇笔记独立 .md 文件，0600权限）
+NOTES_MD_DIR = os.path.join(CACHE_DIR, "notes_md")

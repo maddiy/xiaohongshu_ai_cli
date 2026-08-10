@@ -320,14 +320,36 @@ class XHSClient(XHSContentMixin, XHSCommentsMixin, XHSStateMixin):
                 "请检查网络、DNS或代理后重试（原始错误："
                 f"{detail[:180]}）"
             )
+        if (
+            "proxyerror" in lowered
+            or "503 service unavailable" in lowered
+            or "httpcore.proxyerror" in lowered
+        ):
+            return (
+                "network_proxy_failure: 系统HTTP代理不可用（503），"
+                "可能是代理服务已关闭或配置错误；"
+                "请在终端执行 export XHS_NO_PROXY=1 绕过代理后重试，"
+                "或检查系统代理设置（原始错误："
+                f"{detail[:180]}）"
+            )
         return detail
 
     @staticmethod
     def _run_xhs(cmd: list, timeout: int = 30) -> dict:
         """执行 xhs CLI 命令并检查返回码，返回解析后的 JSON"""
+        # XHS_NO_PROXY=1 时绕过系统代理，防止代理不可用导致 503。
+        env = os.environ.copy()
+        if os.environ.get("XHS_NO_PROXY", "").strip() == "1":
+            env.pop("HTTP_PROXY", None)
+            env.pop("http_proxy", None)
+            env.pop("HTTPS_PROXY", None)
+            env.pop("https_proxy", None)
+            env.pop("ALL_PROXY", None)
+            env.pop("all_proxy", None)
+            env["no_proxy"] = "*"
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout
+                cmd, capture_output=True, text=True, timeout=timeout, env=env
             )
         except subprocess.TimeoutExpired:
             # TimeoutExpired 的默认文本会包含完整命令参数，其中可能带有

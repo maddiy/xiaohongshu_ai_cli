@@ -140,6 +140,7 @@ def _load_articles(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
             "count": len(all_articles),
         }, WEB_ARTICLES_FILE, indent=2)
         source = "online_full" if full_refresh else "online_first"
+        note_content_cache = _schedule_article_detail_prefetch(all_articles)
     elif refresh:
         # 增量刷新：只读最新10篇，与本地缓存合并
         with contextlib.redirect_stdout(io.StringIO()):
@@ -162,6 +163,7 @@ def _load_articles(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
             "count": len(all_articles),
         }, WEB_ARTICLES_FILE, indent=2)
         source = "online_incremental"
+        note_content_cache = _schedule_article_detail_prefetch(all_articles)
     else:
         cached = read_json_state(WEB_ARTICLES_FILE, default={}) or {}
         all_articles = [
@@ -169,6 +171,10 @@ def _load_articles(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
             if isinstance(item, dict)
         ]
         source = "cache"
+        note_content_cache = {
+            "source": "not_refreshed",
+            "scheduled": False,
+        }
     try:
         note_details = read_json_state(NOTE_DETAILS_FILE, default={}) or {}
     except (OSError, json.JSONDecodeError, TypeError):
@@ -212,6 +218,7 @@ def _load_articles(page: int = 1, page_size: int = DEFAULT_CONTENT_PAGE_SIZE,
         "source": source,
         "sort": sort,
         "search": search,
+        "note_content_cache": note_content_cache,
     }
 
 
@@ -387,6 +394,96 @@ def _schedule_note_detail_prefetch(notifications: list, groups: list) -> dict:
             str(group.get("note_id", "") or "")
             for group in safe_groups if group.get("note_id")
         }),
+    }
+
+
+def _schedule_article_detail_prefetch(articles: list) -> dict:
+    """后台缓存前10篇未缓存的笔记正文（含Markdown），不阻塞文章列表返回。"""
+    if not articles:
+        return {"source": "no_articles", "scheduled": False}
+    details = {}
+    try:
+        details = read_json_state(NOTE_DETAILS_FILE, default={}) or {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    if not isinstance(details, dict):
+        details = {}
+    top_note_ids = [str(a.get("note_id", "") or "") for a in articles[:10]]
+    top_note_ids = [nid for nid in top_note_ids if nid]
+    uncached_ids = [
+        nid for nid in top_note_ids
+        if nid not in details
+        or not isinstance(details.get(nid), dict)
+        or (
+            not details.get(nid, {}).get("content_text")
+            and not details.get(nid, {}).get("fetch_failed")
+        )
+    ]
+    if not uncached_ids:
+        return {
+            "source": "all_cached",
+            "scheduled": False,
+            "checked": len(top_note_ids),
+            "uncached_count": 0,
+        }
+
+    # 构建 note_id → title 查找表，失败时至少保存标题
+    title_lookup = {}
+    for a in articles[:50]:  # 多取一些覆盖合并后的文章
+        nid = str(a.get("note_id", "") or "").strip()
+        if nid and nid not in title_lookup:
+            title_lookup[nid] = str(a.get("title", "") or "").strip()
+
+    success_count = 0
+    failed_count = 0
+
+    def run() -> None:
+        nonlocal success_count, failed_count
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        for nid in uncached_ids:
+            try:
+                XHSClient.get_note_detail_cached(nid)
+                success_count += 1
+            except Exception:
+                # 保存失败标记，避免下次重复尝试
+                try:
+                    existing = (
+                        read_json_state(NOTE_DETAILS_FILE, default={}) or {}
+                    )
+                except (OSError, json.JSONDecodeError, TypeError):
+                    existing = {}
+                if not isinstance(existing, dict):
+                    existing = {}
+                title = title_lookup.get(nid, "")
+                existing[nid] = {
+                    "note_id": nid,
+                    "title": title,
+                    "desc": "",
+                    "content_text": "",
+                    "nickname": "",
+                    "image_count": 0,
+                    "images": [],
+                    "fetch_failed": True,
+                    "failed_at": now,
+                }
+                try:
+                    write_json(existing, NOTE_DETAILS_FILE, indent=2)
+                except (OSError, TypeError):
+                    pass
+                failed_count += 1
+
+    threading.Thread(
+        target=run,
+        name="xhs-article-detail-prefetch",
+        daemon=True,
+    ).start()
+    return {
+        "source": "background_scheduled",
+        "scheduled": True,
+        "checked": len(top_note_ids),
+        "uncached_count": len(uncached_ids),
+        "cache_path": os.path.abspath(NOTE_DETAILS_FILE),
     }
 
 

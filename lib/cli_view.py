@@ -4,8 +4,9 @@ import json
 import math
 import os
 import shlex
+import threading
 
-from config import CACHE_DIR, COMMENTS_FILE
+from config import CACHE_DIR, COMMENTS_FILE, NOTE_DETAILS_FILE
 from .cli_support import (
     build_comment_groups,
     build_comment_display_groups,
@@ -100,6 +101,33 @@ def cmd_articles(args):
             # 重新编号
             for idx, a in enumerate(articles, start=1):
                 a["index"] = idx
+
+            # 后台缓存前十篇未缓存的笔记正文
+            if new_articles:
+                top_note_ids = [a["note_id"] for a in new_articles[:10]]
+                existing_details = {}
+                if json_state_exists(NOTE_DETAILS_FILE):
+                    try:
+                        existing_details = (
+                            read_json_state(NOTE_DETAILS_FILE) or {}
+                        )
+                    except (json.JSONDecodeError, IOError, TypeError):
+                        pass
+                uncached_ids = [
+                    nid for nid in top_note_ids
+                    if nid not in existing_details
+                    or not existing_details.get(nid, {}).get("content_text")
+                ]
+                if uncached_ids:
+                    def _cache_note_details():
+                        for nid in uncached_ids:
+                            try:
+                                XHSClient.get_note_detail_cached(nid)
+                            except Exception:
+                                pass
+                    threading.Thread(
+                        target=_cache_note_details, daemon=True
+                    ).start()
 
             if args.json and (
                 len(articles) > page_size

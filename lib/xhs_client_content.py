@@ -19,6 +19,116 @@ class XHSContentMixin:
     """笔记列表、xsec索引和评论通知。"""
 
     @staticmethod
+    def _note_to_markdown(detail: dict) -> str:
+        """将笔记详情字典转换为可读的 Markdown 文本。"""
+        title = str(detail.get("title", "") or "").strip()
+        nickname = str(detail.get("nickname", "") or "").strip()
+        desc = str(detail.get("desc", "") or "").strip()
+        content_text = str(detail.get("content_text", "") or "").strip()
+        like_count = detail.get("like_count", "")
+        comment_count = detail.get("comment_count", "")
+        collected_count = detail.get("collected_count", "")
+        share_count = detail.get("share_count", "")
+        note_type = detail.get("note_type", "")
+        image_count = detail.get("image_count", 0)
+        images = detail.get("images") if isinstance(detail.get("images"), list) else []
+        ocr_status = str(detail.get("ocr_status", "") or "").strip()
+        read_at = str(detail.get("read_at", "") or "")
+        note_id = str(detail.get("note_id", "") or "")
+
+        lines = []
+        # 标题
+        lines.append(f"# {title}" if title else "# 无标题")
+        lines.append("")
+
+        # 元信息行
+        meta_parts = []
+        if nickname:
+            meta_parts.append(f"作者：{nickname}")
+        if like_count:
+            meta_parts.append(f"❤️ {like_count}")
+        if comment_count:
+            meta_parts.append(f"💬 {comment_count}")
+        if collected_count:
+            meta_parts.append(f"⭐ {collected_count}")
+        if share_count:
+            meta_parts.append(f"🔗 {share_count}")
+        if note_type:
+            type_label = "视频笔记" if note_type == "video" else "图文笔记"
+            meta_parts.append(f"类型：{type_label}")
+        if image_count:
+            meta_parts.append(f"图片：{image_count}张")
+        if read_at:
+            meta_parts.append(f"缓存时间：{read_at}")
+        if meta_parts:
+            lines.append(" | ".join(meta_parts))
+            lines.append("")
+
+        # 正文
+        body = content_text or desc
+        if body:
+            lines.append("## 正文")
+            lines.append("")
+            lines.append(body)
+            lines.append("")
+        elif not body and image_count > 0:
+            lines.append("## 正文")
+            lines.append("")
+            lines.append(
+                "*（笔记正文在图片中，OCR 未识别到足够文字内容）*"
+            )
+            lines.append("")
+
+        # 图片
+        if images:
+            lines.append("## 图片")
+            lines.append("")
+            for img in images:
+                if not isinstance(img, dict):
+                    continue
+                idx = img.get("index", "")
+                url = img.get("url", "")
+                ocr_text = ""
+                if isinstance(img.get("text"), str) and img.get("text", "").strip():
+                    ocr_text = img["text"].strip()
+                is_text = img.get("is_text_image", False)
+                tag = " [图文]" if is_text else ""
+                lines.append(f"### 图{idx + 1}{tag}" if isinstance(idx, int) else f"### 图片{tag}")
+                lines.append("")
+                if url:
+                    lines.append(f"![]({url})")
+                    lines.append("")
+                if ocr_text:
+                    lines.append(f"> {ocr_text}")
+                    lines.append("")
+            lines.append("")
+
+        # OCR 状态
+        if ocr_status and ocr_status not in ("not_needed",):
+            lines.append("---")
+            lines.append(f"*OCR 状态：{ocr_status}*")
+            lines.append("")
+
+        # 笔记 ID 尾注
+        if note_id:
+            lines.append(f"`{note_id}`")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _save_note_markdown(note_id: str, markdown_text: str) -> None:
+        """保存笔记 Markdown 到 .cache/notes_md/<note_id>.md（0600权限）。"""
+        from config import NOTES_MD_DIR
+
+        os.makedirs(NOTES_MD_DIR, mode=0o700, exist_ok=True)
+        md_path = os.path.join(NOTES_MD_DIR, f"{note_id}.md")
+        tmp = f"{md_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(markdown_text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, md_path)
+
+    @staticmethod
     def get_my_notes(
         max_pages: int = None,
         strict: bool = False,
@@ -256,10 +366,11 @@ class XHSContentMixin:
     def get_note_detail_cached(
         note_id: str, xsec_token: str = "", force_refresh: bool = False
     ) -> dict:
-        """读取笔记详情并缓存到 .cache/note_details.json。
+        """读取笔记详情并缓存到 .cache/note_details.json 和 .cache/notes_md/。
 
         先查本地缓存；命中且未过时时直接返回。未命中或 force_refresh
-        时调用 get_note_detail 读取平台并原子写入缓存（0600权限）。
+        时调用 get_note_detail 读取平台并原子写入JSON缓存（0600权限），
+        同时生成独立 Markdown 文件（0600权限）。
         平台读取失败时不覆盖已有缓存，抛错由调用方决定是否降级。
         """
         from config import CACHE_TTL_MINUTES, NOTE_DETAILS_FILE
@@ -300,6 +411,15 @@ class XHSContentMixin:
                     enriched, changed = enrich_note_with_image_text(entry)
                     if changed:
                         save_detail(enriched)
+                        XHSContentMixin._save_note_markdown(
+                            note_id,
+                            XHSContentMixin._note_to_markdown(enriched),
+                        )
+                    else:
+                        XHSContentMixin._save_note_markdown(
+                            note_id,
+                            XHSContentMixin._note_to_markdown(enriched),
+                        )
                     return enriched
             except (ValueError, TypeError):
                 pass
@@ -311,6 +431,9 @@ class XHSContentMixin:
         detail.setdefault("xsec_token", entry.get("xsec_token", "") or "")
         detail, _changed = enrich_note_with_image_text(detail)
         save_detail(detail)
+        XHSContentMixin._save_note_markdown(
+            note_id, XHSContentMixin._note_to_markdown(detail)
+        )
         return detail
 
     @staticmethod
