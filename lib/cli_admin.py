@@ -60,6 +60,13 @@ def cmd_skipped(args):
     print("💡 清空: python3 main.py skipped --clear")
 
 
+def cmd_delete(args):
+    result = poster.delete_note(args.note_id, confirmed=args.confirmed, dry_run=args.dry_run)
+    print_json(result)
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
 def cmd_post(args):
     payload = {}
     if args.input:

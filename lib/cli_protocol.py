@@ -394,6 +394,10 @@ def cmd_ai_help(args):
                 "调用方必须先取得用户确认；--confirm可启用终端二次询问"
             ),
             "post_dry_run_recommended": True,
+            "post_body_limit_including_topics": 1000,
+            "delete_requires_confirmed": True,
+            "delete_unsupported_action": "客户端手动删除，不假报成功或自动重发文章",
+            "delete_uncertain_action": "先在线核对，不自动重试；本地历史和缓存保留",
             "traditional_send_online_recheck": True,
             "reply_error_types": list(XHSClient.REPLY_ERROR_TYPES),
             "watch_is_manual_foreground_only": True,
@@ -663,6 +667,11 @@ def cmd_ai_help(args):
                 "创建 .cache/workflows/post/note.json",
                 "python3 main.py post --input .cache/workflows/post/note.json --dry-run",
                 "python3 main.py post --input .cache/workflows/post/note.json",
+            ],
+            "delete": [
+                "python3 main.py delete --note-id <id> --dry-run",
+                "用户明确确认后：python3 main.py delete --note-id <id> --confirmed",
+                "unsupported_operation需客户端手动删除；uncertain_delete_state先在线核对，不自动重试",
             ],
             "watch": [
                 "python3 main.py watch（全部新评论，只发现不回复）",

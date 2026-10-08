@@ -26,6 +26,57 @@ class PosterTests(unittest.TestCase):
         self.assertIn("--private", command)
         self.assertEqual(command[-2], image)
 
+    def test_multi_images_have_individual_options_and_json_output(self):
+        with patch("lib.poster.os.path.isfile", return_value=True):
+            command = poster.build_command("标题", "正文", ["a.png", "b.png"])
+        self.assertEqual(command.count("--images"), 2)
+        self.assertIn("--json", command)
+        self.assertEqual(command[-4:], ["--images", "a.png", "--images", "b.png"])
+
+    def test_length_limit_includes_topics(self):
+        with patch("lib.poster.os.path.isfile", return_value=True):
+            with self.assertRaisesRegex(ValueError, "1000"):
+                poster.build_command("标题", "文" * 998, ["a.png"], ["话题"])
+            poster.build_command("标题", "文" * 1000, ["a.png"])
+
+    @patch("lib.poster.subprocess.run")
+    def test_publish_does_not_treat_false_ok_as_success(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout='{"ok":false}', stderr="")
+        with patch("lib.poster.os.path.isfile", return_value=True):
+            self.assertFalse(poster.publish("标题", "正文", ["a.png"]))
+
+    @patch("lib.poster.subprocess.run")
+    def test_delete_requires_valid_target_and_confirmation(self, run):
+        self.assertFalse(poster.delete_note("bad", confirmed=True)["ok"])
+        target = "a" * 24
+        self.assertEqual(poster.delete_note(target)["error_type"], "confirmation_required")
+        self.assertTrue(poster.delete_note(target, dry_run=True)["ok"])
+        run.assert_not_called()
+
+    @patch("lib.poster.subprocess.run")
+    def test_delete_reports_unsupported_and_preserves_history(self, run):
+        run.return_value = subprocess.CompletedProcess([], 1, stdout='{"ok":false,"error":{"code":"unsupported_operation"}}', stderr="")
+        result = poster.delete_note("a" * 24, confirmed=True)
+        self.assertEqual(result["error_type"], "unsupported_operation")
+        self.assertFalse(result["automatic_retry"])
+        self.assertTrue(result["local_history_preserved"])
+        self.assertEqual(run.call_args.args[0], ["xhs", "delete", "a" * 24, "--yes", "--json"])
+
+    @patch("lib.poster.subprocess.run")
+    def test_delete_success_and_unknown_timeout(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout='{"ok":true}', stderr="")
+        self.assertTrue(poster.delete_note("a" * 24, confirmed=True)["deleted"])
+        run.side_effect = subprocess.TimeoutExpired([], 60)
+        self.assertEqual(poster.delete_note("a" * 24, confirmed=True)["error_type"], "uncertain_delete_state")
+
+    @patch("lib.poster.subprocess.run")
+    def test_malformed_platform_response_does_not_claim_success(self, run):
+        for output in ("[]", "null", "not JSON"):
+            run.return_value = subprocess.CompletedProcess([], 0, stdout=output, stderr="")
+            self.assertEqual(poster.delete_note("a" * 24, confirmed=True)["error_type"], "uncertain_delete_state")
+            with patch("lib.poster.os.path.isfile", return_value=True):
+                self.assertFalse(poster.publish("标题", "正文", ["a.png"]))
+
     @patch("lib.poster.subprocess.run")
     def test_publish_dry_run_never_writes_platform(self, run):
         with tempfile.TemporaryDirectory() as temp_dir:

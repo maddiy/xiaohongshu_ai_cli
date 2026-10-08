@@ -16,7 +16,7 @@ python3 main.py ai-help --summary
 JSON校验和全部测试，成功时只输出紧凑摘要。
 
 - 应用版本：`python3 main.py --version`
-- 当前发布版本为`6.15.0`，AI输出协议为schema`30`；运行时以
+- 当前发布版本为`6.16.0`，AI输出协议为schema`31`；运行时以
   `ai-help --summary`为唯一权威来源。
 - 必须检查`ai-help --summary.release_consistency`：文档或隐私检查失败时停止；
   `repository.status`为`working_tree_not_published`、`working_tree_dirty`或
@@ -24,7 +24,11 @@ JSON校验和全部测试，成功时只输出紧凑摘要。
 - 账号ID不写在仓库或`config.py`中；程序首次运行时通过
   `xhs whoami --json`自动识别并仅保存到本地SQLite；无浏览器环境可用
   `XHS_AUTHOR_USER_ID`环境变量覆盖，不得把值写回公开文件。
-- 当前共有16个子命令，没有快捷别名；准确清单以`ai-help --summary`为准。
+- 当前共有17个子命令，没有快捷别名；准确清单以`ai-help --summary`为准。
+- 删除单篇笔记使用`delete --note-id <ID> --dry-run`核对目标；用户明确确认后
+  才使用`--confirmed`。依赖返回`unsupported_operation`时请用户手动删除；
+  `uncertain_delete_state`时先在线核对，不自动重试，也不自动重发文章。
+  本地历史和缓存保留；发布正文含话题最多1000字符，超限拒绝。
 - 需要某条命令的精确参数、副作用和输出时运行
   `python3 main.py ai-help --command <命令>`，不要手工抄写参数表。
 - 需要当前测试名称时运行`python3 main.py ai-help --tests`。它只描述当前

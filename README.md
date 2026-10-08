@@ -1,4 +1,4 @@
-# 小红书AI智能运营系统 v6.15.0
+# 小红书AI智能运营系统 v6.16.0
 
 - 系统名称：`小红书AI智能运营系统`
 
@@ -87,7 +87,7 @@
 | `requirements.txt` | 已验证的`xiaohongshu-cli`安装版本 |
 | `web/` | 本地Web控制台的HTML、CSS和JavaScript |
 
-当前共有16个子命令，没有快捷别名。`schema_version: 30` 表示 AI 输出协议
+当前共有17个子命令，没有快捷别名。`schema_version: 31` 表示 AI 输出协议
 版本，应用版本单独由 `python3 main.py --version` 查看。
 
 拆分后的公共入口保持不变：业务代码继续从`lib.xhs_client`导入
@@ -109,7 +109,21 @@ AI 推荐使用 `ai-reply`，传统 `drafts --batch` 也支持非交互导入，
 必须使用 `input()`。
 
 `COMMAND_NAMES`校验参数解析器中的命令，`main.COMMAND_HANDLERS`单独校验
-实际处理器；两项检查共同保证16个命令没有漏定义或漏分发。
+实际处理器；两项检查共同保证17个命令没有漏定义或漏分发。
+
+删除单篇笔记先核对目标，再明确确认：
+
+```bash
+python3 main.py delete --note-id <笔记ID> --dry-run
+python3 main.py delete --note-id <笔记ID> --confirmed
+```
+
+删除不可撤销。当前xiaohongshu-cli 0.6.4的公开接口可能返回
+`unsupported_operation`，此时需要在客户端手动删除，不能声称成功。
+超时返回`uncertain_delete_state`，必须先核对客户端，不自动重试或重发文章。
+删除命令始终输出JSON，失败退出码为1；保留本地评论、草稿、终态和审计历史。
+Web暂不提供笔记删除。发布正文含话题最多1000字符，超限直接拒绝；
+多图逐张传参，发布只以结构化`ok=true`判定成功，超时不自动重复发布。
 
 需要核对单条命令时运行
 `python3 main.py ai-help --command <命令>`。参数、默认值、副作用和输出约定

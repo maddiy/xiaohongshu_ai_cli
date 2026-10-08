@@ -17,9 +17,13 @@ description: >
 ## 基本规则
 
 1. 在项目根目录运行命令，首先执行 `python3 main.py doctor --json` 检查环境。
-   当前发布为`6.15.0`、AI协议schema为`30`；以`ai-help --summary`运行时输出为准。
+   当前发布为`6.16.0`、AI协议schema为`31`；以`ai-help --summary`运行时输出为准。
 2. 查询、扫描和预览等只读操作可以直接执行。
 3. 发送回复或发布笔记前必须先预览。
+   发布正文含话题最多1000字符，多图逐张传参；超时先在线核对，不自动重发。
+   删除使用`delete --note-id <ID> --dry-run`核对单篇目标，取得用户明确确认后
+   添加`--confirmed`。当前依赖可能返回`unsupported_operation`，需手动删除；
+   `uncertain_delete_state`禁止自动重试。保留本地历史和缓存，Web不提供删除。
 4. 除非用户明确要求自动发送，否则先展示草稿并等待确认。
 5. AI 和脚本应优先使用 `--json` 与 `--output`，不要解析表格或 emoji。
 6. 用户只要求查看评论时使用 `comments`；只有要求回复时才使用 `scan`。

@@ -25,6 +25,7 @@ COMMAND_NAMES = (
     "send",
     "reply",
     "post",
+    "delete",
     "analyze",
     "skipped",
     "doctor",
@@ -36,6 +37,11 @@ COMMAND_NAMES = (
 )
 
 COMMAND_EFFECTS = {
+    "delete": {
+        "platform": "删除指定笔记，必须--confirmed；--dry-run不访问平台；依赖可能返回unsupported_operation",
+        "local": "保留评论、草稿、终态及审计历史，不自动清空本地缓存",
+        "output": "单一JSON；失败退出码1；未知结果禁止自动重试",
+    },
     "login": {
         "platform": "认证",
         "local": "更新 xiaohongshu-cli 的本地认证状态",
@@ -320,6 +326,10 @@ def build_parser():
     post.add_argument("--topics", help="话题标签，逗号分隔")
     post.add_argument("--private", action="store_true", help="私密发布")
     post.add_argument("--dry-run", action="store_true", help="只校验和预览")
+    delete = subparsers.add_parser("delete", help="删除单篇笔记（依赖接口可能不支持）")
+    delete.add_argument("--note-id", required=True, help="待删除的完整笔记ID")
+    delete.add_argument("--dry-run", action="store_true", help="只预览删除目标，不访问平台")
+    delete.add_argument("--confirmed", action="store_true", help="用户明确确认删除后使用")
 
     doctor = subparsers.add_parser("doctor", help="检查本地环境与配置（不联网）")
     doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")

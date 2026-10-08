@@ -19,14 +19,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(set(subparsers.choices), set(COMMAND_NAMES))
         self.assertEqual(set(main.COMMAND_HANDLERS), set(COMMAND_NAMES))
         self.assertEqual(set(COMMAND_EFFECTS), set(COMMAND_NAMES))
-        self.assertEqual(len(COMMAND_NAMES), 16)
+        self.assertEqual(len(COMMAND_NAMES), 17)
 
     def test_ai_help_reports_authoritative_program_facts(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             main.cmd_ai_help(argparse.Namespace())
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["command_count"], 16)
+        self.assertEqual(payload["command_count"], 17)
         self.assertEqual(payload["commands"], list(COMMAND_NAMES))
         self.assertEqual(payload["app_name"], "小红书AI智能运营系统")
         self.assertEqual(payload["system_name"], "小红书AI智能运营系统")

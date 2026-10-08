@@ -38,6 +38,7 @@ from lib.cli_admin import (
     cmd_doctor,
     cmd_paths,
     cmd_post,
+    cmd_delete,
     cmd_skipped,
 )
 from lib.cli_ai import cmd_ai_reply
@@ -527,6 +528,7 @@ COMMAND_HANDLERS = {
     "send": cmd_send,
     "reply": cmd_reply,
     "post": cmd_post,
+    "delete": cmd_delete,
     "skipped": cmd_skipped,
     "analyze": cmd_analyze,
     "doctor": cmd_doctor,

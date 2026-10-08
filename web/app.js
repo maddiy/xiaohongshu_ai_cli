@@ -1289,7 +1289,6 @@ function restoreReplyView(
 async function sendSingleDraftByIndex(
   index, noteId, commentId, reply, button
 ) {
-  if (!confirm(`确定要发送 #${index + 1} 的回复草稿吗？\n\n用户：从草稿列表查看\n回复：${reply.substring(0, 80)}`)) return;
   setBusy(button, true, "发送中…");
   try {
     const result = await api("/api/reply/send", {
@@ -1307,7 +1306,6 @@ async function sendSingleDraftByIndex(
 
 /* 删除单条草稿 */
 async function deleteSingleDraft(noteId, commentId, nickname, button) {
-  if (!confirm(`确定要删除「${nickname}」的回复草稿吗？\n\n此操作不可撤销，将从草稿列表中移除此条目。`)) return;
   setBusy(button, true, "删除中…");
   try {
     const result = await api("/api/drafts/delete", {
@@ -1347,7 +1345,6 @@ async function deleteAllDrafts() {
 
 /* 全部发送 */
 async function sendAllDrafts() {
-  if (!confirm("确定要发送页面上所有待发送草稿吗？已排除或发送中的条目会被跳过。")) return;
   const btn = $("#sendAllDrafts");
   setBusy(btn, true, "发送中…");
   try {
